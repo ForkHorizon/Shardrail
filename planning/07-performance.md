@@ -1,0 +1,46 @@
+# 07 — Performance and Resource Budgets
+
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. **Every number here is a proposed acceptance budget, not a measurement.** Nothing has been measured yet.
+
+## 1. Where the cost is
+
+Memory is dominated by the WebView and the provider processes (Codex native binary and possibly its npm wrapper, Python for Hermes, Node + CLI per Claude session, Grok's binary). The daemon language matters less than not embedding Chromium and not keeping extra processes "just in case". Therefore: no Electron, no shared provider process until a spike allows it, no Hermes browser tools set up by Shardrail, and provider memory always reported in its own column, never hidden in the daemon budget. Model network latency is outside Shardrail's budgets.
+
+## 2. Budgets
+
+Reference machine: an Apple Silicon Mac with 16 GB that Fork Horizon names explicitly (U1).
+
+| ID | Budget | Scope | How measured |
+| --- | --- | --- | --- |
+| B1 | daemon RSS idle ≤ 40 MB after 60 s | `shardraild`, 0 sessions | process sample |
+| B2 | ≤ 15 MB per idle session projection in the daemon | daemon only | RSS difference |
+| B3 | ≤ 180 MB idle | **total physical footprint** of the app plus all `com.apple.WebKit.*` helper processes, empty transcript | `footprint` / Activity Monitor over the process tree |
+| B4 | p95 ≤ 50 ms from daemon receipt of an event to the painted frame | local, 1 active session | spans in daemon + frame mark; one host clock calibrated by round trip |
+| B5 | composer input fits a 16 ms frame with an empty turn | UI | input trace |
+| B6 | cold start to ready window ≤ 1.5 s | shell + daemon listening | timestamps, no provider login |
+| B7 | session list visible ≤ 1 s after `kill -9` | daemon + SQLite | integration test |
+| B8 | over 8 h, daemon RSS ≤ 1.3× its 10-minute value (1 active + 2 idle sessions); 72 h soak: same, WAL ≤ 64 MiB, WebView footprint ≤ B3 + 150 MB | daemon, WebView | soak harness; provider leaks reported separately |
+| B9 | no Shardrail-owned timer more frequent than 15 s at rest | daemon and UI code | code review + failing test on forbidden intervals |
+| B10 | batch write ≤ 50 ms | SQLite single writer | bench on reference machine |
+| B11 | idle wakeups ≤ 1/s average for the whole process tree incl. WebKit; CPU ≈ 0 %; energy impact "Low" | app + daemon | `powermetrics`, Activity Monitor |
+| B12 | per-client outbound queue ≤ 8 MiB; overflow → resync, never growth | gateway | stalled-client test |
+| B13 | first visible page of a 50 000-event session ≤ 300 ms (warm DB) | daemon + UI | fixture DB |
+| B14 | approval round trip (tap → provider receives response) ≤ 100 ms local | daemon | `approval.respond` span |
+| B15 | durable bytes written per turn ≤ 3× completed item content; retained ≤ 2× | journal | statistics on recorded sessions |
+| B16 | Git status ≤ 1 computation in flight per worktree; ≤ 1 s for 100k tracked files | workspace service | fixture repo |
+| — | transcript of 5 000 events scrolls without WebView growth > 80 MB above B3 | UI | S5 |
+
+If the WebView alone exceeds B3 on the reference machine, the budget is revised **together with the measurement** and a decision on the shell; it is never raised silently. (B3 originally measured only the shell process, which would have hidden the WebKit helper processes.)
+
+## 3. Measurement rules
+
+- Report physical footprint per process tree, with separate columns for daemon, shell + WebKit, Git worker, macOS containment helper, and each provider; record provider versions.
+- No budget closes without a stored trace.
+- Phase 1a gates on B1, B4, B7; the rest at Phase 1 close; B8 72 h soak in Phase 2.
+
+## 4. Design rules that keep budgets reachable
+
+- Daemon-side coalescing of deltas per item to the frame interval; per-client bounded queues (04 §2).
+- UI: virtualized transcript (no tens of thousands of DOM nodes); tool cards updated in place; incremental Markdown parsing (only the open tail block re-parsed — re-parsing a whole message per delta is quadratic); code highlighting deferred until a block closes and is visible.
+- Files and Git: no timer-driven status. FSEvents/inotify with 200 ms debounce plus a refresh button; watch only expanded directories and Git metadata; respect Linux inotify limits and fall back to manual refresh with a visible notice; tree loads one level at a time; status coalesced to one computation in flight per worktree, showing "stale since T" instead of blocking.
+- Timers are armed only while data flows; presence and keepalive are event-driven or ≥ 15 s.
