@@ -18,6 +18,7 @@ pub struct Journal(Connection);
 
 impl Journal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        reject_non_regular_path(path.as_ref())?;
         set_private_file_mode(path.as_ref())?;
         let connection = Connection::open(path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -37,6 +38,7 @@ impl Journal {
                 approval_id TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
                 decision TEXT,
+                terminal_state TEXT,
                 option_id TEXT,
                 responder TEXT,
                 responded_at_ms INTEGER
@@ -50,6 +52,7 @@ impl Journal {
              CREATE TRIGGER IF NOT EXISTS approval_events_no_update BEFORE UPDATE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;
              CREATE TRIGGER IF NOT EXISTS approval_events_no_delete BEFORE DELETE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;",
         )?;
+        ensure_terminal_state_column(&connection)?;
         Ok(Self(connection))
     }
 
@@ -114,6 +117,26 @@ impl Journal {
         &mut self,
         response: &ApprovalResponding,
     ) -> Result<(), JournalError> {
+        let terminal = match response.decision {
+            ApprovalDecision::Allow => "allowed",
+            ApprovalDecision::Deny => "denied",
+            ApprovalDecision::Cancel => "denied",
+        };
+        self.begin_approval_response_with_terminal(response, terminal)
+    }
+
+    pub fn begin_expired_approval_response(
+        &mut self,
+        response: &ApprovalResponding,
+    ) -> Result<(), JournalError> {
+        self.begin_approval_response_with_terminal(response, "expired")
+    }
+
+    fn begin_approval_response_with_terminal(
+        &mut self,
+        response: &ApprovalResponding,
+        terminal: &str,
+    ) -> Result<(), JournalError> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -128,8 +151,8 @@ impl Journal {
             return Err(JournalError::AlreadyResponded);
         }
         tx.execute(
-            "UPDATE approvals SET state='responding',decision=?2,option_id=?3,responder=?4,responded_at_ms=?5 WHERE approval_id=?1 AND state='pending'",
-            params![response.approval_id.to_string(), serde_json::to_string(&response.decision).expect("enum serialization"), response.option_id, response.responder, response.responded_at_ms],
+            "UPDATE approvals SET state='responding',decision=?2,terminal_state=?3,option_id=?4,responder=?5,responded_at_ms=?6 WHERE approval_id=?1 AND state='pending'",
+            params![response.approval_id.to_string(), serde_json::to_string(&response.decision).expect("enum serialization"), terminal, response.option_id, response.responder, response.responded_at_ms],
         )?;
         tx.execute(
             "INSERT INTO approval_events(approval_id,kind,data) VALUES (?1,'approval_responding',?2)",
@@ -213,16 +236,11 @@ impl Journal {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let decision: String = tx.query_row(
-            "SELECT decision FROM approvals WHERE approval_id=?1 AND state='responded_unacked'",
+        let terminal: String = tx.query_row(
+            "SELECT terminal_state FROM approvals WHERE approval_id=?1 AND state='responded_unacked'",
             [approval_id.to_string()],
             |row| row.get(0),
         )?;
-        let terminal = if decision == "\"allow\"" {
-            "allowed"
-        } else {
-            "denied"
-        };
         tx.execute(
             "UPDATE approvals SET state=?2 WHERE approval_id=?1 AND state='responded_unacked'",
             params![approval_id.to_string(), terminal],
@@ -230,6 +248,25 @@ impl Journal {
         tx.execute(
             "INSERT INTO approval_events(approval_id,kind,data) VALUES (?1,?2,'{}')",
             params![approval_id.to_string(), terminal],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reject_approval_response(&mut self, approval_id: Uuid) -> Result<(), JournalError> {
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE approvals SET state='withdrawn' WHERE approval_id=?1 AND state='responded_unacked'",
+            [approval_id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(JournalError::AlreadyResponded);
+        }
+        tx.execute(
+            "INSERT INTO approval_events(approval_id,kind,data) VALUES (?1,'approval_withdrawn','{\"reason\":\"rejected_by_provider\"}')",
+            [approval_id.to_string()],
         )?;
         tx.commit()?;
         Ok(())
@@ -271,6 +308,32 @@ impl Journal {
     }
 }
 
+fn ensure_terminal_state_column(connection: &Connection) -> Result<(), JournalError> {
+    let mut statement = connection.prepare("PRAGMA table_info(approvals)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "terminal_state") {
+        connection.execute("ALTER TABLE approvals ADD COLUMN terminal_state TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn reject_non_regular_path(path: &Path) -> Result<(), JournalError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "journal path must be a regular file, not a symlink",
+            )
+            .into())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(unix)]
 fn set_private_file_mode(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -308,6 +371,35 @@ pub fn decision_label(decision: &ApprovalDecision) -> &'static str {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn open_adds_terminal_outcome_column_to_existing_journal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    decision TEXT,
+                    option_id TEXT,
+                    responder TEXT,
+                    responded_at_ms INTEGER
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+        let journal = Journal::open(&path).unwrap();
+        let mut statement = journal.0.prepare("PRAGMA table_info(approvals)").unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let has_column = columns.iter().any(|name| name == "terminal_state");
+        assert!(has_column);
+    }
 
     #[test]
     fn crash_after_provider_send_before_ack_recovers_as_unconfirmed() {
