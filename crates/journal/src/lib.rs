@@ -35,22 +35,29 @@ static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
 impl Journal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let path = path.as_ref();
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let name = path.file_name().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "journal path has no filename",
-            )
-        })?;
-        let path = parent.canonicalize()?.join(name);
-        reject_non_regular_path(&path)?;
-        set_private_file_mode(&path)?;
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        let connection = if path == Path::new(":memory:") {
+            Connection::open_in_memory()?
+        } else {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let name = path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "journal path has no filename",
+                )
+            })?;
+            let path = parent.canonicalize()?.join(name);
+            reject_non_regular_path(&path)?;
+            set_private_file_mode(&path)?;
+            Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )?
+        };
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(
@@ -174,7 +181,8 @@ impl Journal {
         let monotonic_ns = MONOTONIC_ORIGIN
             .get_or_init(Instant::now)
             .elapsed()
-            .as_nanos();
+            .as_nanos()
+            .max(1);
         let wall_clock_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_millis() as i64);
@@ -1378,6 +1386,21 @@ mod tests {
         let (monotonic_ns, wall_clock_ms) = journal.event_receipt(cursor).unwrap().unwrap();
         assert!(wall_clock_ms > 0);
         assert!(monotonic_ns > 0);
+    }
+
+    #[test]
+    fn open_supports_in_memory_and_bare_relative_paths() {
+        let memory = Journal::open(":memory:").unwrap();
+        assert!(!memory.journal_epoch().unwrap().is_nil());
+        drop(memory);
+
+        let relative = format!("journal-{}.db", Uuid::now_v7());
+        let journal = Journal::open(&relative).unwrap();
+        assert!(!journal.journal_epoch().unwrap().is_nil());
+        drop(journal);
+        std::fs::remove_file(&relative).unwrap();
+        std::fs::remove_file(format!("{relative}-wal")).ok();
+        std::fs::remove_file(format!("{relative}-shm")).ok();
     }
 
     #[test]
