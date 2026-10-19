@@ -681,6 +681,12 @@ fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
                 let secret = lower.contains("authorization:")
                     || lower.contains("bearer ")
                     || lower.contains("sk-live-")
+                    || lower.contains("sk-ant-")
+                    || lower.contains("ghp_")
+                    || lower.contains("github_pat_")
+                    || lower.contains("xoxb-")
+                    || lower.contains("xoxp-")
+                    || text.contains("AKIA")
                     || lower.contains("api_key=")
                     || lower.contains("api-key:");
                 if secret {
@@ -695,9 +701,27 @@ fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
             }
             serde_json::Value::Object(values) => {
                 for (key, value) in values {
+                    let normalized_key = key
+                        .chars()
+                        .filter(|character| character.is_ascii_alphanumeric())
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>();
                     if matches!(
-                        key.to_ascii_lowercase().as_str(),
-                        "authorization" | "api_key" | "api-key" | "token" | "secret"
+                        normalized_key.as_str(),
+                        "authorization"
+                            | "apikey"
+                            | "token"
+                            | "secret"
+                            | "password"
+                            | "passwd"
+                            | "cookie"
+                            | "setcookie"
+                            | "auth"
+                            | "credential"
+                            | "credentials"
+                            | "privatekey"
+                            | "accesskey"
+                            | "clientsecret"
                     ) {
                         if !value.is_null() {
                             *value = serde_json::Value::String("[REDACTED]".into());
@@ -1174,6 +1198,22 @@ mod tests {
         assert!(!stored.payload.to_string().contains(secret));
         assert_eq!(stored.payload["text"], "[REDACTED]");
         assert_eq!(stored.redaction_flags, ["redacted"]);
+    }
+
+    #[test]
+    fn common_credential_fields_and_token_prefixes_are_redacted() {
+        let (payload, redacted) = redact_value(serde_json::json!({
+            "cookie": "session=private-value",
+            "password": "hunter2",
+            "nested": {"client_secret": "private-value"},
+            "output": "GitHub token ghp_example-private-token",
+        }));
+
+        assert!(redacted);
+        assert_eq!(payload["cookie"], "[REDACTED]");
+        assert_eq!(payload["password"], "[REDACTED]");
+        assert_eq!(payload["nested"]["client_secret"], "[REDACTED]");
+        assert_eq!(payload["output"], "[REDACTED]");
     }
 
     #[test]
