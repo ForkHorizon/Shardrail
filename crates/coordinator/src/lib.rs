@@ -305,9 +305,8 @@ impl Coordinator {
                 || Ok(()),
             )?;
         }
-        let terminal = cancel_turn;
         let response_result =
-            self.write_response(approval, candidate, response, terminal, response_effect);
+            self.write_response(approval, candidate, response, true, response_effect);
         if cancel_turn && let Err(error) = cancel_turn_effect() {
             self.record_provider_effect_unknown(request.now_ms);
             return Err(error.into());

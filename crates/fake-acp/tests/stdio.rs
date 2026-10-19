@@ -214,6 +214,10 @@ fn approval_path(option_id: &str, timeout: bool) {
     }
     agent.finish_prompt(option_id);
     coordinator.acknowledge_approval(approval_id).unwrap();
+    assert_eq!(
+        coordinator.approval_state(approval_id).unwrap().as_deref(),
+        Some(if timeout { "expired" } else { "denied" })
+    );
 }
 
 #[test]
