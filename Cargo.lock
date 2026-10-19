@@ -587,6 +587,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shardrail-protocol",
+ "shardrail-session-core",
  "tempfile",
  "thiserror",
  "uuid",

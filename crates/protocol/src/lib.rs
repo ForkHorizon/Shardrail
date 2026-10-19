@@ -2,6 +2,21 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionClass {
+    Once,
+    Widening,
+    BoundaryBreaking,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientScope {
+    Full,
+    Limited,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -36,10 +51,15 @@ pub enum SessionLifecycle {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct DurableEvent {
     pub event_id: i64,
+    pub journal_epoch: Uuid,
+    pub host_id: Uuid,
     pub session_id: Uuid,
     pub schema_version: u32,
     pub kind: String,
     pub occurred_at_ms: i64,
+    pub provider_ref: Option<String>,
+    pub causation: Option<String>,
+    pub redaction_flags: Vec<String>,
     pub payload: serde_json::Value,
 }
 
@@ -50,6 +70,8 @@ pub struct ApprovalResponding {
     pub option_id: Option<String>,
     pub responder: String,
     pub responded_at_ms: i64,
+    pub option_class: OptionClass,
+    pub client_scope: ClientScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -58,4 +80,6 @@ pub struct ContractSchema {
     pub approval_response: ApprovalResponding,
     pub approval_state: ApprovalState,
     pub session_lifecycle: SessionLifecycle,
+    pub option_class: OptionClass,
+    pub client_scope: ClientScope,
 }

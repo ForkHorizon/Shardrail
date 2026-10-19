@@ -9,8 +9,14 @@
     "approval_state": {
       "$ref": "#/$defs/ApprovalState"
     },
+    "client_scope": {
+      "$ref": "#/$defs/ClientScope"
+    },
     "event": {
       "$ref": "#/$defs/DurableEvent"
+    },
+    "option_class": {
+      "$ref": "#/$defs/OptionClass"
     },
     "session_lifecycle": {
       "$ref": "#/$defs/SessionLifecycle"
@@ -20,7 +26,9 @@
     "event",
     "approval_response",
     "approval_state",
-    "session_lifecycle"
+    "session_lifecycle",
+    "option_class",
+    "client_scope"
   ],
   "$defs": {
     "ApprovalDecision": {
@@ -38,8 +46,14 @@
           "type": "string",
           "format": "uuid"
         },
+        "client_scope": {
+          "$ref": "#/$defs/ClientScope"
+        },
         "decision": {
           "$ref": "#/$defs/ApprovalDecision"
+        },
+        "option_class": {
+          "$ref": "#/$defs/OptionClass"
         },
         "option_id": {
           "type": [
@@ -59,7 +73,9 @@
         "approval_id",
         "decision",
         "responder",
-        "responded_at_ms"
+        "responded_at_ms",
+        "option_class",
+        "client_scope"
       ]
     },
     "ApprovalState": {
@@ -75,12 +91,33 @@
         "delivered_unconfirmed"
       ]
     },
+    "ClientScope": {
+      "type": "string",
+      "enum": [
+        "full",
+        "limited"
+      ]
+    },
     "DurableEvent": {
       "type": "object",
       "properties": {
+        "causation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "event_id": {
           "type": "integer",
           "format": "int64"
+        },
+        "host_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "journal_epoch": {
+          "type": "string",
+          "format": "uuid"
         },
         "kind": {
           "type": "string"
@@ -90,6 +127,18 @@
           "format": "int64"
         },
         "payload": true,
+        "provider_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "redaction_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "schema_version": {
           "type": "integer",
           "format": "uint32",
@@ -102,11 +151,22 @@
       },
       "required": [
         "event_id",
+        "journal_epoch",
+        "host_id",
         "session_id",
         "schema_version",
         "kind",
         "occurred_at_ms",
+        "redaction_flags",
         "payload"
+      ]
+    },
+    "OptionClass": {
+      "type": "string",
+      "enum": [
+        "once",
+        "widening",
+        "boundary_breaking"
       ]
     },
     "SessionLifecycle": {

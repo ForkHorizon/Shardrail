@@ -7,13 +7,15 @@ pub const APPROVAL_DENY_AFTER: Duration = Duration::from_secs(180);
 pub const APPROVAL_MAX_HOLD: Duration = Duration::from_secs(2 * 60 * 60);
 pub const APPROVAL_RECONFIRM_AFTER: Duration = Duration::from_secs(15 * 60);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Approval {
     pub id: Uuid,
+    pub session_id: Uuid,
     pub state: ApprovalState,
     pub created_at_ms: i64,
     pub confirmed_at_ms: i64,
     pub needs_reconfirmation: bool,
+    pub held: bool,
     pub decision: Option<ApprovalDecision>,
 }
 
@@ -21,10 +23,12 @@ impl Approval {
     pub fn new(created_at_ms: i64) -> Self {
         Self {
             id: Uuid::now_v7(),
+            session_id: Uuid::nil(),
             state: ApprovalState::Pending,
             created_at_ms,
             confirmed_at_ms: created_at_ms,
             needs_reconfirmation: false,
+            held: false,
             decision: None,
         }
     }
@@ -35,14 +39,11 @@ impl Approval {
         authorized: bool,
         now_ms: i64,
         provider_limit_secs: Option<u64>,
-        held: bool,
     ) -> bool {
-        if self
-            .expire_if_due(now_ms, provider_limit_secs, held)
-            .is_some()
-        {
+        if self.expire_if_due(now_ms, provider_limit_secs).is_some() {
             return false;
         }
+        self.mark_stale(now_ms);
         if self.state != ApprovalState::Pending
             || !authorized
             || (self.needs_reconfirmation && decision == ApprovalDecision::Allow)
@@ -72,9 +73,8 @@ impl Approval {
         &mut self,
         now_ms: i64,
         provider_limit_secs: Option<u64>,
-        held: bool,
     ) -> Option<ApprovalDecision> {
-        let (start, limit) = if held {
+        let (start, limit) = if self.held {
             (
                 self.created_at_ms,
                 Duration::from_secs(
@@ -116,6 +116,9 @@ impl Approval {
             self.needs_reconfirmation = true;
         }
     }
+    pub fn set_held(&mut self, held: bool) {
+        self.held = held;
+    }
     pub fn provider_limit_secs(&self, limit_secs: Option<u64>) -> Duration {
         Duration::from_secs(limit_secs.map_or(APPROVAL_DENY_AFTER.as_secs(), |limit| {
             limit.min(APPROVAL_DENY_AFTER.as_secs())
@@ -131,7 +134,7 @@ pub fn respond_write_ahead<E>(
     write_provider()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TurnOutcome {
     Provider,
     Interrupted,
@@ -171,6 +174,8 @@ pub struct Session {
     pub turn: TurnState,
     pub process: ProcessState,
     pub queue: QueueState,
+    #[serde(default)]
+    pub last_turn_outcome: Option<TurnOutcome>,
     #[serde(skip, default = "journal_available_default")]
     pub journal_available: bool,
 }
@@ -186,6 +191,7 @@ impl Default for Session {
             turn: TurnState::Idle,
             process: ProcessState::Exited,
             queue: QueueState::Empty,
+            last_turn_outcome: None,
             journal_available: true,
         }
     }
@@ -207,6 +213,7 @@ impl Session {
     }
     pub fn turn_finished(&mut self, outcome: TurnOutcome, dispatch_guard: bool) -> Option<String> {
         self.turn = TurnState::Idle;
+        self.last_turn_outcome = Some(outcome);
         match (&self.queue, outcome, dispatch_guard, self.journal_available) {
             (QueueState::Queued(text), TurnOutcome::Provider, true, true) => {
                 let text = text.clone();
@@ -248,6 +255,10 @@ impl Session {
     }
     pub fn process_exited(&mut self) {
         self.process = ProcessState::Exited;
+        if self.turn != TurnState::Idle {
+            self.turn = TurnState::Idle;
+            self.last_turn_outcome = Some(TurnOutcome::Interrupted);
+        }
         if self.lifecycle == SessionLifecycle::Closing {
             self.lifecycle = SessionLifecycle::Closed;
         }
@@ -279,7 +290,7 @@ mod tests {
         let mut approval = Approval::new(0);
         assert_eq!(approval.decision, None);
         assert_eq!(approval.timeout(), Some(ApprovalDecision::Deny));
-        assert!(!approval.respond(ApprovalDecision::Allow, true, 1, None, false));
+        assert!(!approval.respond(ApprovalDecision::Allow, true, 1, None));
         assert_eq!(
             approval.provider_limit_secs(Some(10)),
             Duration::from_secs(10)
@@ -289,24 +300,24 @@ mod tests {
         disconnected.disconnect();
         assert_eq!(disconnected.state, ApprovalState::Pending);
         assert_eq!(disconnected.decision, None);
-        assert!(disconnected.respond(ApprovalDecision::Allow, true, 1, None, false));
+        assert!(disconnected.respond(ApprovalDecision::Allow, true, 1, None));
     }
 
     #[test]
     fn stale_or_changed_workspace_requires_reconfirmation() {
         let mut approval = Approval::new(0);
         approval.mark_stale(APPROVAL_RECONFIRM_AFTER.as_millis() as i64);
-        assert!(!approval.respond(ApprovalDecision::Allow, true, 1, None, false));
+        assert!(!approval.respond(ApprovalDecision::Allow, true, 1, None));
         let mut changed = Approval::new(0);
         changed.workspace_changed();
-        assert!(!changed.respond(ApprovalDecision::Allow, true, 1, None, false));
+        assert!(!changed.respond(ApprovalDecision::Allow, true, 1, None));
         assert!(changed.reconfirm(true, true, 2));
-        assert!(changed.respond(ApprovalDecision::Allow, true, 3, None, false));
+        assert!(changed.respond(ApprovalDecision::Allow, true, 3, None));
 
         let mut provider_limited = Approval::new(0);
         provider_limited.workspace_changed();
         assert!(provider_limited.reconfirm(true, true, 9_000));
-        assert!(!provider_limited.respond(ApprovalDecision::Allow, true, 10_000, Some(10), false));
+        assert!(!provider_limited.respond(ApprovalDecision::Allow, true, 10_000, Some(10)));
         assert_eq!(provider_limited.state, ApprovalState::Expired);
         assert_eq!(provider_limited.decision, Some(ApprovalDecision::Deny));
     }
@@ -314,26 +325,27 @@ mod tests {
     #[test]
     fn approval_responses_expire_atomically_at_the_deadline() {
         let mut provider_limited = Approval::new(0);
-        assert!(!provider_limited.respond(ApprovalDecision::Allow, true, 10_000, Some(10), false));
+        assert!(!provider_limited.respond(ApprovalDecision::Allow, true, 10_000, Some(10)));
         assert_eq!(provider_limited.state, ApprovalState::Expired);
         assert_eq!(provider_limited.decision, Some(ApprovalDecision::Deny));
 
         let mut default_limit = Approval::new(0);
-        assert!(!default_limit.respond(ApprovalDecision::Allow, true, 180_001, None, false));
+        assert!(!default_limit.respond(ApprovalDecision::Allow, true, 180_001, None));
         assert_eq!(default_limit.state, ApprovalState::Expired);
         assert_eq!(default_limit.decision, Some(ApprovalDecision::Deny));
 
         let mut held_with_provider_limit = Approval::new(0);
+        held_with_provider_limit.set_held(true);
         assert!(held_with_provider_limit.respond(
             ApprovalDecision::Allow,
             true,
             180_001,
-            Some(3_600),
-            true
+            Some(3_600)
         ));
 
         let mut held = Approval::new(0);
-        assert!(!held.respond(ApprovalDecision::Allow, true, 3_600_000, Some(3600), true));
+        held.set_held(true);
+        assert!(!held.respond(ApprovalDecision::Allow, true, 3_600_000, Some(3600)));
         assert_eq!(held.decision, Some(ApprovalDecision::Deny));
     }
 
@@ -356,21 +368,23 @@ mod tests {
     #[test]
     fn approval_expires_at_the_provider_limit_or_two_hour_hold_limit() {
         let mut prompt = Approval::new(0);
-        assert_eq!(prompt.expire_if_due(9_999, Some(10), false), None);
+        assert_eq!(prompt.expire_if_due(9_999, Some(10)), None);
         assert_eq!(
-            prompt.expire_if_due(10_000, Some(10), false),
+            prompt.expire_if_due(10_000, Some(10)),
             Some(ApprovalDecision::Deny)
         );
         let mut held = Approval::new(0);
-        assert_eq!(held.expire_if_due(180_000, Some(3_600), true), None);
+        held.set_held(true);
+        assert_eq!(held.expire_if_due(180_000, Some(3_600)), None);
         assert_eq!(
-            held.expire_if_due(3_600_000, Some(3_600), true),
+            held.expire_if_due(3_600_000, Some(3_600)),
             Some(ApprovalDecision::Deny)
         );
 
         let mut unknown_provider = Approval::new(0);
+        unknown_provider.set_held(true);
         assert_eq!(
-            unknown_provider.expire_if_due(7_200_000, None, true),
+            unknown_provider.expire_if_due(7_200_000, None),
             Some(ApprovalDecision::Deny)
         );
     }

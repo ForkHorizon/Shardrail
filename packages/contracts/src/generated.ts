@@ -5,7 +5,9 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
+export type ClientScope = "full" | "limited";
 export type ApprovalDecision = "allow" | "deny" | "cancel";
+export type OptionClass = "once" | "widening" | "boundary_breaking";
 export type ApprovalState =
   | "pending"
   | "responding"
@@ -20,23 +22,32 @@ export type SessionLifecycle = "open" | "closing" | "closed" | "purging" | "purg
 export interface ContractSchema {
   approval_response: ApprovalResponding;
   approval_state: ApprovalState;
+  client_scope: ClientScope;
   event: DurableEvent;
+  option_class: OptionClass;
   session_lifecycle: SessionLifecycle;
   [k: string]: unknown;
 }
 export interface ApprovalResponding {
   approval_id: string;
+  client_scope: ClientScope;
   decision: ApprovalDecision;
+  option_class: OptionClass;
   option_id?: string | null;
   responded_at_ms: number;
   responder: string;
   [k: string]: unknown;
 }
 export interface DurableEvent {
+  causation?: string | null;
   event_id: number;
+  host_id: string;
+  journal_epoch: string;
   kind: string;
   occurred_at_ms: number;
   payload: unknown;
+  provider_ref?: string | null;
+  redaction_flags: string[];
   schema_version: number;
   session_id: string;
   [k: string]: unknown;

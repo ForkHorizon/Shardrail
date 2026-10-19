@@ -21,6 +21,9 @@ fn main() -> io::Result<()> {
         };
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+        if method == "session/cancel" {
+            return Ok(());
+        }
         let response = match method {
             "initialize" => Some(reply(
                 id,

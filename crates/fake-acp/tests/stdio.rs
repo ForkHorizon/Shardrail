@@ -10,6 +10,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use tempfile::tempdir;
 use uuid::Uuid;
 
+#[derive(Debug)]
 struct Agent {
     child: Child,
     input: ChildStdin,
@@ -76,6 +77,11 @@ impl Agent {
         self.input.flush().unwrap();
     }
 
+    fn send_cancel(&mut self) {
+        writeln!(self.input, "{}", json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"fake-session-1"}})).unwrap();
+        self.input.flush().unwrap();
+    }
+
     fn finish_prompt(mut self, expected_option: &str) {
         let outcome = self.read();
         assert_eq!(
@@ -119,9 +125,10 @@ fn happy_path_commits_session_transition_and_approval_before_provider_effect() {
                 authorized: true,
                 now_ms: 12,
                 provider_limit_secs: None,
-                held: false,
                 option_id: Some("allow_once".into()),
                 responder: "local-client",
+                option_class: shardrail_protocol::OptionClass::Once,
+                client_scope: shardrail_protocol::ClientScope::Full,
             },
             |decision, option| {
                 let journal = Journal::open(&journal_path).unwrap();
@@ -146,7 +153,13 @@ fn happy_path_commits_session_transition_and_approval_before_provider_effect() {
             .iter()
             .map(|event| event.kind.as_str())
             .collect::<Vec<_>>(),
-        ["turn_started"]
+        [
+            "turn_started",
+            "approval_pending",
+            "approval_responding",
+            "approval_responded_unacked",
+            "allowed"
+        ]
     );
     assert_eq!(
         Journal::open(&journal_path)
@@ -173,6 +186,9 @@ fn approval_path(option_id: &str, timeout: bool) {
     let mut agent = Agent::start();
     let journal_path = dir.path().join("journal.db");
     let (mut coordinator, _) = open_coordinator(&journal_path);
+    coordinator
+        .transition(0, "turn_started", json!({}), || Ok(()))
+        .unwrap();
     let mut approval = Approval::new(1_000);
     let approval_id = approval.id;
     coordinator.create_approval(approval.clone()).unwrap();
@@ -188,7 +204,6 @@ fn approval_path(option_id: &str, timeout: bool) {
                 ApprovalTimeoutRequest {
                     now_ms: 181_000,
                     provider_limit_secs: None,
-                    held: false,
                     option_id: Some(option_id.into()),
                 },
                 send,
@@ -204,9 +219,10 @@ fn approval_path(option_id: &str, timeout: bool) {
                     authorized: true,
                     now_ms: 1_001,
                     provider_limit_secs: None,
-                    held: false,
                     option_id: Some(option_id.into()),
                     responder: "local-client",
+                    option_class: shardrail_protocol::OptionClass::Once,
+                    client_scope: shardrail_protocol::ClientScope::Full,
                 },
                 send,
             )
@@ -221,9 +237,9 @@ fn approval_path(option_id: &str, timeout: bool) {
 }
 
 #[test]
-fn journal_failure_mid_session_fails_closed_without_sending_anything() {
+fn journal_failure_mid_session_rejects_pending_approval_and_cancels_turn() {
     let dir = tempdir().unwrap();
-    let mut agent = Agent::start();
+    let agent = std::sync::Arc::new(std::sync::Mutex::new(Agent::start()));
     let journal_path = dir.path().join("journal.db");
     let id = Uuid::now_v7();
     let journal = Journal::open(&journal_path).unwrap();
@@ -233,6 +249,16 @@ fn journal_failure_mid_session_fails_closed_without_sending_anything() {
         .unwrap();
     let mut approval = Approval::new(1);
     coordinator.create_approval(approval.clone()).unwrap();
+    let hook_agent = agent.clone();
+    let approval_id = approval.id;
+    coordinator.set_fail_closed_effect(move |plan| {
+        assert!(plan.cancel_turn);
+        assert_eq!(plan.pending_approvals, [approval_id]);
+        let mut agent = hook_agent.lock().unwrap();
+        agent.send_permission("reject_once");
+        agent.send_cancel();
+        Ok(())
+    });
     coordinator.fail_approval_writes_for_test().unwrap();
     let called = std::cell::Cell::new(false);
     assert!(
@@ -244,9 +270,10 @@ fn journal_failure_mid_session_fails_closed_without_sending_anything() {
                     authorized: true,
                     now_ms: 2,
                     provider_limit_secs: None,
-                    held: false,
                     option_id: Some("allow_once".into()),
                     responder: "local-client",
+                    option_class: shardrail_protocol::OptionClass::Once,
+                    client_scope: shardrail_protocol::ClientScope::Full,
                 },
                 |_, _| {
                     called.set(true);
@@ -265,8 +292,12 @@ fn journal_failure_mid_session_fails_closed_without_sending_anything() {
         coordinator.approval_state(approval.id).unwrap().as_deref(),
         Some("pending")
     );
-    agent.child.kill().unwrap();
-    agent.child.wait().unwrap();
+    drop(coordinator);
+    let agent = std::sync::Arc::try_unwrap(agent)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    agent.finish_prompt("reject_once");
 }
 
 #[test]
@@ -275,6 +306,9 @@ fn crash_after_response_write_recovers_as_delivered_unconfirmed() {
     let mut agent = Agent::start();
     let journal_path = dir.path().join("journal.db");
     let (mut coordinator, _) = open_coordinator(&journal_path);
+    coordinator
+        .transition(0, "turn_started", json!({}), || Ok(()))
+        .unwrap();
     let mut approval = Approval::new(1);
     coordinator.create_approval(approval.clone()).unwrap();
     let approval_id = approval.id;
@@ -286,9 +320,10 @@ fn crash_after_response_write_recovers_as_delivered_unconfirmed() {
                 authorized: true,
                 now_ms: 2,
                 provider_limit_secs: None,
-                held: false,
                 option_id: Some("allow_once".into()),
                 responder: "local-client",
+                option_class: shardrail_protocol::OptionClass::Once,
+                client_scope: shardrail_protocol::ClientScope::Full,
             },
             |_, option| {
                 agent.send_permission(option.unwrap());
