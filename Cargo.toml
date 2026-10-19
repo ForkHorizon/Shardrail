@@ -14,7 +14,7 @@ schemars = { version = "1", features = ["uuid1"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync", "time"] }
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.31", features = ["fs", "socket", "user"] }
 

@@ -25,6 +25,11 @@ pub enum JournalError {
 
 pub struct Journal(Connection);
 
+pub struct EventWithReceipt {
+    pub event: DurableEvent,
+    pub receipt: Option<(u128, i64)>,
+}
+
 static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
 
 impl Journal {
@@ -205,6 +210,117 @@ impl Journal {
             })
             .transpose()
             .map_err(Into::into)
+    }
+
+    pub fn high_water(&self) -> Result<i64, JournalError> {
+        Ok(self
+            .0
+            .query_row("SELECT COALESCE(MAX(event_id),0) FROM events", [], |row| {
+                row.get(0)
+            })?)
+    }
+
+    pub fn created_session_for_command(
+        &self,
+        client_id: Uuid,
+        command_id: Uuid,
+    ) -> Result<Option<(Uuid, i64)>, JournalError> {
+        let row = self
+            .0
+            .query_row(
+                "SELECT json_extract(payload,'$.session_id'),event_id FROM events WHERE kind='session_created' AND json_extract(payload,'$.client_id')=?1 AND json_extract(payload,'$.command_id')=?2 ORDER BY event_id LIMIT 1",
+                params![client_id.to_string(), command_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        row.map(|(session_id, event_id)| {
+            Uuid::parse_str(&session_id)
+                .map(|session_id| (session_id, event_id))
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+        })
+        .transpose()
+        .map_err(Into::into)
+    }
+
+    pub fn events_after_with_receipts(
+        &self,
+        cursor: i64,
+        limit: usize,
+    ) -> Result<Vec<EventWithReceipt>, JournalError> {
+        let mut statement = self.0.prepare(
+            "SELECT e.event_id,e.journal_epoch,e.host_id,e.session_id,e.schema_version,e.kind,e.occurred_at_ms,e.provider_ref,e.causation,e.redaction_flags,e.payload,r.receipt_monotonic_ns,r.receipt_wall_clock_ms FROM events e LEFT JOIN event_receipts r ON r.event_id=e.event_id WHERE e.event_id>?1 ORDER BY e.event_id LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![cursor, limit as i64], |row| {
+            let parse_uuid = |index| -> rusqlite::Result<Uuid> {
+                let value: String = row.get(index)?;
+                Uuid::parse_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        index,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            };
+            let flags: String = row.get(9)?;
+            let payload: String = row.get(10)?;
+            let monotonic: Option<String> = row.get(11)?;
+            let wall: Option<i64> = row.get(12)?;
+            let receipt = monotonic
+                .map(|value| value.parse::<u128>())
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        11,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?
+                .zip(wall);
+            Ok(EventWithReceipt {
+                event: DurableEvent {
+                    event_id: row.get(0)?,
+                    journal_epoch: parse_uuid(1)?,
+                    host_id: parse_uuid(2)?,
+                    session_id: parse_uuid(3)?,
+                    schema_version: row.get(4)?,
+                    kind: row.get(5)?,
+                    occurred_at_ms: row.get(6)?,
+                    provider_ref: row.get(7)?,
+                    causation: row.get(8)?,
+                    redaction_flags: serde_json::from_str(&flags).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            9,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    payload: serde_json::from_str(&payload).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            10,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                },
+                receipt,
+            })
+        })?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        let epoch = self.journal_epoch()?;
+        let host_id = self.host_id()?;
+        if events
+            .iter()
+            .any(|item| item.event.journal_epoch != epoch || item.event.host_id != host_id)
+        {
+            return Err(JournalError::EpochMismatch);
+        }
+        Ok(events)
     }
 
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<DurableEvent>, JournalError> {
