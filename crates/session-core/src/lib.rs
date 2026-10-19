@@ -84,7 +84,7 @@ impl Approval {
             )
         } else {
             (
-                self.confirmed_at_ms,
+                self.created_at_ms,
                 self.provider_limit_secs(provider_limit_secs).as_millis() as i64,
             )
         };
@@ -296,6 +296,13 @@ mod tests {
         assert!(!changed.respond(ApprovalDecision::Allow, true, 1, None, false));
         assert!(changed.reconfirm(true, true, 2));
         assert!(changed.respond(ApprovalDecision::Allow, true, 3, None, false));
+
+        let mut provider_limited = Approval::new(0);
+        provider_limited.workspace_changed();
+        assert!(provider_limited.reconfirm(true, true, 9_000));
+        assert!(!provider_limited.respond(ApprovalDecision::Allow, true, 10_000, Some(10), false));
+        assert_eq!(provider_limited.state, ApprovalState::Expired);
+        assert_eq!(provider_limited.decision, Some(ApprovalDecision::Deny));
     }
 
     #[test]

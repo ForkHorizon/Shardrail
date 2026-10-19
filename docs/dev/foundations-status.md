@@ -11,7 +11,7 @@ Branch: `p1a/foundations`
 - M04 foundation: SQLite WAL journal, immutable event rows, durable approval write-ahead records, and recovery of `responding` as `delivered_unconfirmed`.
 - M18 foundation: fake JSON-RPC stdio agent and round-trip coverage for initialize, session/new, streamed session/prompt, and an agent-originated `session/request_permission` with correlated client response.
 - Tests cover denial defaults/timeouts, provider timeout caps, two-hour hold expiry, 15-minute freshness, workspace-change reconfirmation, write-ahead ordering, disk-full and corruption failures, queued instructions, desync, and close/purge ordering.
-- Review fixes: approval responses now enforce expiry in the state transition; opt-in holds honor a known provider timeout up to the two-hour cap (or the two-hour cap when the provider limit is unknown); client disconnect preserves approval delivery state; journal creation enforces `0600` on Unix and returns committed event cursors; already-exited sessions close immediately; journal failure only cancels a live active turn.
+- Review fixes: approval responses enforce expiry from request creation in the state transition, even after reconfirmation; opt-in holds honor a known provider timeout up to the two-hour cap (or the two-hour cap when the provider limit is unknown); client disconnect preserves approval delivery state; journal creation enforces `0600` on Unix and returns committed event cursors; already-exited sessions close immediately; journal failure only cancels a live active turn.
 - CI checks npm registry signatures and the locked contracts package licenses (`0BSD`, Apache-2.0, BSD-2-Clause/3-Clause, ISC, MIT, Python-2.0), alongside the schema drift check.
 
 ## Stubbed or deferred
