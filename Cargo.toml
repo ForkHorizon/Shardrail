@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/protocol", "crates/journal", "crates/session-core", "crates/fake-acp"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "LicenseRef-Proprietary"
+rust-version = "1.99"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "1", features = ["uuid1"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

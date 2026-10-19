@@ -1,0 +1,12 @@
+{
+  "name": "@shardrail/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "json2ts -i ../../schema/contracts.schema.json -o src/generated.ts"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "15.0.4"
+  }
+}

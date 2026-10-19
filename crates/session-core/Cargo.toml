@@ -1,0 +1,15 @@
+[package]
+name = "shardrail-session-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shardrail-protocol = { path = "../protocol", version = "0.1.0" }
+uuid.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

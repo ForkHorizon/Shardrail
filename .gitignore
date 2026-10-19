@@ -1,2 +1,6 @@
 .DS_Store
 /spikes/
+/target/
+/.cargo-home/
+/.npm-cache/
+node_modules/

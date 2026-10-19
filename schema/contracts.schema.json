@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContractSchema",
+  "type": "object",
+  "properties": {
+    "approval_response": {
+      "$ref": "#/$defs/ApprovalResponding"
+    },
+    "approval_state": {
+      "$ref": "#/$defs/ApprovalState"
+    },
+    "event": {
+      "$ref": "#/$defs/DurableEvent"
+    },
+    "session_lifecycle": {
+      "$ref": "#/$defs/SessionLifecycle"
+    }
+  },
+  "required": [
+    "event",
+    "approval_response",
+    "approval_state",
+    "session_lifecycle"
+  ],
+  "$defs": {
+    "ApprovalDecision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny",
+        "cancel"
+      ]
+    },
+    "ApprovalResponding": {
+      "type": "object",
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "option_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "responded_at_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "responder": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_id",
+        "decision",
+        "responder",
+        "responded_at_ms"
+      ]
+    },
+    "ApprovalState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "responding",
+        "responded_unacked",
+        "allowed",
+        "denied",
+        "expired",
+        "withdrawn",
+        "delivered_unconfirmed"
+      ]
+    },
+    "DurableEvent": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "occurred_at_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "payload": true,
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "event_id",
+        "session_id",
+        "schema_version",
+        "kind",
+        "occurred_at_ms",
+        "payload"
+      ]
+    },
+    "SessionLifecycle": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closing",
+        "closed",
+        "purging",
+        "purged"
+      ]
+    }
+  }
+}
