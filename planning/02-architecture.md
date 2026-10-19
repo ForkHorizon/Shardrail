@@ -1,6 +1,6 @@
 # 02 — System Architecture and Technology
 
-> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Decision IDs (D#) are explained in [12-decisions](12-decisions.md).
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Decision IDs (D#) are explained in [12-decisions](12-decisions.md). Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): planned restart (D39), Tauri IPC as relay, Claude channel label. 2026-10-18: daemon language Rust approved by the owner (D1, U13). 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44). 2026-10-19 (owner): D27 approved — Rust types → `schemars` JSON Schema (committed) → TypeScript, `ts-rs` fallback, CI drift check. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 
 ## 1. Shape
 
@@ -23,7 +23,7 @@ flowchart LR
     WS[Workspace service: trust, tree, safe Git, write lease]
     HO[Handoff]
     subgraph adapters [Adapters]
-      ACP[ACP client: Grok, Hermes, Claude via ACP]
+      ACP[ACP client v1/v2: Grok, Hermes, Claude if S4 picks ACP]
       CDX[Codex app-server client]
     end
   end
@@ -60,14 +60,15 @@ Provider processes are a trust boundary: their output is untrusted input, their 
 
 - The daemon is a separate process started by the app; **its lifetime is the app's, not the window's.** Closing the window hides it; a menu-bar item shows running sessions and pending approvals; quitting asks whether to cancel all turns.
   *Why:* the first design stopped the daemon with the window, which cancelled agents' work whenever the user merely closed the window.
-- **Connect first:** the shell first tries to connect to (and authenticate) an existing daemon and only spawns one if none answers. A daemon whose shell crashed ("orphan daemon") keeps running turns for at most 10 minutes without any client, then cancels them (approvals are withdrawn, never allowed) — owner question U18.
+- **Connect first:** the shell first tries to connect to (and authenticate) an existing daemon and only spawns one if none answers. A daemon whose shell crashed ("orphan daemon") keeps running turns for at most 10 minutes without any client, then cancels them (approvals are withdrawn, never allowed) — U18, owner-approved 2026-10-19; desynced processes are not killed by this timer (U22).
 - **Version skew:** a new shell that finds an older daemon offers "restart daemon" and never speaks an incompatible protocol.
-- **Continuous operation with the app closed** is a later, opt-in mode via a launch agent (`SMAppService`); ownership mode is fixed at daemon start (owner question U6).
+- **Planned restart = drain-then-upgrade (D39).** Because the macOS helper and the Linux cgroup kill provider trees when the daemon goes away, any daemon restart would otherwise cancel running turns. A daemon upgrade or version-skew restart therefore stops new turns, waits for running turns and open approvals to finish (bounded by `T_drain`), asks the user about remaining blockers, closes idle provider sessions through the protocol and only then restarts (05 §1). A shell update never restarts a protocol-compatible daemon.
+- **Continuous operation with the app closed** is a later, opt-in mode via a launch agent (`SMAppService`); ownership mode is fixed at daemon start (U6 answered 2026-10-19: not in MVP; Phase 2, E2.5).
 - Agent processes are descendants of the app, so macOS privacy (TCC) prompts triggered by agents are attributed to Shardrail. Granting Shardrail Accessibility, Automation or Screen Recording voids approval protection (06).
 
 ## 4. Processes on Linux
 
-Same daemon binary under a systemd **user** service, never root. Agents run as the checkout owner by default; a separate agent Unix user is recommended but its mechanism is not yet specified (U11: needs a privileged spawner that spawns, contains and kills on the daemon's behalf). Remote setup checks `loginctl enable-linger` so sessions survive logout. After a reboot, systemd restarts the daemon; turns are never continued automatically — resume is manual.
+Same daemon binary under a systemd **user** service, never root. Agents run as the checkout owner by default; a separate agent Unix user is recommended but its mechanism is not yet specified (U11, deferred to Phase 2 by the owner 2026-10-19: needs a privileged spawner that spawns, contains and kills on the daemon's behalf). Remote setup checks `loginctl enable-linger` so sessions survive logout. After a reboot, systemd restarts the daemon; turns are never continued automatically — resume is manual.
 
 ## 5. Provider process topology
 
@@ -87,7 +88,7 @@ Escalating a cancel to process termination on a shared process requires user con
 ## 6. Client communication
 
 - **One wire protocol** for every client and transport: schema-defined JSON messages; requests carry `command_id` and optional preconditions; the server pushes durable events with a per-host cursor and coalesced ephemeral updates; handshake carries protocol version, host id and `journal_epoch`.
-- **Desktop ↔ local daemon:** WebView JavaScript cannot open Unix sockets, so either the shell relays frames to the socket without parsing them, or the WebView uses the loopback WebSocket. Spike S5 chooses on latency, code size and credential exposure. In both cases the WebView receives only a short-lived session token minted by the shell, and the untrusted-rendering policy (06 §5) is a prerequisite, because script injection into the WebView equals token theft.
+- **Desktop ↔ local daemon:** WebView JavaScript cannot open Unix sockets, so either the shell relays frames to the socket without parsing them, or the WebView uses the loopback WebSocket. Spike S5 chooses on latency, code size and credential exposure. In both cases the WebView receives only a short-lived session token minted by the shell, and the untrusted-rendering policy (06 §5) is a prerequisite, because script injection into the WebView equals token theft. The relay option maps naturally onto Tauri IPC (commands plus Channels for streaming), which opens no TCP port; S5 measures it against loopback.
 - **Desktop ↔ remote daemon:** the app spawns system OpenSSH as `ssh <host> shardraild bridge`, which relays stdio to the remote daemon socket. No forwarded ports, uses the user's SSH config, keys and jump hosts. The remote daemon's key is pinned end to end through the bridge.
   *Why:* the first design required the user to set up `ssh -L` forwards by hand.
 - **Browser:** opt-in loopback WebSocket listener with paired credentials, Origin and Host checks, no credential in URLs. On shared multi-user Linux hosts prefer the bridge.
@@ -112,9 +113,9 @@ Data dirs: macOS `~/Library/Application Support/Shardrail/`; Linux `$XDG_DATA_HO
 
 | Area | Choice | Why | Rejected alternatives |
 | --- | --- | --- | --- |
-| Daemon language (D1) | **Rust**, with schema-first contracts (D27) so a Go rewrite stays possible | official ACP crate; strong enums for event/state modelling; no GC; single static binary | **Go + thin Swift WKWebView shell**: equally viable at Shardrail's event rates and equally memory-safe; faster iteration — the owner's own proficiency is the deciding input (U13). **TypeScript daemon**: makes Node mandatory for every session. **Go + Rust split**: two systems languages for no isolation gain. |
+| Daemon language (D1) | **Rust — owner-approved 2026-10-18 (U13)**; Rust types are the contract source and a committed JSON Schema (D27) keeps data language-neutral | same language as the Tauri 2 shell; no GC pauses; compile-time safety for approval/state invariants; official ACP crate; single static binary. Raw speed was not the deciding factor (the daemon is I/O-bound) | **Go** and **C# / .NET NativeAOT** (community ACP libraries only, EV-30) were considered and rejected by the owner. **TypeScript daemon**: makes Node mandatory for every session. **Go + Rust split**: two systems languages for no isolation gain. |
 | Desktop shell (D2) | **Tauri 2 + system WKWebView**; shell holds no domain logic | one UI for desktop/browser/mobile; no bundled Chromium | Electron (bundled Chromium per app contradicts low overhead); three native UIs (too costly solo); GPU-native Rust UI such as GPUI/Slint (no browser/mobile, weaker accessibility); Dioxus (weaker accessible-UI ecosystem). Fallback if S5 fails: thin Swift WKWebView shell. Tauri 3 prereleases not used. |
-| Frontend (D3) | **TypeScript, one renderer, no second state store**; client holds a bounded projection | daemon journal is the source of truth | Redux/MobX-style stores. Framework (SolidJS vs React) chosen in S5 against latency **and** the cost of meeting WCAG with available accessible primitives (U8). |
+| Frontend (D3) | **React 19 + TypeScript strict + Vite (plain SPA) + React Aria Components + TanStack Virtual — owner-approved 2026-10-18 (U8)**; one renderer, no second state store; client holds a bounded projection; TS types generated from Rust via JSON Schema (D27) | daemon journal is the source of truth; best AI-codegen reliability and accessible primitives (D44, 16) | Redux/MobX-style stores; Next.js/SSR/RSC; SolidJS, Vue, Lit, Preact, Rust/WASM UIs (Leptos, Dioxus, Yew) and non-web native toolkits (16). **Fallback:** Svelte 5 + Bits UI only if S5 shows React misses B3/B4/B5 in WKWebView. |
 | Storage (D5) | **SQLite WAL, one file per daemon, single writer**, embedded SQLite | one owner per host; crash behavior well understood | Postgres; CRDTs; JSONL-only (poor random access); "provider is the only truth" (breaks history when the provider is gone). FTS only if measured necessary. |
 | Encoding | JSON; binary (CBOR/MessagePack) only if measurement shows serialization in the latency path | simplicity, debuggability | gRPC / gRPC-web (proxies in browsers, heavier) |
 

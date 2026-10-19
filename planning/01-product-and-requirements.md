@@ -1,6 +1,6 @@
 # 01 — Product and Requirements
 
-> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. See [00-INDEX](00-INDEX.md).
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. See [00-INDEX](00-INDEX.md). Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): F7, F17 clarified; F23–F25 added. 2026-10-18 (owner): all code is written by AI coding agents (N13, D44). 2026-10-19 (owner): internal-use scope (D45). 2026-10-19 (owner): single-user scope (D46); N8 trivially met. 2026-10-19 (owner): N10 aligned with D47 (U21). 2026-10-19 (owner): Hermes not in Phase 1 (D48).
 
 ## 1. Product
 
@@ -9,6 +9,8 @@ Shardrail (Fork Horizon) is an independent workspace for running and supervising
 It starts and observes agent sessions, sends instructions, shows tool activity, routes approvals to a human, shows the file tree and Git diff of the directory a session really works in, keeps durable history, and transfers **explicit** task context between agents. It is not a model, not an API proxy, and not a wrapper around a terminal UI.
 
 Existing agent managers were studied only as a source of constraints; their code is not reused.
+
+**Scope (owner, 2026-10-19; D45):** an internal tool for the owner and Fork Horizon — not a commercial, hosted or third-party-distributed product. Any change of scope reopens U9/U25 before release (R46). **Until the product fully works, the only user is Daliys on his own machines (D46);** distribution is revisited when a first other user appears (R47, 09 §5).
 
 **Guiding properties, in priority order:** responsiveness; low CPU/memory overhead; visual and interaction quality; reliable execution and recovery; robust security boundaries; extensibility; maintainability; efficient local/remote communication; practical complexity for a primarily solo developer; future commercial options.
 
@@ -29,7 +31,7 @@ One person or a small Fork Horizon team runs several agents on a Mac and on an a
 
 ## 3. Scope
 
-**In product:** local daemon + macOS desktop app; browser client to the same daemon; headless Linux daemon (systemd user service); Android client (later phase); four adapters (Grok, Hermes, Codex, Claude); event journal, instruction queue, approvals, read-only files and Git; host management over SSH; attention inbox; handoff bundles; recovery within what providers officially support.
+**In product:** local daemon + macOS desktop app; browser client to the same daemon; headless Linux daemon (systemd user service); Android client (later phase); four adapters (Grok, Hermes, Codex, Claude — Hermes not in Phase 1, D48); event journal, instruction queue, approvals, read-only files and Git; host management over SSH; attention inbox; handoff bundles; recovery within what providers officially support.
 
 **Out of product (and why):**
 
@@ -59,7 +61,7 @@ One person or a small Fork Horizon team runs several agents on a Mac and on an a
 | F4 | Show tool calls: name, target, status, truncated input and result; raw input on expand. | Tool card fixture |
 | F5 | Route approvals to the provider. An approval resolves exactly once; client disconnect or window close never resolves it; expiry follows policy and never means allow. | Fake agent never receives allow after expiry; concurrent responders |
 | F6 | Cancel the current turn through the provider's own mechanism. | Fixture + live spike |
-| F7 | One pending instruction per session when the provider does not accept a second turn. | Second instruction not sent until the turn closes |
+| F7 | One pending instruction per session when the provider does not accept a second turn; the queued instruction survives a daemon restart as queued, never as "delivery unknown" (05 §5a). | Second instruction not sent until the turn closes; restart with a queued instruction |
 | F8 | Read-only tree and diff of the session directory; unknown directory shown as unknown. Viewing never executes any program named by Git configuration, attributes or environment; discovery stays inside the workspace; symlinks out of the workspace are not followed; LFS compared natively; never "modified" from an unfiltered comparison. | Malicious-repo fixture set (see 06 §6) |
 | F9 | Journal survives `kill -9` of the daemon; session list and last confirmed cursor are intact. | SQLite integration test |
 | F10 | Provider process death marks the session degraded; resume offered only when the capability exists. | stdio break fixture |
@@ -69,12 +71,15 @@ One person or a small Fork Horizon team runs several agents on a Mac and on an a
 | F14 | Attention inbox across sessions and hosts (pending approvals, failures, delivery-unknown, completions); OS notifications when the window is hidden. | Approval on host B appears while viewing host A |
 | F15 | Read-through viewing of external session history via official APIs (memory cache only, never journaled); continue as a new session via official resume/fork. | Codex `thread/list`/`read`, Claude `listSessions`/`getSessionMessages`, Hermes list/load |
 | F16 | Host management: add/remove remote hosts through the user's system SSH configuration; per-host health. | Bridge through SSH config with a jump host |
-| F17 | Per-session purge: content unrecoverable from the database, WAL and Shardrail-managed copies. | Forensic check after purge |
+| F17 | Per-session purge of a **closed** session (05 §9): content unrecoverable from the database, WAL and Shardrail-managed copies (logical guarantee; APFS/SSD physical erasure is a documented residual). | Forensic check after purge |
 | F18 | Delivery uncertainty is visible (`delivery unknown`, `outcome unknown`); nothing is resent automatically. | Crash between accept and dispatch |
 | F19 | One write-capable session per worktree by default; the lease is visible and journaled. | Second session refused or read-only |
 | F20 | Agent processes and all their descendants are contained; after a daemon restart, survivors are detected and a session is never resumed while its previous process lives. | Kill daemon during a detached tool |
 | F21 | Approval outcomes are never misreported: a delivered decision shows as allowed/denied or "outcome not confirmed", never as withdrawn. | Crash between response and acknowledgement |
 | F22 | Approvals that act outside the session sandbox are labelled boundary-breaking, desktop-only, and end host approval protection when allowed. | Card and state test |
+| F23 | An approval response is journaled before it is sent; after any crash it is shown as allowed/denied or "outcome not confirmed", never withdrawn (D34). | kill -9 between write and commit |
+| F24 | When the journal cannot be written, Shardrail fails closed: pending approvals rejected/cancelled, no new turns (D41). | Disk-full and corruption fixtures |
+| F25 | A daemon upgrade never cancels a turn without the user's decision (drain-then-upgrade, D39). | Upgrade during a running turn |
 
 ## 5. Non-functional requirements
 
@@ -87,8 +92,9 @@ One person or a small Fork Horizon team runs several agents on a Mac and on an a
 | N5 | Failure of one adapter does not stop the others. |
 | N6 | Every decision has a reconsideration condition; a provider protocol change is always sufficient. |
 | N7 | Core flows (stream, approval, composer, tree) target WCAG 2.2 AA. |
-| N8 | Dependency licenses **and usage terms** permit Fork Horizon's intended distribution; copyleft dependencies need a separate legal decision. |
+| N8 | Dependency licenses **and usage terms** permit Fork Horizon's intended distribution; copyleft dependencies need a separate legal decision. *Trivially met while the only user is Daliys (D46).* |
 | N9 | Approval correctness and secret isolation are never traded for latency budgets. |
-| N10 | Approval protection is stated per host and UID, never claimed beyond what is enforced (06 §3). |
+| N10 | Approval protection is stated per host and UID, never claimed beyond what is enforced (06 §3). v1 shows no "protected" status, only a per-session verification checklist (D47). |
 | N11 | Untrusted content renders without active content or remote loads; approval cards reveal hidden characters. |
 | N12 | Idle efficiency is measured, including wakeups and energy impact (07). |
+| N13 | **All code is written by AI coding agents** (owner context, D44): technology choices are optimized for AI-codegen reliability, and correctness is enforced by machine-checked gates (types, lints, tests, fixtures, cross-family review) per 11 §3 and 08 §6. |

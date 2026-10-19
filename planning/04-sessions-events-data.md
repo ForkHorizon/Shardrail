@@ -1,6 +1,6 @@
 # 04 — Sessions, Events, Data and Recovery
 
-> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. The normative state machine is in [05-state-machine](05-state-machine.md).
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. The normative state machine is in [05-state-machine](05-state-machine.md). Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): approval write-ahead (D34), queued instructions and session lifecycle (D42), journal-unavailable behaviour (D41), planned restart (D39), handoff quoting. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 
 ## 1. Identifiers
 
@@ -39,7 +39,8 @@ The daemon keeps per-session item projections (completed items + live buffers). 
 - Every mutating request carries `command_id` and optional preconditions (`expected_turn_id`, `expected_state`); stale preconditions are rejected with the current state (Codex `turn/steer`'s `expectedTurnId` is the precedent).
 - The daemon journals `command_accepted` **before** side effects and `command_dispatched` after; provider confirmation, errors and crashes move the command through the delivery table (05 §5). Nothing is resent automatically.
 - Session commands keep their outcomes for the session's lifetime; host-level commands (create session, pairing, host operations) for 24 h (proposed).
-- Approval responses are tracked by the approval record (05 §4), not the delivery table.
+- Approval responses are tracked by the approval record (05 §4), not the delivery table, but follow the same write-ahead principle: `approval_responding` is committed before the response is written to the provider (D34).
+- Instructions sent while a turn runs are journaled as `instruction_queued` and are not commands until dispatched (05 §5a); a restart never turns a queued instruction into `delivery unknown`.
 
 ## 5. Concurrency between clients
 
@@ -50,9 +51,10 @@ All mutations go through the command router. Approvals resolve exactly once (fir
 - SQLite WAL, one file per daemon, single writer; a second daemon on the same file is blocked by a lock and exits with a clear error.
 - Readers use short transactions; explicit checkpoint policy; WAL size alarm.
 - **Schema evolution:** each durable event carries `schema_version`; upgrades forward-migrate stored rows after a temporary pre-migration copy, which is deleted after verification. (*Why not perpetual upcasting:* it doubles the mechanisms a solo maintainer carries forever.)
-- **Backups:** no automatic journal backups by default; user-initiated export only, with a warning that purge cannot reach exports. The data directory is excluded from Time Machine by default with a visible setting (U23). APFS local snapshots and user copies are a documented residual.
-- **Purge (F17):** `PRAGMA secure_delete=ON` on every connection → delete → full `VACUUM` → `wal_checkpoint(TRUNCATE)`; also deletes any pre-migration copy. (*Why this order:* SQLite only zeroes pages if `secure_delete` is on before the delete, and `incremental_vacuum` is a no-op unless auto-vacuum was configured — EV-20.)
-- **Corruption:** open read-only, run an integrity check, offer export/salvage; a new database is created only after explicit user choice (new `journal_epoch`). Provider directories are never touched.
+- **Backups:** no automatic journal backups by default; user-initiated export only, with a warning that purge cannot reach exports. The data directory is excluded from Time Machine by default with a visible toggle (U23, owner 2026-10-19). APFS local snapshots and user copies are a documented residual.
+- **Purge (F17):** only for sessions in lifecycle state `closed` (05 §9). `PRAGMA secure_delete=ON` on every connection → delete → full `VACUUM` → `wal_checkpoint(TRUNCATE)`; also deletes any pre-migration copy. (*Why this order:* SQLite only zeroes pages if `secure_delete` is on before the delete, and `incremental_vacuum` is a no-op unless auto-vacuum was configured — EV-20.) **Known costs (15 S6):** a full `VACUUM` rewrites the whole database while holding the single writer, and in WAL mode transiently grows the WAL to roughly the database size (the WAL alarm, B8, is suspended during purge); on APFS/SSD zeroed pages do not guarantee physical erasure. Per-session content keys with key deletion (crypto-shredding) would remove both costs; it is tied to U12: owner 2026-10-19 — no journal encryption in v1 (FileVault), crypto-shredding deferred.
+- **Corruption:** open read-only, run an integrity check, offer export/salvage; a new database is created only after explicit user choice (new `journal_epoch`). Provider directories are never touched. Live sessions follow the fail-closed rule in 05 §10 (D41): pending approvals answered with reject/cancel, turns cancelled, no dispatch until the journal is writable again.
+- **Schema migration failure:** the pre-migration copy is restored and the daemon refuses to start with the new binary (no partial migrations); the previous binary keeps working.
 - **Retention:** keep durable events by default; compact checkpoint chunks after completion; per-session purge; optional age-based retention (owner setting).
 
 ## 7. Recovery
@@ -61,21 +63,24 @@ All mutations go through the command router. Approvals resolve exactly once (fir
 | --- | --- |
 | `kill -9` / crash of the daemon | WAL recovers committed events. On restart, recorded provider processes are checked by identity (pid + start time + boot id): alive → `orphan_alive` (turn `detached`); dead → `exited(lost)`; Linux cgroup killed by unit stop → `killed_by_restart`. Accepted-but-unconfirmed commands → `delivery unknown`; open tools → `outcome unknown`; pending approvals → withdrawn; delivered-but-unacknowledged approvals → "outcome not confirmed". Nothing is resent. |
 | Provider crash / stdio break | process `exited` (or `leader_exited` while descendants run); open tools `outcome unknown`; resume offered per capability, preferring resume without replay; never while the old process or descendants live |
-| Protocol desync with process alive | turn `detached`; termination user-confirmed while a client is attached, automatic after a grace period when none is (U22) |
+| Protocol desync with process alive | turn `detached`; session marked `desynced` and put in the inbox; the process stays contained and is **never terminated automatically** — the user decides (U22, owner 2026-10-19) |
 | Hang without break | turn `stalled` after 15 min without events (excluding turns waiting on approvals); no automatic kill |
 | Client drops mid-approval | approval stays pending; resolved only by a client, provider withdrawal or policy expiry (never allow) |
 | Client reconnects | catch-up by cursor; snapshot + cursor if the gap exceeds retention, the queue overflowed, or `journal_epoch` changed |
 | SSH link drops | remote sessions continue; host shown disconnected; reconnect via the bridge |
 | Repeated command after network error | same `command_id` returns the stored result |
 | Reboot (Linux or Mac) | daemon restarts (Linux via systemd); turns never continue automatically; manual resume |
-| Disk full | sessions pause new turns with a notice; durable events are never dropped silently |
+| Disk full | fail closed per 05 §10 (D41): pending approvals answered reject/cancel, running turns cancelled, no new turns; durable events are never dropped silently (decisions kept in a bounded memory log and journaled as `recovered_events` once writing works) |
+| Journal corruption detected at runtime | same fail-closed step, then read-only salvage flow (§6) |
+| Planned daemon upgrade / version-skew restart | drain-then-upgrade (D39, 05 §1): no new turns, wait for idle up to `T_drain`, user decides on blockers; restarted sessions are `exited(terminated)`, resumable |
 
 ## 8. Handoff and tasks (D10)
 
 - A `Task` is a Shardrail object, not a provider session: goal and constraints written by the human, done criteria, links to `SessionId` and `EventId` ranges, file paths and a short diff taken by the daemon, decisions the human marked transferable.
 - Transfer creates a new session at the target provider and sends the bundle as the first prompt after the human has seen and edited it. Hermes memory, Grok memory, CLAUDE.md and skills are never read into the bundle automatically; the human may paste quotes.
+- **Cross-agent prompt injection (R38):** anything quoted from session A (agent output, tool output, diffs) is untrusted input for agent B. The bundle separates "written by the human" from "quoted from session A" with explicit delimiters and a note to the target agent that quoted text is data, not instructions; the preview highlights imperative instructions inside quotes.
 - Provider fork (`thread/fork`, session fork) is a different operation — a branch of the same agent — labelled Fork, not Transfer.
-- A **manual handoff MVP** (edited text bundle → first prompt) is recommended at Phase 1 close (U19); the full Task model is Phase 4.
+- A **manual handoff MVP** (edited text bundle → first prompt, reviewed by the user) ships at Phase 1 close (U19, owner 2026-10-19); the full Task model is Phase 4.
 - No task queues, kanban, or multiple executors per task. Sub-agent activity (Claude `parent_tool_use_id`, Grok subagents) is displayed when it appears in the stream.
 
 ## 9. External history (F15)

@@ -1,6 +1,6 @@
 # 07 — Performance and Resource Budgets
 
-> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. **Every number here is a proposed acceptance budget, not a measurement.** Nothing has been measured yet.
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. **Every number here is a proposed acceptance budget, not a measurement.** Nothing has been measured yet. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): B16 split warm/cold, B11 a target, measurement load for a solo developer. 2026-10-19 (owner): U1 answered — reference machine is Daliys's own Mac.
 
 ## 1. Where the cost is
 
@@ -8,7 +8,7 @@ Memory is dominated by the WebView and the provider processes (Codex native bina
 
 ## 2. Budgets
 
-Reference machine: an Apple Silicon Mac with 16 GB that Fork Horizon names explicitly (U1).
+Reference machine: Daliys's own current Apple Silicon Mac (U1, owner 2026-10-19); its model and memory are recorded with every measurement.
 
 | ID | Budget | Scope | How measured |
 | --- | --- | --- | --- |
@@ -22,12 +22,12 @@ Reference machine: an Apple Silicon Mac with 16 GB that Fork Horizon names expli
 | B8 | over 8 h, daemon RSS ≤ 1.3× its 10-minute value (1 active + 2 idle sessions); 72 h soak: same, WAL ≤ 64 MiB, WebView footprint ≤ B3 + 150 MB | daemon, WebView | soak harness; provider leaks reported separately |
 | B9 | no Shardrail-owned timer more frequent than 15 s at rest | daemon and UI code | code review + failing test on forbidden intervals |
 | B10 | batch write ≤ 50 ms | SQLite single writer | bench on reference machine |
-| B11 | idle wakeups ≤ 1/s average for the whole process tree incl. WebKit; CPU ≈ 0 %; energy impact "Low" | app + daemon | `powermetrics`, Activity Monitor |
+| B11 | idle wakeups ≤ 1/s average for the whole process tree incl. WebKit; CPU ≈ 0 %; energy impact "Low" — **target, not a gate**, until S5 shows what WebKit helpers do on their own | app + daemon | `powermetrics`, Activity Monitor |
 | B12 | per-client outbound queue ≤ 8 MiB; overflow → resync, never growth | gateway | stalled-client test |
 | B13 | first visible page of a 50 000-event session ≤ 300 ms (warm DB) | daemon + UI | fixture DB |
 | B14 | approval round trip (tap → provider receives response) ≤ 100 ms local | daemon | `approval.respond` span |
 | B15 | durable bytes written per turn ≤ 3× completed item content; retained ≤ 2× | journal | statistics on recorded sessions |
-| B16 | Git status ≤ 1 computation in flight per worktree; ≤ 1 s for 100k tracked files | workspace service | fixture repo |
+| B16 | Git status ≤ 1 computation in flight per worktree; ≤ 1 s for 100k tracked files **with a warm file cache**; cold-cache time reported separately (fsmonitor is forbidden by D23, so a cold stat walk can take several seconds) | workspace service | fixture repo |
 | — | transcript of 5 000 events scrolls without WebView growth > 80 MB above B3 | UI | S5 |
 
 If the WebView alone exceeds B3 on the reference machine, the budget is revised **together with the measurement** and a decision on the shell; it is never raised silently. (B3 originally measured only the shell process, which would have hidden the WebKit helper processes.)
@@ -36,7 +36,8 @@ If the WebView alone exceeds B3 on the reference machine, the budget is revised 
 
 - Report physical footprint per process tree, with separate columns for daemon, shell + WebKit, Git worker, macOS containment helper, and each provider; record provider versions.
 - No budget closes without a stored trace.
-- Phase 1a gates on B1, B4, B7; the rest at Phase 1 close; B8 72 h soak in Phase 2.
+- Phase 1a gates on B4 and B7 only; B1 and B3 are recorded as observations in Phase 1a; the rest at Phase 1 close; B8 72 h soak in Phase 2. B16 applies only once the safe-Git view exists (Phase 1e, D40).
+- Measurement load is real work for a solo developer: one scripted harness produces all traces; budgets without a harness stay "targets" rather than gates.
 
 ## 4. Design rules that keep budgets reachable
 

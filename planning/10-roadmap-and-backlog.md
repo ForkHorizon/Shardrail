@@ -1,6 +1,7 @@
 # 10 — Roadmap and Backlog
 
-> Part of the Shardrail architecture plan. Status: **candidate, not authorized**. No phase, epic or task may start until the owner approves the relevant decisions and authorizes the phase. Complexity classes S < M < L < XL; no calendar estimates.
+> Part of the Shardrail architecture plan. Status: **candidate, not authorized**. No phase, epic or task may start until the owner approves the relevant decisions and authorizes the phase. Complexity classes S < M < L < XL; no calendar estimates. 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44); S5 gains the React streaming prototype; T0.9 and T1.16 added. 2026-10-19 (owner): D27 approved — Rust types → `schemars` JSON Schema (committed) → TypeScript, `ts-rs` fallback, CI drift check. E1.1 aligned. 2026-10-19 (owner): U9/U25 answered — internal-use scope (D45); Claude via Agent SDK / `claude-agent-acp` with the user's own API key; Codex app-server with the user's own login; reopen trigger R46. Terms gate removed from P1d/E1.15; phases otherwise unchanged. 2026-10-19 (owner): single-user scope (D46) — Daliys is the only user on his own machines until the product fully works; distribution items deferred to 09 §5 (trigger R47). Distribution items are not on the critical path. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized. 2026-10-19 (owner): spike rules — code in gitignored `spikes/<id>/`, notes committed in `planning/spikes/<id>.md`.
+> Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): P1a slimmed to a first useful slice and a new P1e hardening phase (D40); first provider chosen by spikes instead of presuming Grok; core spike set reduced to four. 2026-10-18: daemon language decided by the owner (Rust, D1), so no language prototype precedes P0/P1a.
 
 ## 1. Phases
 
@@ -8,63 +9,75 @@ Phases are sequential; the next starts only when the current gate is closed or c
 
 | Phase | Objective | Content | Gate | Risk | Size |
 | --- | --- | --- | --- | --- | --- |
-| **P0 Feasibility** | replace assumptions with evidence | spikes S1–S9 (§2); disposable code only; live models only here, on a test repo without real secrets | each spike's "done when" | medium | M |
-| **P1a Foundation** | vertical slice, one local client | journal schema; one fake ACP agent; daemon core + supervisor + macOS containment helper; journal; session engine with the full state machine; approvals + host protection + trust; one local desktop connection (`full` scope only, no browser listener); safe Git view; write lease; minimal UI (inbox, session view, palette); **one** ACP provider (prefer a sandboxed one, e.g. Grok, per S2/S7) | F2–F10, F12, F13, F18–F22 on fixtures; containment fixture with a detached tool; Git worker `execve` tripwire; B1, B4, B7 | high | XL |
-| **P1b Codex** | Codex adapter | app-server adapter; fake app-server agent (incl. permission grants, elicitation, user input); compatibility policy; schema reference | Codex fixtures + live smoke; schema drift test | medium | L |
-| **P1c Second ACP provider** | reuse ACP client | mapping, pinning, toolset display | fixtures + smoke | low | M |
-| **P1d Claude** | Claude per S4, **only if U9 is resolved**; otherwise a recorded exclusion | channel, pinning, branding | fixtures + smoke, or exclusion record | high (non-technical) | M–L |
-| **P1 close** | ship the local product | manual handoff MVP (if U19 = yes); budget report | F1–F13 on fixtures; one live smoke per included provider; B1–B7, B9, B11, B13, B14; B8 once; Claude included **or** formally excluded; no open severity-1 risk | — | M |
+| **P0 Feasibility** | replace assumptions with evidence | **core spikes before P1a: S1-lite, S2, S5, S9-lite — authorized by the owner 2026-10-19**; S4, S6, S7, S8 run before the phase that needs them (§2), not yet authorized; S3 only if Hermes returns (D48); disposable code only; live models only here, on a test repo without real secrets | each core spike's "done when" | medium | M |
+| **P1a First useful slice** (D40) | see a real agent stream and answer its approvals safely, locally | journal schema (WAL + epoch; no purge/salvage yet); one fake agent (ACP v1+v2); daemon core + supervisor with process-group containment and a descendant snapshot (no macOS helper yet); session engine: process/link/turn, approvals, queue (05 §5a), lifecycle (05 §9), journal-unavailable fail-closed (05 §10); approvals `once`/`deny` with write-ahead (D34) and deny-on-expiry; **diffs and files only from the provider protocol** (ACP diff content, Codex `turn/diff/updated` / `fileChange`) — no own Git; trust states with `unknown` default; a permanent host banner "approvals not protected" (stays; no protection claim logic); per-session verification checklist with runtime items (sandbox applied, bypass modes off, routing pinned, config hashes, containment) — S7-dependent items shown `not verified` (06 §3b, D47); one local Tauri window (inbox + session view; no menu bar, keychain, notifications); local admission by peer UID + shell-minted token; **one** provider — Grok (ACP) or Codex (app-server), chosen from S1-lite/S2 results | F2–F7, F9, F10, F12, F13, F18, F21, F23, F24 on fixtures; one live smoke; B4, B7 | medium-high | L |
+| **P1b Second protocol** | the other of Codex app-server / Grok ACP | Codex: app-server adapter; fake app-server agent (incl. permission grants, elicitation, user input, `approvalsReviewer` check); schema reference. Grok: ACP mapping, sandbox confirmation. Compatibility policy by protocol fingerprint | fixtures + live smoke; schema drift test (Codex) | medium | L |
+| **P1c Hermes** — *not in Phase 1 (U26, D48); kept for a later phase* | reuse ACP client | mapping, pinning, toolset display, "file edits without approval" indicator | fixtures + smoke, or recorded exclusion | low | M |
+| **P1d Claude** | Claude per S4 with the user's own API key (D29, D45); a recorded exclusion only if S4 finds no two-way approval channel | channel, pinning, branding | fixtures + smoke, or exclusion record | medium (technical, S4) | M–L |
+| **P1e Hardening** (D40) | make the safety claims testable | host protection state + S7 outcome table feeding the checklist's S7-dependent items (D47) — S7 is the gate for any future "protected" status, which needs a separate owner decision; write lease (D31); safe Git view with exec-denied worker (S8, D23); macOS containment helper (D43, S9); code-signing peer admission against Daliys's own local/self-signed identity (06 §4, D46); drain-then-upgrade (D39); menu bar, keychain, notifications, connect-first, version skew; purge and salvage (04 §6) | F8, F11 (U19 = yes), F17, F19, F20, F22, F25; containment fixture with a detached tool; Git worker `execve` tripwire; B1, B3 | high | L |
+| **P1 close** | ship the local product | manual handoff MVP (U19 = yes, reviewed bundle); budget report | F1–F13 on fixtures; one live smoke per included provider; B1–B7, B9, B11, B13, B14; B8 once; Claude included **or** formally excluded; no open severity-1 risk | — | M |
 | **P2 Remote** | Linux and continuous operation | systemd user service, cgroup containment, linger check; SSH stdio bridge; host management; client federation and cross-host inbox; paired `limited` browser clients with asymmetric keys and mutual handshake; read-through external history (F15); optional macOS launch agent (U6); optional separate agent user (U11, once specified); macOS integrity MAC for re-establishing protection | SSH drop does not kill turns; reboot does not continue turns; B1 on Linux; no network listener (`ss` check); 72 h soak | medium | L |
 | **P3 Mobile** | observe, approve, instruct from a phone | per D28 decision at phase entry | stolen-phone revocation; approval delivered ≤ 1 s after tap with a live link (model latency excluded); notification path verified; scope enforcement | high | L |
 | **P4 Handoff and worktrees** | explicit task transfer | full Task model, bundle preview, provider fork as a separate command | F11; denylisted secret never in a bundle; UI never shows a diff for the wrong cwd | low | M |
 
-**Stop conditions.** If neither the Claude ACP adapter nor a direct SDK supervisor provides two-way approval, Claude stays "observation via stream-json without approval guarantees" and is excluded from Phase 1 — the product is more honest with three controllable agents than with a fourth that cannot be safely denied. Likewise if U9 forbids subscription login and API-key-only is rejected. Other adapters are unaffected.
+**Stop conditions.** If neither the Claude ACP adapter nor a direct SDK supervisor provides two-way approval, Claude stays "observation via stream-json without approval guarantees" and is excluded from Phase 1 — the product is more honest with three controllable agents than with a fourth that cannot be safely denied. Other adapters are unaffected.
 
 *Why Phase 1 is sliced:* one developer cannot close a gate containing a daemon, journal, shell, UI, four adapters over three protocols, approvals, trust and recovery at once; Claude's legal question must not block the rest.
 
+*Why P1a was slimmed again (2026-10-18, 15 C4):* the earlier P1a held twelve epics, six of them high-risk (full host protection, code-signing admission, macOS helper, exec-denied Git worker, write lease, full shell). Taking diffs from the provider protocol removes safe Git from the first slice entirely; protection claims cannot be made before S7 anyway, so P1a shows an honest "not protected" banner and P1e earns the claim. *Why the first provider is no longer presumed to be Grok:* every Grok profile can write its own configuration and the sandbox fails open (03 §6, R34), so "sandboxed" was not a sufficient reason; S1-lite/S2 decide.
+
 ## 2. Phase 0 spikes
 
-Each spike takes days, not weeks, and produces a written note.
+Each spike takes days, not weeks, and produces a written note. **Core set before P1a:** S1-lite (Codex: thread/turn/approval/interrupt, `approvalsReviewer` pinning, no experimental API), S2, S5, S9-lite (macOS sentinel-fd tracking only). The rest run before the phase that needs them: S4 before P1d, S7/S8/full S9 before P1e, S6 any time; S3 only if Hermes returns (D48).
+
+**Authorization (owner, 2026-10-19):** S1-lite, S2, S5 and S9-lite are authorized. S3, S4, S6, S7, S8 and full S9 are **not** authorized yet.
+
+**Spike rules (owner, 2026-10-19):**
+- **Code location:** spike code lives inside the Shardrail repository in `spikes/`, one subfolder per spike: `spikes/s1-lite-codex/`, `spikes/s2-grok/`, `spikes/s5-ui/`, `spikes/s9-lite-macos/` (later ones follow the same `s<n>-<topic>` pattern).
+- **Not committed:** `spikes/` is in `.gitignore` as the root-anchored pattern `/spikes/` (so `planning/spikes/` stays tracked); spike code is disposable and never becomes product code — anything worth keeping is re-written under the normal module rules (11 §3).
+- **Live agents:** throwaway test repositories for live providers live under `spikes/<id>/workdir/`, contain no real secrets and no real project code; live models run only there.
+- **Notes are committed:** each spike's written output is `planning/spikes/<id>.md` (e.g. `planning/spikes/s1-lite-codex.md`), using the template in [`spikes/README.md`](spikes/README.md): goal, setup with tool versions, what was run, results with evidence, verdict, impact on plan decisions/IDs. Plan changes a spike causes are then made in place (12 "Revised because", 13, 14 evidence).
 
 | ID | Questions | Done when |
 | --- | --- | --- |
-| S1 Codex | separate `codex app-server` over stdio: thread start, turn, approvals, kill, resume; JSON Schema from the pinned CLI; does it lock `~/.codex` or the control socket shared with an open TUI; concurrent turns across threads in one process; approval wait limit (hold 10 min); whether pending approvals clear at turn end; delta rates; escalation request fields (which are boundary-breaking); whether project `.codex/rules` change approvals; `-c` overrides for pinning; background terminals after turn end and after daemon kill; behavior on refused unknown requests | note on wire events; `thread/shellCommand` stays forbidden in UI; decision on running beside the user's TUI; topology decision |
-| S2 Grok | one `grok agent stdio`, two sessions, different sandboxes; does `auto` still reach `session/request_permission`; `session/resume` support; reject-option presence; `tool_call_update` after allow/deny | process-per-session vs list of shareable profiles; acknowledgement rule |
+| S1 Codex | separate `codex app-server` over stdio: thread start, turn, approvals, kill, resume; JSON Schema from the pinned CLI; does it lock `~/.codex` or the control socket shared with an open TUI; concurrent turns across threads in one process; approval wait limit (hold 10 min); whether pending approvals clear at turn end; delta rates; escalation request fields (which are boundary-breaking); whether project `.codex/rules` change approvals; `-c` overrides for pinning; **`approvalsReviewer: "user"` accepted and echoed on thread/turn requests**; app tool approvals via `tool/requestUserInput`; network approval grouping; background terminals after turn end and after daemon kill **without** the experimental `backgroundTerminals` methods (containment only); behavior on refused unknown requests | note on wire events; `thread/shellCommand` stays forbidden in UI; decision on running beside the user's TUI; topology decision |
+| S2 Grok | one `grok agent stdio`, two sessions, different sandboxes; does `auto` still reach `session/request_permission`; `session/resume` support; reject-option presence; `tool_call_update` after allow/deny; **how to confirm at runtime that the sandbox was applied (it fails open)**; writes to `~/.grok/**` and project `.grok/sandbox.toml` from each profile; ACP version negotiated when the client requests v2; config options exposed | process-per-session vs list of shareable profiles; acknowledgement rule |
 | S3 Hermes | prompt, deny by timeout, resume after restart; can `session/load` open a CLI-created session; replay volume; sandboxing; approval-config pinning; effective toolset | `load_foreign_session` yes/no; acknowledgement rule |
 | S4 Claude | ACP adapter vs direct SDK: approval, cancel, resume, start in an untrusted folder; passing `settingSources: []`, disabling auto memory (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` candidate) and connectors; pinning permission mode in all trust states; `.claude/settings*.json` protection under its sandbox; API-key auth path; **plus the owner's terms answer (U9), which does not gate other work** | one Claude channel chosen (or exclusion) |
-| S5 UI | transcript mock in Tauri WKWebView: B3 (whole process tree), B4, B5, 5 000 and 50 000 events; full pipeline (coalescing, incremental Markdown, virtualization); relay vs loopback latency, code size, token delivery; same mock in a bare Swift WKWebView if Tauri fails | D2/D3 confirmed or Swift fallback; transport chosen; framework chosen |
+| S5 UI | transcript mock in Tauri WKWebView: B3 (whole process tree), B4, B5, 5 000 and 50 000 events; **React streaming prototype**: several agents at 50–100 tokens/s each into an external store with per-frame coalescing, block-memoized streaming Markdown through the sanitizing renderer (Streamdown or equivalent), TanStack-virtualized history; record re-render traces; relay vs loopback latency, code size, token delivery; same mock in a bare Swift WKWebView if Tauri fails | D2 confirmed or Swift fallback; transport chosen; React confirmed against B3/B4/B5 — otherwise the Svelte 5 fallback (D3) is triggered |
 | S6 TUI attach | negative test: no adapter can honestly take over an open interactive TUI | stays Unsupported, or a narrow official attach appears |
-| S7 Protection | per provider × sandbox profile: writes to Shardrail data dir, binaries, provider install trees and approval configs; socket bind/connect; reads of identity material; LaunchAgents, rc files, `~/.ssh/config`, app bundle, WebKit storage; `SSH_AUTH_SOCK` reachability; TCC attribution of descendants; keychain prompts; code-signing peer check via audit token | outcome table feeding the U21 decision rule |
+| S7 Protection | per provider × sandbox profile: writes to Shardrail data dir, binaries, provider install trees and approval configs; socket bind/connect; reads of identity material; LaunchAgents, rc files, `~/.ssh/config`, app bundle, WebKit storage; `SSH_AUTH_SOCK` reachability; TCC attribution of descendants; keychain prompts; code-signing peer check via audit token; **OpenSSH ControlMaster sockets and keychain-backed CLI tokens; writes to `/Applications/Shardrail.app` from agent descendants (TCC responsibility); whether user-configured MCP server processes inherit the provider sandbox; Grok sandbox fail-open detection** | outcome table feeding the checklist's S7-dependent items (D47); prerequisite for any future "protected" status (separate owner decision) |
 | S8 Safe Git | malicious-repo fixtures: `core.fsmonitor`, `filter.*.clean/process`, `diff.*.textconv`, `diff.external`, `core.hooksPath`, `core.sshCommand`, pager/editor/credential helpers, `include`/`includeIf`, `config.worktree`, `GIT_*` env, upward discovery, out-of-workspace gitdir/`core.worktree`, symlink/hardlink escapes, LFS repo, agent rewriting `.git/config` mid-session; gix status/diff coverage with all permissions off; exec-denied worker with `execve` tripwire | library choice and worker design confirmed; B16 |
-| S9 Containment | Linux: per-provider cgroup via systemd user scope/delegation, `cgroup.kill`, `KillMode` × `Restart=`, linger, pidfds. macOS: helper descendant-tracking accuracy with detaching tools (`setsid`, `nohup`, dev servers) | containment guarantees and residuals documented per OS |
+| S9 Containment | Linux: per-provider cgroup via systemd user scope/delegation, `cgroup.kill`, `KillMode` × `Restart=`, linger, pidfds. macOS: helper descendant-tracking accuracy with detaching tools (`setsid`, `nohup`, dev servers) using process group + `NOTE_FORK`/`p_puniqueid` scan + inherited sentinel fd (D43); test `fork → exit → setsid → closefrom → sleep`. **S9-lite** = the macOS sentinel-fd part only | containment guarantees and residuals documented per OS |
 
 ## 3. Epics
 
 | ID | Phase | Objective | Modules | Depends on | Acceptance outcome |
 | --- | --- | --- | --- | --- | --- |
-| E0.1–E0.9 | P0 | spikes S1–S9 | — | owner authorization | spike notes |
-| E1.1 | P1a | journal event schema (codegen to Rust/TS); hand-written wire types until a second client type | M02 | P0 | reviewed schemas |
-| E1.2 | P1a | fake ACP agent with scripted scenarios (normal turn, crash mid-tool, detached tool, replay on load, parallel approvals, missing reject option, unknown request) | M18 | E1.1 | runs in CI |
-| E1.3 | P1a | daemon core, supervisor, macOS containment helper, spawn intent, identity records | M01, M05 | E1.1, S9 | lifecycle + containment fixtures |
+| E0.1–E0.9 | P0 | spikes S1–S9 | — | owner authorization (S1-lite, S2, S5, S9-lite authorized 2026-10-19) | spike notes |
+| E1.1 | P1a | journal event and wire types in Rust → committed `schemars` JSON Schema → generated TypeScript (D27; `ts-rs` fallback); CI drift check | M02 | P0 | reviewed schemas; drift check green (T1.16) |
+| E1.2 | P1a | fake ACP agent (v1 and v2) with scripted scenarios (normal turn, crash mid-tool, detached tool, replay on load/resume, parallel approvals, missing reject option, permission without subject, agent-initiated mode change, unknown request) | M18 | E1.1 | runs in CI |
+| E1.3 | P1a | daemon core, supervisor, process-group containment + descendant snapshot, spawn intent, identity records (macOS helper moves to E1.18) | M01, M05 | E1.1, S9-lite | lifecycle fixtures |
 | E1.4 | P1a | journal store: WAL, epoch, versioning, purge, salvage | M04 | E1.1 | F9, F17, B7 |
-| E1.5 | P1a | session engine: state machine (all four cell kinds tested), tiers, projections, commands | M03 | E1.3, E1.4 | conformance suite; F12, F18 |
+| E1.5 | P1a | session engine: state machine (all four cell kinds tested) incl. queue, lifecycle and journal-unavailable rules (05 §5a, §9, §10), tiers, projections, commands | M03 | E1.3, E1.4 | conformance suite; F7, F12, F18, F24 |
 | E1.6 | P1a | ACP adapter for the first provider | M06 | E1.2, E1.5 | fixtures + live smoke |
-| E1.7 | P1a | approval broker, option classes, host protection state, trust | M09 | E1.5, S7 | F5, F13, F21, F22; B14 |
+| E1.7 | P1a | approval broker: write-ahead responses (D34), `once`/`deny`, option classes, expiry, trust states, agent-authored text handling (D38), bypass indicators (06 §3a), verification checklist runtime items (06 §3b); host protection state moves to E1.18 | M09 | E1.5 | F5, F13, F21, F23; B14 |
 | E1.8 | P1a | gateway + local desktop connection (`full` scope, peer identity admission, bounded queues) | M10 | E1.1, E1.5, S5 | B12 |
-| E1.9 | P1a | workspace service: safe Git worker, scoped watchers, write lease | M11 | S8, E1.3 | F8, F19, B16 |
+| E1.9 | P1e | workspace service: safe Git worker, scoped watchers, write lease (P1a shows provider-reported diffs only) | M11 | S8, E1.3 | F8, F19, B16 |
 | E1.10 | P1a | UI system and rendering pipeline | M15 | S5 | B4, B5, N11 |
 | E1.11 | P1a | web UI: inbox, session view, palette | M14 | E1.8, E1.10 | F3–F5, F14 (local) |
-| E1.12 | P1a | desktop shell: window, menu bar, notifications, keychain, connect-first, version skew | M13 | E1.8 | B3, B6 |
-| E1.13 | P1b | Codex adapter + fake app-server | M07 | E1.6, S1 | Codex fixtures + smoke |
-| E1.14 | P1c | second ACP provider | M06 | E1.6 | fixtures + smoke |
-| E1.15 | P1d | Claude channel or recorded exclusion | M08 | E1.6, S4, U9 | smoke or exclusion record |
+| E1.12 | P1a / P1e | desktop shell: P1a window + token minting + Tauri isolation/capabilities; P1e menu bar, notifications, keychain, connect-first, version skew, drain-then-upgrade UI | M13 | E1.8 | B3, B6 |
+| E1.13 | P1a or P1b | Codex adapter + fake app-server (whichever phase Codex lands in, D40) | M07 | E1.6 or E1.5, S1-lite | Codex fixtures + smoke |
+| E1.14 | P1c | Hermes ACP mapping — not in Phase 1 (D48) | M06 | E1.6 | fixtures + smoke or exclusion record |
+| E1.15 | P1d | Claude channel (user's own API key, D29) or recorded exclusion | M08 | E1.6, S4 | smoke or exclusion record |
 | E1.16 | P1 close | manual handoff MVP (U19) | M12 | E1.6 | edited bundle → first prompt |
 | E1.17 | P1 close | budget and soak report | M18 | all P1 | stored traces |
+| E1.18 | P1e | hardening: host protection state + S7 table feeding the verification checklist (D47; S7 gates any future "protected" status), macOS containment helper (D43), code-signing peer admission (own local identity, D46), drain-then-upgrade (D39), purge/salvage | M01, M05, M09, M04, M13 | P1a, S7, S9 | F17, F20, F22, F25; B1, B3 |
 | E2.1 | P2 | Linux service, cgroups, linger, `bridge` | M16, M05 | P1 | P2 gate |
 | E2.2 | P2 | host management, federation, cross-host inbox | M13, M14 | E2.1 | F14, F16 |
 | E2.3 | P2 | paired `limited` clients, asymmetric keys, mutual handshake, browser listener | M10 | P1 | scope tests |
 | E2.4 | P2 | read-through external history | M06, M14 | P1 | F15 |
-| E2.5 | P2 | optional macOS launch agent | M01, M13 | P1, U6 | opt-in mode |
+| E2.5 | P2 | optional macOS launch agent (U6 answered) | M01, M13 | P1 | opt-in mode |
 | E2.6 | P2 | macOS integrity MAC for re-establishing protection | M09, M04 | P1 | rollback test |
 | E2.7 | P2 | 72 h soak | M18 | E2.1 | B8 extended |
 | E3.1 / E3.2 | P3 | mobile decision (D28) / mobile client | M17 | P2, U4 | P3 gate |
@@ -75,10 +88,11 @@ Each spike takes days, not weeks, and produces a written note.
 | ID | Epic | Task | Verifiable outcome |
 | --- | --- | --- | --- |
 | T0.1 | E0.1 | Write the S1 protocol plan (questions, observations, safety limits) | reviewed plan |
-| T0.4 | E0.4 | Obtain the policy/legal answer for U9 (owner action; can start now) | recorded decision |
+| T0.4 | E0.4 | ~~Obtain the policy/legal answer for U9~~ — done 2026-10-19: internal-use scope (D45, D29) | recorded decision |
 | T0.5 | E0.5 | Define the S5 measurement protocol (process-tree footprint, clocks, workloads) | reviewed protocol |
 | T0.7 | E0.6 | Define the S7 matrix (provider × profile × access type) | reviewed matrix |
 | T0.8 | E0.7 | Desk comparison of Git library coverage vs needs | comparison note |
+| T0.9 | — | Write `AGENTS.md` and the CI gate set for AI-written code (11 §3, 08 §6): pinned versions, version → llms.txt/MCP table, dependency allowlist, lint/type/test gates | reviewed files (no application code) |
 | T1.1 | E1.1 | Draft durable-event schema v0 with `schema_version` and `journal_epoch` | schema + review |
 | T1.2 | E1.2 | Fake ACP agent scenarios (list in E1.2) | CI-runnable |
 | T1.3 | E1.3 | Kill-daemon fixture with a detached tool: helper terminates descendants; restart shows survivors as `orphan_alive` | test passes |
@@ -88,7 +102,13 @@ Each spike takes days, not weeks, and produces a written note.
 | T1.7 | E1.7 | Approval CAS, expiry mapping, re-confirmation, crash between response and acknowledgement → "outcome not confirmed" | F5, F21 |
 | T1.8 | E1.8 | Per-client queue bound + resync with a stalled client | ≤ B12 |
 | T1.9 | E1.9 | Git worker `execve` tripwire on the S8 fixture set | CI fails on exec |
-| T1.10 | E1.10 | Rendering fixtures: bidi/zero-width command, remote image in Markdown | N11 |
+| T1.10 | E1.10 | Rendering fixtures: bidi/zero-width command, remote image in Markdown, injected "safe" title over a dangerous argv | N11, D38 |
+| T1.11 | E1.7 | Approval write-ahead: kill -9 between commit and write, and between write and acknowledgement → never `withdrawn` | F23 |
+| T1.12 | E1.5 | Journal-unavailable fixtures (disk full, corrupted page): pending approvals rejected/cancelled, no dispatch | F24 |
+| T1.13 | E1.5 | Queued instruction across restart and after an abnormal turn end | F7 |
+| T1.14 | E1.18 | Drain-then-upgrade with a running turn and an open approval | F25 |
+| T1.15 | E1.2 | ACP v1/v2 negotiation and normalization parity on the same scripted scenario | D35 |
+| T1.16 | E1.1 | Rust → JSON Schema → TS generation with CI drift check; fidelity check against `ts-rs` | D27 |
 
 ## 5. Dependencies
 
@@ -101,18 +121,19 @@ flowchart TD
   E13 & E14 --> E15[E1.5 Engine]
   E12 & E15 --> E16[E1.6 First ACP adapter]
   E15 --> E17[E1.7 Approvals] & E18[E1.8 Gateway]
-  E13 --> E19[E1.9 Workspace]
+  E13 --> E19[E1.9 Workspace - P1e]
   E110[E1.10 UI system] --> E111[E1.11 Web UI]
   E18 --> E111 & E112[E1.12 Shell]
   E16 --> E113[E1.13 Codex] & E114[E1.14 2nd ACP] & E115[E1.15 Claude or exclusion]
   E113 & E114 --> E117[E1.17 Budget report]
   E115 -. optional .-> E117
   E117 --> G2{{Owner: close P1, authorize P2}} --> P2[Phase 2]
-  P2 --> G3{{Owner: decide U4 / D28}} --> P3[Phase 3]
+  P2 --> G3{{Owner: decide D28 - U4 deferred to here}} --> P3[Phase 3]
   E117 --> P4[Phase 4]
 ```
 
-- **Critical path:** G0 → S5, S7, S8, S9 → E1.1 → E1.4 → E1.5 → E1.6 → E1.13 → E1.17 → G2. Claude is off the critical path.
+- **Critical path (revised 2026-10-18):** G0 → S1-lite, S2, S5, S9-lite → E1.1 → E1.4 → E1.5 → first adapter (E1.6 or E1.13) → P1a gate → S7, S8, S9 → E1.18 / E1.9 (P1e) → E1.17 → G2. Claude is off the critical path; Hermes is not in Phase 1 (D48).
 - **Parallel with isolation:** spikes are independent (S7 needs the P1a providers set up); after E1.1, fake agent, core, journal and UI system touch disjoint modules; adapters E1.13–E1.15 run in parallel only after the adapter framework is stable and must not change it concurrently.
 - **Bottlenecks:** the journal schema (everything depends on it) and the session engine (integration hub).
-- **High-risk prerequisites:** S7 (protection claim), S5 (WebView footprint), S9 (macOS containment), U9 (Claude terms), S1 (Codex schema stability).
+- **High-risk prerequisites:** S7 (protection claim), S5 (WebView footprint), S9 (macOS containment), S1 (Codex schema stability), ACP v2 stabilization (R32). Provider terms are not a prerequisite while the scope is internal (D45); a scope change reopens U9/U25 (R46).
+- **Deferred, off the critical path (D46):** distribution signing, notarization, updater, `NOTICE`, SBOM, signed artifacts, bug template, privacy notes, distro packages, store tracks, trademark, provider bundling (09 §5). No phase or task depends on them until R47 fires.
