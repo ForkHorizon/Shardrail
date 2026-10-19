@@ -188,19 +188,7 @@ impl Coordinator {
         match effect() {
             Ok(result) => Ok(result),
             Err(error) => {
-                self.session.mark_desynced();
-                self.healthy = false;
-                let snapshot = serde_json::to_value(&self.session)
-                    .expect("session serialization is infallible");
-                let event = DurableEvent {
-                    event_id: 0,
-                    session_id: self.session_id,
-                    schema_version: SCHEMA_VERSION,
-                    kind: "provider_effect_unknown".into(),
-                    occurred_at_ms: now_ms,
-                    payload: serde_json::json!({"session_snapshot":snapshot}),
-                };
-                let _ = self.journal.append_event(&event);
+                self.record_provider_effect_unknown(now_ms);
                 Err(error.into())
             }
         }
@@ -321,8 +309,7 @@ impl Coordinator {
         let response_result =
             self.write_response(approval, candidate, response, terminal, response_effect);
         if cancel_turn && let Err(error) = cancel_turn_effect() {
-            self.session.mark_desynced();
-            self.healthy = false;
+            self.record_provider_effect_unknown(request.now_ms);
             return Err(error.into());
         }
         response_result
@@ -357,6 +344,22 @@ impl Coordinator {
     fn fail_closed(&mut self) {
         self.healthy = false;
         self.session.journal_failed();
+    }
+
+    fn record_provider_effect_unknown(&mut self, now_ms: i64) {
+        self.session.mark_desynced();
+        self.healthy = false;
+        let snapshot =
+            serde_json::to_value(&self.session).expect("session serialization is infallible");
+        let event = DurableEvent {
+            event_id: 0,
+            session_id: self.session_id,
+            schema_version: SCHEMA_VERSION,
+            kind: "provider_effect_unknown".into(),
+            occurred_at_ms: now_ms,
+            payload: serde_json::json!({"session_snapshot":snapshot}),
+        };
+        let _ = self.journal.append_event(&event);
     }
 }
 
@@ -733,6 +736,42 @@ mod tests {
         assert_eq!(
             coordinator.approval_state(approval_id).unwrap().as_deref(),
             Some("expired")
+        );
+    }
+
+    #[test]
+    fn failed_timeout_cancel_effect_is_durably_marked_unknown() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let session_id = Uuid::now_v7();
+        let mut coordinator = open_after_startup(&path, session_id);
+        coordinator
+            .transition(0, "turn_started", serde_json::json!({}), || Ok(()))
+            .unwrap();
+        let mut approval = Approval::new(0);
+        coordinator.create_approval(approval.clone()).unwrap();
+        let result = coordinator.timeout_approval(
+            &mut approval,
+            ApprovalTimeoutRequest {
+                now_ms: 180_000,
+                provider_limit_secs: None,
+                held: false,
+                option_id: None,
+            },
+            |_, _| Ok(()),
+            || Err(io::Error::other("turn cancel write failed")),
+        );
+        assert!(result.is_err());
+        assert!(!coordinator.journal_healthy());
+        let events = Journal::open(&path)
+            .unwrap()
+            .events_for_session(session_id)
+            .unwrap();
+        assert_eq!(events.last().unwrap().kind, "provider_effect_unknown");
+        let recovered = Coordinator::open(Journal::open(path).unwrap(), session_id).unwrap();
+        assert_eq!(
+            recovered.session().turn,
+            shardrail_session_core::TurnState::Detached
         );
     }
 
