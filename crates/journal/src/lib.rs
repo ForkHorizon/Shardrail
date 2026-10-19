@@ -1,7 +1,9 @@
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use shardrail_protocol::{ApprovalDecision, ApprovalResponding, ApprovalState, DurableEvent};
 use shardrail_session_core::Approval;
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -23,11 +25,27 @@ pub enum JournalError {
 
 pub struct Journal(Connection);
 
+static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
 impl Journal {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
-        reject_non_regular_path(path.as_ref())?;
-        set_private_file_mode(path.as_ref())?;
-        let connection = Connection::open(path)?;
+        let path = path.as_ref();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "journal path has no filename",
+            )
+        })?;
+        let path = parent.canonicalize()?.join(name);
+        reject_non_regular_path(&path)?;
+        set_private_file_mode(&path)?;
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(
@@ -70,6 +88,12 @@ impl Journal {
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 journal_epoch TEXT NOT NULL,
                 host_id TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS event_receipts (
+                event_id INTEGER PRIMARY KEY,
+                receipt_monotonic_ns TEXT NOT NULL,
+                receipt_wall_clock_ms INTEGER NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(event_id)
              );
              CREATE TRIGGER IF NOT EXISTS approval_events_no_update BEFORE UPDATE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;
              CREATE TRIGGER IF NOT EXISTS approval_events_no_delete BEFORE DELETE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;",
@@ -134,11 +158,53 @@ impl Journal {
         if redacted && !flags.iter().any(|flag| flag == "redacted") {
             flags.push("redacted".into());
         }
-        self.0.execute(
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO events(journal_epoch,host_id,session_id,schema_version,kind,occurred_at_ms,provider_ref,causation,redaction_flags,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![event.journal_epoch.to_string(), event.host_id.to_string(), event.session_id.to_string(), event.schema_version, event.kind, event.occurred_at_ms, event.provider_ref, event.causation, serde_json::to_string(&flags).expect("redaction flags serialize"), payload.to_string()],
         )?;
-        Ok(self.0.last_insert_rowid())
+        let event_id = tx.last_insert_rowid();
+        let monotonic_ns = MONOTONIC_ORIGIN
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_nanos();
+        let wall_clock_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as i64);
+        tx.execute(
+            "INSERT INTO event_receipts(event_id,receipt_monotonic_ns,receipt_wall_clock_ms) VALUES (?1,?2,?3)",
+            params![event_id, monotonic_ns.to_string(), wall_clock_ms],
+        )?;
+        tx.commit()?;
+        Ok(event_id)
+    }
+
+    pub fn event_receipt(&self, event_id: i64) -> Result<Option<(u128, i64)>, JournalError> {
+        let receipt = self
+            .0
+            .query_row(
+                "SELECT receipt_monotonic_ns,receipt_wall_clock_ms FROM event_receipts WHERE event_id=?1",
+                [event_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        receipt
+            .map(|(monotonic, wall)| {
+                monotonic
+                    .parse::<u128>()
+                    .map(|monotonic| (monotonic, wall))
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+            })
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<DurableEvent>, JournalError> {
@@ -186,6 +252,61 @@ impl Journal {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let epoch = self.journal_epoch()?;
+        let host_id = self.host_id()?;
+        if events
+            .iter()
+            .any(|event| event.journal_epoch != epoch || event.host_id != host_id)
+        {
+            return Err(JournalError::EpochMismatch);
+        }
+        Ok(events)
+    }
+
+    pub fn events_after(&self, cursor: i64) -> Result<Vec<DurableEvent>, JournalError> {
+        let mut statement = self.0.prepare(
+            "SELECT event_id,journal_epoch,host_id,session_id,schema_version,kind,occurred_at_ms,provider_ref,causation,redaction_flags,payload FROM events WHERE event_id>?1 ORDER BY event_id",
+        )?;
+        let rows = statement.query_map([cursor], |row| {
+            let parse_uuid = |index| -> rusqlite::Result<Uuid> {
+                let value: String = row.get(index)?;
+                Uuid::parse_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        index,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            };
+            let flags: String = row.get(9)?;
+            let payload: String = row.get(10)?;
+            Ok(DurableEvent {
+                event_id: row.get(0)?,
+                journal_epoch: parse_uuid(1)?,
+                host_id: parse_uuid(2)?,
+                session_id: parse_uuid(3)?,
+                schema_version: row.get(4)?,
+                kind: row.get(5)?,
+                occurred_at_ms: row.get(6)?,
+                provider_ref: row.get(7)?,
+                causation: row.get(8)?,
+                redaction_flags: serde_json::from_str(&flags).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        9,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                payload: serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
         let epoch = self.journal_epoch()?;
         let host_id = self.host_id()?;
         if events
@@ -1138,6 +1259,9 @@ mod tests {
         let stored = journal.events_for_session(event.session_id).unwrap();
         assert_eq!(stored[0].event_id, cursor);
         assert_eq!(cursor, 1);
+        let (monotonic_ns, wall_clock_ms) = journal.event_receipt(cursor).unwrap().unwrap();
+        assert!(wall_clock_ms > 0);
+        assert!(monotonic_ns > 0);
     }
 
     #[test]

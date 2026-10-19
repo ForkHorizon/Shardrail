@@ -10,6 +10,8 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Task N2 direct-dependency additions, also allowlisted in AGENTS.md:
+# tokio, clap, nix. This list is a blocklist, so approved dependencies do not belong here.
 deny = []
 
 [sources]
