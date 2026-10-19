@@ -146,14 +146,14 @@ impl Journal {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = {
             let mut statement =
-                tx.prepare("SELECT approval_id FROM approvals WHERE state='responding'")?;
+                tx.prepare("SELECT approval_id FROM approvals WHERE state IN ('responding','responded_unacked')")?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
         for id in &ids {
             tx.execute(
-                "UPDATE approvals SET state='delivered_unconfirmed' WHERE approval_id=?1 AND state='responding'",
+                "UPDATE approvals SET state='delivered_unconfirmed' WHERE approval_id=?1 AND state IN ('responding','responded_unacked')",
                 [id],
             )?;
             tx.execute(
@@ -246,12 +246,22 @@ impl Journal {
             .optional()?)
     }
 
-    #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     pub fn simulate_disk_full(&self) -> Result<(), JournalError> {
         let page_count: i64 = self
             .0
             .query_row("PRAGMA page_count", [], |row| row.get(0))?;
         self.0.pragma_update(None, "max_page_count", page_count)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn fail_approval_writes_for_test(&self) -> Result<(), JournalError> {
+        self.0.execute_batch(
+            "CREATE TEMP TRIGGER fail_approval_writes BEFORE INSERT ON approval_events
+             WHEN NEW.kind='approval_responding'
+             BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END;",
+        )?;
         Ok(())
     }
 

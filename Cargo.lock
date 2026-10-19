@@ -554,10 +554,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardrail-coordinator"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "shardrail-journal",
+ "shardrail-protocol",
+ "shardrail-session-core",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "shardrail-fake-acp"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "shardrail-coordinator",
+ "shardrail-journal",
+ "shardrail-protocol",
+ "shardrail-session-core",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -588,6 +607,7 @@ name = "shardrail-session-core"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "serde",
  "shardrail-protocol",
  "uuid",
 ]

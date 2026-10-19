@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use shardrail_protocol::{ApprovalDecision, ApprovalState, SessionLifecycle};
 use std::time::Duration;
 use uuid::Uuid;
@@ -138,7 +139,7 @@ pub enum TurnOutcome {
     UnknownAfterRestart,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum QueueState {
     Empty,
     Queued(String),
@@ -148,7 +149,7 @@ pub enum QueueState {
     Edited,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TurnState {
     Idle,
     Running,
@@ -157,20 +158,25 @@ pub enum TurnState {
     Detached,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProcessState {
     Alive,
     Exited,
     DesyncedAlive,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
     pub lifecycle: SessionLifecycle,
     pub turn: TurnState,
     pub process: ProcessState,
     pub queue: QueueState,
+    #[serde(skip, default = "journal_available_default")]
     pub journal_available: bool,
+}
+
+fn journal_available_default() -> bool {
+    true
 }
 
 impl Default for Session {
