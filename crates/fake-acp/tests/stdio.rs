@@ -94,10 +94,9 @@ impl Agent {
 
 fn open_coordinator(path: &std::path::Path) -> (Coordinator, Uuid) {
     let id = Uuid::now_v7();
-    (
-        Coordinator::open(Journal::open(path).unwrap(), id).unwrap(),
-        id,
-    )
+    let mut journal = Journal::open(path).unwrap();
+    Coordinator::recover_journal(&mut journal).unwrap();
+    (Coordinator::open(journal, id).unwrap(), id)
 }
 
 #[test]
@@ -137,6 +136,7 @@ fn happy_path_commits_session_transition_and_approval_before_provider_effect() {
         )
         .unwrap();
     agent.finish_prompt("allow_once");
+    coordinator.acknowledge_approval(approval_id).unwrap();
     let events = Journal::open(&journal_path)
         .unwrap()
         .events_for_session(session_id)
@@ -154,7 +154,7 @@ fn happy_path_commits_session_transition_and_approval_before_provider_effect() {
             .approval_state(approval_id)
             .unwrap()
             .as_deref(),
-        Some("responded_unacked")
+        Some("allowed")
     );
 }
 
@@ -174,6 +174,7 @@ fn approval_path(option_id: &str, timeout: bool) {
     let journal_path = dir.path().join("journal.db");
     let (mut coordinator, _) = open_coordinator(&journal_path);
     let mut approval = Approval::new(1_000);
+    let approval_id = approval.id;
     coordinator.create_approval(approval.clone()).unwrap();
     let send = |decision: &ApprovalDecision, option: Option<&str>| {
         assert_eq!(decision, &ApprovalDecision::Deny);
@@ -191,6 +192,7 @@ fn approval_path(option_id: &str, timeout: bool) {
                     option_id: Some(option_id.into()),
                 },
                 send,
+                || Ok(()),
             )
             .unwrap();
     } else {
@@ -211,6 +213,7 @@ fn approval_path(option_id: &str, timeout: bool) {
             .unwrap();
     }
     agent.finish_prompt(option_id);
+    coordinator.acknowledge_approval(approval_id).unwrap();
 }
 
 #[test]
@@ -267,7 +270,7 @@ fn crash_after_response_write_recovers_as_delivered_unconfirmed() {
     let dir = tempdir().unwrap();
     let mut agent = Agent::start();
     let journal_path = dir.path().join("journal.db");
-    let (mut coordinator, id) = open_coordinator(&journal_path);
+    let (mut coordinator, _) = open_coordinator(&journal_path);
     let mut approval = Approval::new(1);
     coordinator.create_approval(approval.clone()).unwrap();
     let approval_id = approval.id;
@@ -291,7 +294,7 @@ fn crash_after_response_write_recovers_as_delivered_unconfirmed() {
     }));
     assert!(crash.is_err());
     drop(coordinator);
-    let recovered = Coordinator::open(Journal::open(&journal_path).unwrap(), id).unwrap();
+    let (recovered, _) = open_coordinator(&journal_path);
     assert_eq!(
         recovered.approval_state(approval_id).unwrap().as_deref(),
         Some("delivered_unconfirmed")

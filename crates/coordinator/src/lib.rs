@@ -94,10 +94,14 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    pub fn open(journal: Journal, session_id: Uuid) -> Result<Self, CoordinatorError> {
-        let mut journal = journal;
+    /// Runs once after daemon startup and before opening session coordinators.
+    pub fn recover_journal(journal: &mut Journal) -> Result<(), CoordinatorError> {
         journal.recover_responding()?;
         journal.recover_pending_approvals()?;
+        Ok(())
+    }
+
+    pub fn open(journal: Journal, session_id: Uuid) -> Result<Self, CoordinatorError> {
         let events = journal.events_for_session(session_id)?;
         let session = recover_session(replay_session(&events)?);
         Ok(Self {
@@ -181,7 +185,25 @@ impl Coordinator {
             return Err(error.into());
         }
         self.session = next_session;
-        effect().map_err(CoordinatorError::Io)
+        match effect() {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.session.mark_desynced();
+                self.healthy = false;
+                let snapshot = serde_json::to_value(&self.session)
+                    .expect("session serialization is infallible");
+                let event = DurableEvent {
+                    event_id: 0,
+                    session_id: self.session_id,
+                    schema_version: SCHEMA_VERSION,
+                    kind: "provider_effect_unknown".into(),
+                    occurred_at_ms: now_ms,
+                    payload: serde_json::json!({"session_snapshot":snapshot}),
+                };
+                let _ = self.journal.append_event(&event);
+                Err(error.into())
+            }
+        }
     }
 
     pub fn create_approval(&mut self, approval: Approval) -> Result<(), CoordinatorError> {
@@ -220,7 +242,7 @@ impl Coordinator {
             responder: request.responder.to_owned(),
             responded_at_ms: request.now_ms,
         };
-        self.write_response(approval, candidate, response, effect)
+        self.write_response(approval, candidate, response, false, effect)
     }
 
     fn write_response<T>(
@@ -228,9 +250,15 @@ impl Coordinator {
         approval: &mut Approval,
         candidate: Approval,
         response: ApprovalResponding,
+        expired: bool,
         effect: impl FnOnce(&ApprovalDecision, Option<&str>) -> io::Result<T>,
     ) -> Result<T, CoordinatorError> {
-        if let Err(error) = self.journal.begin_approval_response(&response) {
+        let journal_result = if expired {
+            self.journal.begin_expired_approval_response(&response)
+        } else {
+            self.journal.begin_approval_response(&response)
+        };
+        if let Err(error) = journal_result {
             self.fail_closed();
             return Err(error.into());
         }
@@ -254,7 +282,8 @@ impl Coordinator {
         &mut self,
         approval: &mut Approval,
         request: ApprovalTimeoutRequest,
-        effect: impl FnOnce(&ApprovalDecision, Option<&str>) -> io::Result<T>,
+        response_effect: impl FnOnce(&ApprovalDecision, Option<&str>) -> io::Result<T>,
+        cancel_turn_effect: impl FnOnce() -> io::Result<()>,
     ) -> Result<T, CoordinatorError> {
         self.ensure_healthy()?;
         let mut candidate = approval.clone();
@@ -264,7 +293,8 @@ impl Coordinator {
         {
             return Err(CoordinatorError::InvalidApproval);
         }
-        let response_decision = if request.option_id.is_some() {
+        let cancel_turn = request.option_id.is_none();
+        let response_decision = if !cancel_turn {
             ApprovalDecision::Deny
         } else {
             ApprovalDecision::Cancel
@@ -276,7 +306,44 @@ impl Coordinator {
             responder: "timeout-policy".to_owned(),
             responded_at_ms: request.now_ms,
         };
-        self.write_response(approval, candidate, response, effect)
+        if cancel_turn {
+            let mut next_session = self.session.clone();
+            next_session.turn = shardrail_session_core::TurnState::Cancelling;
+            self.transition_to(
+                request.now_ms,
+                "turn_cancel_requested",
+                serde_json::json!({"reason":"approval_expired"}),
+                next_session,
+                || Ok(()),
+            )?;
+        }
+        let terminal = cancel_turn;
+        let response_result =
+            self.write_response(approval, candidate, response, terminal, response_effect);
+        if cancel_turn && let Err(error) = cancel_turn_effect() {
+            self.session.mark_desynced();
+            self.healthy = false;
+            return Err(error.into());
+        }
+        response_result
+    }
+
+    pub fn acknowledge_approval(&mut self, approval_id: Uuid) -> Result<(), CoordinatorError> {
+        self.ensure_healthy()?;
+        if let Err(error) = self.journal.acknowledge_approval(approval_id) {
+            self.fail_closed();
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    pub fn reject_approval_response(&mut self, approval_id: Uuid) -> Result<(), CoordinatorError> {
+        self.ensure_healthy()?;
+        if let Err(error) = self.journal.reject_approval_response(approval_id) {
+            self.fail_closed();
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     fn ensure_healthy(&self) -> Result<(), CoordinatorError> {
@@ -306,9 +373,11 @@ fn replay_session(events: &[DurableEvent]) -> Result<Session, CoordinatorError> 
 }
 
 fn recover_session(mut session: Session) -> Session {
+    if session.process == shardrail_session_core::ProcessState::Alive {
+        session.process = shardrail_session_core::ProcessState::DesyncedAlive;
+    }
     if session.turn != shardrail_session_core::TurnState::Idle {
         session.turn = shardrail_session_core::TurnState::Detached;
-        session.process = shardrail_session_core::ProcessState::DesyncedAlive;
     }
     session
 }
@@ -319,9 +388,17 @@ fn apply_transition(session: &mut Session, kind: &str) {
             session.turn = shardrail_session_core::TurnState::Running;
             session.process = shardrail_session_core::ProcessState::Alive;
         }
+        "process_started" => {
+            session.process = shardrail_session_core::ProcessState::Alive;
+        }
         "turn_finished" => {
             session.turn = shardrail_session_core::TurnState::Idle;
-            session.process = shardrail_session_core::ProcessState::Exited;
+        }
+        "turn_cancel_requested" => {
+            session.turn = shardrail_session_core::TurnState::Cancelling;
+        }
+        "process_exited" => {
+            session.process_exited();
         }
         "session_closed" => {
             let _ = session.close();
@@ -386,6 +463,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
+    fn open_after_startup(path: impl AsRef<Path>, session_id: Uuid) -> Coordinator {
+        let mut journal = Journal::open(path).unwrap();
+        Coordinator::recover_journal(&mut journal).unwrap();
+        Coordinator::open(journal, session_id).unwrap()
+    }
+
     #[test]
     fn private_directory_lock_hardens_permissions_and_releases_after_crash_like_drop() {
         let dir = tempdir().unwrap();
@@ -425,7 +508,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("journal.db");
         let id = Uuid::now_v7();
-        let journal = Journal::open(&path).unwrap();
+        let mut journal = Journal::open(&path).unwrap();
+        Coordinator::recover_journal(&mut journal).unwrap();
         let mut coordinator = Coordinator::open(journal, id).unwrap();
         let mut approval = Approval::new(1);
         let approval_id = approval.id;
@@ -453,7 +537,7 @@ mod tests {
             )
             .unwrap();
         drop(coordinator);
-        let recovered = Coordinator::open(Journal::open(path).unwrap(), id).unwrap();
+        let recovered = open_after_startup(path, id);
         assert_eq!(
             recovered.approval_state(approval_id).unwrap().as_deref(),
             Some("delivered_unconfirmed")
@@ -466,7 +550,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("journal.db");
         let session_id = Uuid::now_v7();
-        let mut coordinator = Coordinator::open(Journal::open(&path).unwrap(), session_id).unwrap();
+        let mut coordinator = open_after_startup(&path, session_id);
         let mut next = coordinator.session().clone();
         next.turn = shardrail_session_core::TurnState::Running;
         next.process = shardrail_session_core::ProcessState::Alive;
@@ -475,7 +559,7 @@ mod tests {
         coordinator
             .transition_session(1, "turn_started", serde_json::json!({}), next, || Ok(()))
             .unwrap();
-        let recovered = Coordinator::open(Journal::open(path).unwrap(), session_id).unwrap();
+        let recovered = open_after_startup(path, session_id);
         assert_eq!(
             recovered.session().turn,
             shardrail_session_core::TurnState::Detached
@@ -484,14 +568,226 @@ mod tests {
             recovered.session().queue,
             shardrail_session_core::QueueState::Queued("queued while active".into())
         );
+        assert_eq!(
+            recovered.session().process,
+            shardrail_session_core::ProcessState::DesyncedAlive
+        );
+    }
+
+    #[test]
+    fn turn_completion_keeps_provider_alive_for_later_turns() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let session_id = Uuid::now_v7();
+        let mut coordinator = open_after_startup(&path, session_id);
+        coordinator
+            .transition(1, "turn_started", serde_json::json!({}), || Ok(()))
+            .unwrap();
+        coordinator
+            .transition(2, "turn_finished", serde_json::json!({}), || Ok(()))
+            .unwrap();
+        assert_eq!(
+            coordinator.session().turn,
+            shardrail_session_core::TurnState::Idle
+        );
+        assert_eq!(
+            coordinator.session().process,
+            shardrail_session_core::ProcessState::Alive
+        );
+        let recovered = Coordinator::open(Journal::open(path).unwrap(), session_id).unwrap();
+        assert_eq!(
+            recovered.session().process,
+            shardrail_session_core::ProcessState::DesyncedAlive
+        );
+    }
+
+    #[test]
+    fn idle_alive_process_is_desynced_after_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let id = Uuid::now_v7();
+        let mut coordinator = open_after_startup(&path, id);
+        coordinator
+            .transition(1, "process_started", serde_json::json!({}), || Ok(()))
+            .unwrap();
+        let recovered = Coordinator::open(Journal::open(path).unwrap(), id).unwrap();
+        assert_eq!(
+            recovered.session().turn,
+            shardrail_session_core::TurnState::Idle
+        );
+        assert_eq!(
+            recovered.session().process,
+            shardrail_session_core::ProcessState::DesyncedAlive
+        );
+    }
+
+    #[test]
+    fn opening_another_session_does_not_run_global_approval_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).unwrap();
+        let approval_id = Uuid::now_v7();
+        journal.create_pending_approval(approval_id).unwrap();
+        let response = ApprovalResponding {
+            approval_id,
+            decision: ApprovalDecision::Allow,
+            option_id: Some("allow_once".into()),
+            responder: "client".into(),
+            responded_at_ms: 2,
+        };
+        journal.begin_approval_response(&response).unwrap();
+        journal.mark_response_sent(approval_id).unwrap();
+        let _session_b = Coordinator::open(journal, Uuid::now_v7()).unwrap();
+        assert_eq!(
+            Journal::open(&path)
+                .unwrap()
+                .approval_state(approval_id)
+                .unwrap()
+                .as_deref(),
+            Some("responded_unacked")
+        );
+    }
+
+    #[test]
+    fn failed_provider_effect_marks_session_unhealthy_and_desynced() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let session_id = Uuid::now_v7();
+        let mut coordinator = open_after_startup(&path, session_id);
+        assert!(
+            coordinator
+                .transition(1, "turn_started", serde_json::json!({}), || {
+                    Err::<(), _>(io::Error::other("partial provider write"))
+                })
+                .is_err()
+        );
+        assert!(!coordinator.journal_healthy());
+        assert_eq!(
+            coordinator.session().turn,
+            shardrail_session_core::TurnState::Detached
+        );
+        assert_eq!(
+            coordinator.session().process,
+            shardrail_session_core::ProcessState::DesyncedAlive
+        );
+        let events = Journal::open(&path)
+            .unwrap()
+            .events_for_session(session_id)
+            .unwrap();
+        assert_eq!(events.last().unwrap().kind, "provider_effect_unknown");
+        let recovered = Coordinator::open(Journal::open(path).unwrap(), session_id).unwrap();
+        assert_eq!(
+            recovered.session().turn,
+            shardrail_session_core::TurnState::Detached
+        );
+        let mut called = false;
+        assert!(
+            coordinator
+                .transition(2, "turn_started", serde_json::json!({}), || {
+                    called = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn timed_out_cancel_acknowledges_as_expired_and_cancels_turn() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let mut coordinator = open_after_startup(&path, Uuid::now_v7());
+        coordinator
+            .transition(0, "turn_started", serde_json::json!({}), || Ok(()))
+            .unwrap();
+        let mut approval = Approval::new(0);
+        let approval_id = approval.id;
+        coordinator.create_approval(approval.clone()).unwrap();
+        let cancel_called = std::cell::Cell::new(false);
+        coordinator
+            .timeout_approval(
+                &mut approval,
+                ApprovalTimeoutRequest {
+                    now_ms: 180_000,
+                    provider_limit_secs: None,
+                    held: false,
+                    option_id: None,
+                },
+                |decision, option| {
+                    assert_eq!(decision, &ApprovalDecision::Cancel);
+                    assert_eq!(option, None);
+                    Ok(())
+                },
+                || {
+                    cancel_called.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(cancel_called.get());
+        assert_eq!(
+            coordinator.session().turn,
+            shardrail_session_core::TurnState::Cancelling
+        );
+        coordinator.acknowledge_approval(approval_id).unwrap();
+        assert_eq!(
+            coordinator.approval_state(approval_id).unwrap().as_deref(),
+            Some("expired")
+        );
+    }
+
+    #[test]
+    fn provider_rejection_is_recorded_as_withdrawn_reason() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let mut coordinator = open_after_startup(&path, Uuid::now_v7());
+        let mut approval = Approval::new(1);
+        let approval_id = approval.id;
+        coordinator.create_approval(approval.clone()).unwrap();
+        coordinator
+            .respond_approval(
+                &mut approval,
+                ApprovalResponseRequest {
+                    decision: ApprovalDecision::Allow,
+                    authorized: true,
+                    now_ms: 2,
+                    provider_limit_secs: None,
+                    held: false,
+                    option_id: Some("allow_once".into()),
+                    responder: "client",
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        coordinator.reject_approval_response(approval_id).unwrap();
+        assert_eq!(
+            coordinator.approval_state(approval_id).unwrap().as_deref(),
+            Some("withdrawn")
+        );
+    }
+
+    #[test]
+    fn journal_rejects_symlink_without_changing_external_file_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("external.db");
+        Journal::open(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("journal.sqlite3");
+        symlink(&target, &link).unwrap();
+        assert!(Journal::open(&link).is_err());
+        assert_eq!(
+            fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]
     fn expired_approval_without_reject_option_is_journaled_as_cancel() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("journal.db");
-        let mut coordinator =
-            Coordinator::open(Journal::open(&path).unwrap(), Uuid::now_v7()).unwrap();
+        let session_id = Uuid::now_v7();
+        let mut coordinator = open_after_startup(&path, session_id);
         let mut approval = Approval::new(0);
         let approval_id = approval.id;
         coordinator.create_approval(approval.clone()).unwrap();
@@ -514,6 +810,7 @@ mod tests {
                     );
                     Ok(())
                 },
+                || Ok(()),
             )
             .unwrap();
         assert_eq!(approval.state, shardrail_protocol::ApprovalState::Expired);
