@@ -15,6 +15,10 @@ pub enum JournalError {
     AlreadyResponded,
     #[error("approval must be linked to a session")]
     MissingSession,
+    #[error("approval is not pending or does not belong to this session")]
+    InvalidApproval,
+    #[error("journal epoch or host id mismatch")]
+    EpochMismatch,
 }
 
 pub struct Journal(Connection);
@@ -40,8 +44,6 @@ impl Journal {
                 redaction_flags TEXT NOT NULL DEFAULT '[]',
                 payload TEXT NOT NULL
              );
-             CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'append-only'); END;
-             CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'append-only'); END;
              CREATE TABLE IF NOT EXISTS approvals (
                 approval_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -72,7 +74,7 @@ impl Journal {
              CREATE TRIGGER IF NOT EXISTS approval_events_no_update BEFORE UPDATE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;
              CREATE TRIGGER IF NOT EXISTS approval_events_no_delete BEFORE DELETE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;",
         )?;
-        ensure_columns(&connection)?;
+        let legacy_events = ensure_columns(&connection)?;
         connection.execute_batch("CREATE INDEX IF NOT EXISTS approvals_by_session ON approvals(session_id,created_at_ms); CREATE INDEX IF NOT EXISTS approval_events_by_session ON approval_events(session_id,event_id);")?;
         connection.execute(
             "INSERT OR IGNORE INTO journal_meta(singleton,journal_epoch,host_id) VALUES (1,?1,?2)",
@@ -88,12 +90,14 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        connection.execute_batch("DROP TRIGGER IF EXISTS events_no_update")?;
-        connection.execute(
-            "UPDATE events SET journal_epoch=?1,host_id=?2 WHERE journal_epoch='' OR host_id=''",
-            params![epoch, host],
-        )?;
-        connection.execute_batch("CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'append-only'); END;")?;
+        if legacy_events {
+            connection.execute_batch("DROP TRIGGER IF EXISTS events_no_update")?;
+            connection.execute(
+                "UPDATE events SET journal_epoch=?1,host_id=?2",
+                params![epoch, host],
+            )?;
+        }
+        connection.execute_batch("CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'append-only'); END; CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'append-only'); END;")?;
         Ok(Self(connection))
     }
 
@@ -123,14 +127,16 @@ impl Journal {
 
     pub fn append_event(&mut self, event: &DurableEvent) -> Result<i64, JournalError> {
         if event.journal_epoch != self.journal_epoch()? || event.host_id != self.host_id()? {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "journal epoch or host id mismatch".into(),
-            )
-            .into());
+            return Err(JournalError::EpochMismatch);
+        }
+        let (payload, redacted) = redact_value(event.payload.clone());
+        let mut flags = event.redaction_flags.clone();
+        if redacted && !flags.iter().any(|flag| flag == "redacted") {
+            flags.push("redacted".into());
         }
         self.0.execute(
             "INSERT INTO events(journal_epoch,host_id,session_id,schema_version,kind,occurred_at_ms,provider_ref,causation,redaction_flags,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![event.journal_epoch.to_string(), event.host_id.to_string(), event.session_id.to_string(), event.schema_version, event.kind, event.occurred_at_ms, event.provider_ref, event.causation, serde_json::to_string(&event.redaction_flags).expect("redaction flags serialize"), event.payload.to_string()],
+            params![event.journal_epoch.to_string(), event.host_id.to_string(), event.session_id.to_string(), event.schema_version, event.kind, event.occurred_at_ms, event.provider_ref, event.causation, serde_json::to_string(&flags).expect("redaction flags serialize"), payload.to_string()],
         )?;
         Ok(self.0.last_insert_rowid())
     }
@@ -186,10 +192,7 @@ impl Journal {
             .iter()
             .any(|event| event.journal_epoch != epoch || event.host_id != host_id)
         {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "stored event journal epoch or host id mismatch".into(),
-            )
-            .into());
+            return Err(JournalError::EpochMismatch);
         }
         Ok(events)
     }
@@ -312,25 +315,28 @@ impl Journal {
     pub fn begin_approval_response(
         &mut self,
         response: &ApprovalResponding,
+        session: Uuid,
     ) -> Result<(), JournalError> {
         let (terminal, reason) = match response.decision {
             ApprovalDecision::Allow => ("allowed", None),
             ApprovalDecision::Deny => ("denied", None),
             ApprovalDecision::Cancel => ("withdrawn", Some("cancelled")),
         };
-        self.begin_approval_response_with_terminal(response, terminal, reason)
+        self.begin_approval_response_with_terminal(response, session, terminal, reason)
     }
 
     pub fn begin_expired_approval_response(
         &mut self,
         response: &ApprovalResponding,
+        session: Uuid,
     ) -> Result<(), JournalError> {
-        self.begin_approval_response_with_terminal(response, "expired", None)
+        self.begin_approval_response_with_terminal(response, session, "expired", None)
     }
 
     fn begin_approval_response_with_terminal(
         &mut self,
         response: &ApprovalResponding,
+        session: Uuid,
         terminal: &str,
         terminal_reason: Option<&str>,
     ) -> Result<(), JournalError> {
@@ -339,17 +345,20 @@ impl Journal {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists: Option<String> = tx
             .query_row(
-                "SELECT state FROM approvals WHERE approval_id=?1",
-                [response.approval_id.to_string()],
+                "SELECT state FROM approvals WHERE approval_id=?1 AND session_id=?2",
+                params![response.approval_id.to_string(), session.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
         if exists.as_deref() != Some("pending") {
+            if exists.is_none() {
+                return Err(JournalError::InvalidApproval);
+            }
             return Err(JournalError::AlreadyResponded);
         }
         tx.execute(
-            "UPDATE approvals SET state='responding',decision=?2,terminal_state=?3,terminal_reason=?4,option_id=?5,responder=?6,responded_at_ms=?7,confirmed_at_ms=?7 WHERE approval_id=?1 AND state='pending'",
-            params![response.approval_id.to_string(), serde_json::to_string(&response.decision).expect("enum serialization"), terminal, terminal_reason, response.option_id, response.responder, response.responded_at_ms],
+            "UPDATE approvals SET state='responding',decision=?2,terminal_state=?3,terminal_reason=?4,option_id=?5,responder=?6,responded_at_ms=?7,confirmed_at_ms=?7 WHERE approval_id=?1 AND session_id=?8 AND state='pending'",
+            params![response.approval_id.to_string(), serde_json::to_string(&response.decision).expect("enum serialization"), terminal, terminal_reason, response.option_id, response.responder, response.responded_at_ms, session.to_string()],
         )?;
         let session_id: String = tx.query_row(
             "SELECT session_id FROM approvals WHERE approval_id=?1",
@@ -376,7 +385,7 @@ impl Journal {
         Ok(())
     }
 
-    pub fn recover_responding(&mut self) -> Result<usize, JournalError> {
+    pub fn recover_responding(&mut self, now_ms: i64) -> Result<usize, JournalError> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -405,7 +414,7 @@ impl Journal {
                     &tx,
                     session_id,
                     "approval_delivered_unconfirmed",
-                    0,
+                    now_ms,
                     serde_json::json!({"approval_id":approval_id}),
                 )?;
             } else {
@@ -421,7 +430,7 @@ impl Journal {
         Ok(ids.len())
     }
 
-    pub fn recover_pending_approvals(&mut self) -> Result<usize, JournalError> {
+    pub fn recover_pending_approvals(&mut self, now_ms: i64) -> Result<usize, JournalError> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -450,7 +459,7 @@ impl Journal {
                     &tx,
                     session_id,
                     "approval_withdrawn",
-                    0,
+                    now_ms,
                     serde_json::json!({"approval_id":approval_id,"reason":"daemon_restart"}),
                 )?;
             } else {
@@ -466,7 +475,11 @@ impl Journal {
         Ok(ids.len())
     }
 
-    pub fn mark_response_sent(&mut self, approval_id: Uuid) -> Result<(), JournalError> {
+    pub fn mark_response_sent(
+        &mut self,
+        approval_id: Uuid,
+        now_ms: i64,
+    ) -> Result<(), JournalError> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -494,26 +507,35 @@ impl Journal {
             &tx,
             session_id,
             "approval_responded_unacked",
-            0,
+            now_ms,
             serde_json::json!({"approval_id":approval_id}),
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn acknowledge_approval(&mut self, approval_id: Uuid) -> Result<(), JournalError> {
+    pub fn acknowledge_approval(
+        &mut self,
+        approval_id: Uuid,
+        session: Uuid,
+        now_ms: i64,
+    ) -> Result<(), JournalError> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (terminal, reason): (String, Option<String>) = tx.query_row(
-            "SELECT terminal_state,terminal_reason FROM approvals WHERE approval_id=?1 AND state='responded_unacked'",
-            [approval_id.to_string()],
+        let found: Option<(String, Option<String>)> = tx.query_row(
+            "SELECT terminal_state,terminal_reason FROM approvals WHERE approval_id=?1 AND session_id=?2 AND state='responded_unacked'",
+            params![approval_id.to_string(), session.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let (terminal, reason) = found.ok_or(JournalError::InvalidApproval)?;
+        let changed = tx.execute(
+            "UPDATE approvals SET state=?2 WHERE approval_id=?1 AND session_id=?3 AND state='responded_unacked'",
+            params![approval_id.to_string(), terminal, session.to_string()],
         )?;
-        tx.execute(
-            "UPDATE approvals SET state=?2 WHERE approval_id=?1 AND state='responded_unacked'",
-            params![approval_id.to_string(), terminal],
-        )?;
+        if changed == 0 {
+            return Err(JournalError::InvalidApproval);
+        }
         let session_id: String = tx.query_row(
             "SELECT session_id FROM approvals WHERE approval_id=?1",
             [approval_id.to_string()],
@@ -526,23 +548,28 @@ impl Journal {
             &tx,
             session_id,
             &terminal,
-            0,
+            now_ms,
             serde_json::json!({"approval_id":approval_id,"reason":reason}),
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn reject_approval_response(&mut self, approval_id: Uuid) -> Result<(), JournalError> {
+    pub fn reject_approval_response(
+        &mut self,
+        approval_id: Uuid,
+        session: Uuid,
+        now_ms: i64,
+    ) -> Result<(), JournalError> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let changed = tx.execute(
-            "UPDATE approvals SET state='withdrawn' WHERE approval_id=?1 AND state='responded_unacked'",
-            [approval_id.to_string()],
+            "UPDATE approvals SET state='withdrawn' WHERE approval_id=?1 AND session_id=?2 AND state='responded_unacked'",
+            params![approval_id.to_string(), session.to_string()],
         )?;
         if changed == 0 {
-            return Err(JournalError::AlreadyResponded);
+            return Err(JournalError::InvalidApproval);
         }
         let session_id: String = tx.query_row(
             "SELECT session_id FROM approvals WHERE approval_id=?1",
@@ -561,7 +588,7 @@ impl Journal {
             &tx,
             session_id,
             "approval_withdrawn",
-            0,
+            now_ms,
             serde_json::json!({"approval_id":approval_id,"reason":"rejected_by_provider"}),
         )?;
         tx.commit()?;
@@ -577,6 +604,48 @@ impl Journal {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    pub fn withdraw_pending_approvals(
+        &mut self,
+        session_id: Uuid,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<(), JournalError> {
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let approvals = {
+            let mut statement = tx.prepare(
+                "SELECT approval_id,state FROM approvals WHERE session_id=?1 AND state IN ('pending','responded_unacked')",
+            )?;
+            statement
+                .query_map([session_id.to_string()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (id, state) in approvals {
+            let approval_id = Uuid::parse_str(&id).expect("stored approval UUID");
+            let (kind, next_state, terminal_reason) = if state == "pending" {
+                ("approval_withdrawn", "withdrawn", Some(reason))
+            } else {
+                (
+                    "approval_delivered_unconfirmed",
+                    "delivered_unconfirmed",
+                    None,
+                )
+            };
+            tx.execute(
+                "UPDATE approvals SET state=?3 WHERE approval_id=?1 AND session_id=?2",
+                params![id, session_id.to_string(), next_state],
+            )?;
+            let data = serde_json::json!({"approval_id":approval_id,"reason":terminal_reason});
+            insert_approval_event(&tx, approval_id, session_id, kind, &data.to_string())?;
+            insert_session_event(&tx, session_id, kind, now_ms, data)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     #[cfg(feature = "test-utils")]
@@ -604,7 +673,51 @@ impl Journal {
     }
 }
 
-fn ensure_columns(connection: &Connection) -> Result<(), JournalError> {
+fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
+    fn redact(value: &mut serde_json::Value, changed: &mut bool) {
+        match value {
+            serde_json::Value::String(text) => {
+                let lower = text.to_ascii_lowercase();
+                let secret = lower.contains("authorization:")
+                    || lower.contains("bearer ")
+                    || lower.contains("sk-live-")
+                    || lower.contains("api_key=")
+                    || lower.contains("api-key:");
+                if secret {
+                    *text = "[REDACTED]".into();
+                    *changed = true;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    redact(value, changed);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    if matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "authorization" | "api_key" | "api-key" | "token" | "secret"
+                    ) {
+                        if !value.is_null() {
+                            *value = serde_json::Value::String("[REDACTED]".into());
+                            *changed = true;
+                        }
+                    } else {
+                        redact(value, changed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut changed = false;
+    redact(&mut value, &mut changed);
+    (value, changed)
+}
+
+fn ensure_columns(connection: &Connection) -> Result<bool, JournalError> {
+    let mut legacy_events = false;
     for (table, name, declaration) in [
         ("events", "journal_epoch", "TEXT NOT NULL DEFAULT ''"),
         ("events", "host_id", "TEXT NOT NULL DEFAULT ''"),
@@ -629,13 +742,16 @@ fn ensure_columns(connection: &Connection) -> Result<(), JournalError> {
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<Result<Vec<_>, _>>()?;
         if !columns.iter().any(|column| column == name) {
+            if table == "events" && matches!(name, "journal_epoch" | "host_id") {
+                legacy_events = true;
+            }
             connection.execute(
                 &format!("ALTER TABLE {table} ADD COLUMN {name} {declaration}"),
                 [],
             )?;
         }
     }
-    Ok(())
+    Ok(legacy_events)
 }
 
 fn insert_approval_event(
@@ -833,15 +949,17 @@ mod tests {
             client_scope: ClientScope::Full,
         };
         let mut journal = Journal::open(&path).unwrap();
+        let approval = pending_approval(id);
+        let session_id = approval.session_id;
+        journal.create_pending_approval(&approval).unwrap();
         journal
-            .create_pending_approval(&pending_approval(id))
-            .unwrap();
-        journal.begin_approval_response(&response).unwrap(); // Write-ahead record is durable before the provider send.
+            .begin_approval_response(&response, session_id)
+            .unwrap(); // Write-ahead record is durable before the provider send.
         let provider_received_response = true; // Crash occurs after the write, before the ack record.
         assert!(provider_received_response);
         drop(journal);
         let mut recovered = Journal::open(&path).unwrap();
-        assert_eq!(recovered.recover_responding().unwrap(), 1);
+        assert_eq!(recovered.recover_responding(3).unwrap(), 1);
         assert_eq!(
             recovered.approval_state(id).unwrap().as_deref(),
             Some("delivered_unconfirmed")
@@ -872,9 +990,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
         let id = Uuid::now_v7();
-        journal
-            .create_pending_approval(&pending_approval(id))
-            .unwrap();
+        let approval = pending_approval(id);
+        let session_id = approval.session_id;
+        journal.create_pending_approval(&approval).unwrap();
         let response = ApprovalResponding {
             approval_id: id,
             decision: ApprovalDecision::Allow,
@@ -884,14 +1002,16 @@ mod tests {
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
         };
-        journal.begin_approval_response(&response).unwrap();
-        journal.mark_response_sent(id).unwrap();
-        journal.acknowledge_approval(id).unwrap();
+        journal
+            .begin_approval_response(&response, session_id)
+            .unwrap();
+        journal.mark_response_sent(id, 2).unwrap();
+        journal.acknowledge_approval(id, session_id, 3).unwrap();
         assert_eq!(
             journal.approval_state(id).unwrap().as_deref(),
             Some("allowed")
         );
-        assert!(journal.mark_response_sent(id).is_err());
+        assert!(journal.mark_response_sent(id, 4).is_err());
     }
 
     #[test]
@@ -911,9 +1031,11 @@ mod tests {
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
         };
-        journal.begin_approval_response(&response).unwrap();
-        journal.mark_response_sent(id).unwrap();
-        journal.acknowledge_approval(id).unwrap();
+        journal
+            .begin_approval_response(&response, session_id)
+            .unwrap();
+        journal.mark_response_sent(id, 2).unwrap();
+        journal.acknowledge_approval(id, session_id, 3).unwrap();
         assert_eq!(
             journal.approval_state(id).unwrap().as_deref(),
             Some("withdrawn")
@@ -938,7 +1060,7 @@ mod tests {
             .unwrap();
         drop(journal);
         let mut recovered = Journal::open(&path).unwrap();
-        assert_eq!(recovered.recover_pending_approvals().unwrap(), 1);
+        assert_eq!(recovered.recover_pending_approvals(3).unwrap(), 1);
         assert_eq!(
             recovered.approval_state(id).unwrap().as_deref(),
             Some("withdrawn")
@@ -1026,6 +1148,93 @@ mod tests {
         let reopened = Journal::open(path).unwrap();
         assert_eq!(reopened.journal_epoch().unwrap(), epoch);
         assert_eq!(reopened.host_id().unwrap(), host_id);
+    }
+
+    #[test]
+    fn secret_shaped_event_values_are_redacted_before_persistence() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let session_id = Uuid::now_v7();
+        let secret = "Bearer sk-live-example-secret";
+        let event = DurableEvent {
+            event_id: 0,
+            journal_epoch: journal.journal_epoch().unwrap(),
+            host_id: journal.host_id().unwrap(),
+            session_id,
+            schema_version: 1,
+            kind: "provider_output".into(),
+            occurred_at_ms: 10,
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload: serde_json::json!({"text": format!("Authorization: {secret}")}),
+        };
+        journal.append_event(&event).unwrap();
+        let stored = journal.events_for_session(session_id).unwrap().remove(0);
+        assert!(!stored.payload.to_string().contains(secret));
+        assert_eq!(stored.payload["text"], "[REDACTED]");
+        assert_eq!(stored.redaction_flags, ["redacted"]);
+    }
+
+    #[test]
+    fn approval_lifecycle_events_use_supplied_timestamps() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let approval = pending_approval(Uuid::now_v7());
+        let id = approval.id;
+        let session_id = approval.session_id;
+        journal.create_pending_approval(&approval).unwrap();
+        let response = ApprovalResponding {
+            approval_id: id,
+            decision: ApprovalDecision::Deny,
+            option_id: None,
+            responder: "client".into(),
+            responded_at_ms: 12,
+            option_class: OptionClass::Once,
+            client_scope: ClientScope::Full,
+        };
+        journal
+            .begin_approval_response(&response, session_id)
+            .unwrap();
+        journal.mark_response_sent(id, 13).unwrap();
+        journal.acknowledge_approval(id, session_id, 14).unwrap();
+        let events = journal.events_for_session(session_id).unwrap();
+        assert_eq!(events.last().unwrap().occurred_at_ms, 14);
+        assert!(events.iter().all(|event| event.occurred_at_ms != 0));
+    }
+
+    #[test]
+    fn reopening_does_not_update_existing_immutable_event_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).unwrap();
+        let session_id = Uuid::now_v7();
+        let event = DurableEvent {
+            event_id: 0,
+            journal_epoch: journal.journal_epoch().unwrap(),
+            host_id: journal.host_id().unwrap(),
+            session_id,
+            schema_version: 1,
+            kind: "original".into(),
+            occurred_at_ms: 4,
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload: serde_json::json!({}),
+        };
+        journal.append_event(&event).unwrap();
+        drop(journal);
+        let reopened = Journal::open(&path).unwrap();
+        assert_eq!(
+            reopened.events_for_session(session_id).unwrap()[0].kind,
+            "original"
+        );
+        assert!(
+            reopened
+                .0
+                .execute("UPDATE events SET kind='changed'", [])
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

@@ -102,7 +102,11 @@ fn open_coordinator(path: &std::path::Path) -> (Coordinator, Uuid) {
     let id = Uuid::now_v7();
     let mut journal = Journal::open(path).unwrap();
     Coordinator::recover_journal(&mut journal).unwrap();
-    (Coordinator::open(journal, id).unwrap(), id)
+    let mut coordinator = Coordinator::open(journal, id).unwrap();
+    coordinator
+        .transition(0, "process_started", json!({}), || Ok(()))
+        .unwrap();
+    (coordinator, id)
 }
 
 #[test]
@@ -143,7 +147,7 @@ fn happy_path_commits_session_transition_and_approval_before_provider_effect() {
         )
         .unwrap();
     agent.finish_prompt("allow_once");
-    coordinator.acknowledge_approval(approval_id).unwrap();
+    coordinator.acknowledge_approval(approval_id, 3).unwrap();
     let events = Journal::open(&journal_path)
         .unwrap()
         .events_for_session(session_id)
@@ -154,6 +158,7 @@ fn happy_path_commits_session_transition_and_approval_before_provider_effect() {
             .map(|event| event.kind.as_str())
             .collect::<Vec<_>>(),
         [
+            "process_started",
             "turn_started",
             "approval_pending",
             "approval_responding",
@@ -229,7 +234,7 @@ fn approval_path(option_id: &str, timeout: bool) {
             .unwrap();
     }
     agent.finish_prompt(option_id);
-    coordinator.acknowledge_approval(approval_id).unwrap();
+    coordinator.acknowledge_approval(approval_id, 3).unwrap();
     assert_eq!(
         coordinator.approval_state(approval_id).unwrap().as_deref(),
         Some(if timeout { "expired" } else { "denied" })
@@ -244,6 +249,9 @@ fn journal_failure_mid_session_rejects_pending_approval_and_cancels_turn() {
     let id = Uuid::now_v7();
     let journal = Journal::open(&journal_path).unwrap();
     let mut coordinator = Coordinator::open(journal, id).unwrap();
+    coordinator
+        .transition(0, "process_started", json!({}), || Ok(()))
+        .unwrap();
     coordinator
         .transition(0, "turn_started", json!({}), || Ok(()))
         .unwrap();
