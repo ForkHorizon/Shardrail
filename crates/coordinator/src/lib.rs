@@ -426,6 +426,12 @@ impl Coordinator {
                 .begin_approval_response(&response, self.session_id)
         };
         if let Err(error) = journal_result {
+            if matches!(
+                error,
+                JournalError::AlreadyResponded | JournalError::InvalidApproval
+            ) {
+                return Err(CoordinatorError::InvalidApproval);
+            }
             self.fail_closed();
             return Err(error.into());
         }
@@ -1678,6 +1684,38 @@ mod tests {
             ),
             Err(CoordinatorError::InvalidApproval)
         ));
+    }
+
+    #[test]
+    fn regression_unknown_response_does_not_fail_close() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let session = Uuid::now_v7();
+        let mut coordinator = open_after_startup(&path, session);
+        coordinator
+            .transition(1, "turn_started", serde_json::json!({}), || Ok(()))
+            .unwrap();
+        let mut unknown = Approval::new(2);
+        unknown.session_id = session;
+
+        assert!(matches!(
+            coordinator.respond_approval(
+                &mut unknown,
+                ApprovalResponseRequest {
+                    decision: ApprovalDecision::Allow,
+                    authorized: true,
+                    now_ms: 3,
+                    provider_limit_secs: None,
+                    option_id: Some("once".into()),
+                    responder: "client",
+                    option_class: OptionClass::Once,
+                    client_scope: ClientScope::Full,
+                },
+                |_, _| Ok(())
+            ),
+            Err(CoordinatorError::InvalidApproval)
+        ));
+        assert!(coordinator.journal_healthy());
     }
 
     #[test]
