@@ -76,9 +76,11 @@ impl Approval {
         let (start, limit) = if held {
             (
                 self.created_at_ms,
-                self.provider_limit_secs(provider_limit_secs)
-                    .min(APPROVAL_MAX_HOLD)
-                    .as_millis() as i64,
+                Duration::from_secs(
+                    provider_limit_secs.unwrap_or_else(|| APPROVAL_MAX_HOLD.as_secs()),
+                )
+                .min(APPROVAL_MAX_HOLD)
+                .as_millis() as i64,
             )
         } else {
             (
@@ -308,6 +310,15 @@ mod tests {
         assert_eq!(default_limit.state, ApprovalState::Expired);
         assert_eq!(default_limit.decision, Some(ApprovalDecision::Deny));
 
+        let mut held_with_provider_limit = Approval::new(0);
+        assert!(held_with_provider_limit.respond(
+            ApprovalDecision::Allow,
+            true,
+            180_001,
+            Some(3_600),
+            true
+        ));
+
         let mut held = Approval::new(0);
         assert!(!held.respond(ApprovalDecision::Allow, true, 3_600_000, Some(3600), true));
         assert_eq!(held.decision, Some(ApprovalDecision::Deny));
@@ -338,8 +349,15 @@ mod tests {
             Some(ApprovalDecision::Deny)
         );
         let mut held = Approval::new(0);
+        assert_eq!(held.expire_if_due(180_000, Some(3_600), true), None);
         assert_eq!(
-            held.expire_if_due(7_200_000, None, true),
+            held.expire_if_due(3_600_000, Some(3_600), true),
+            Some(ApprovalDecision::Deny)
+        );
+
+        let mut unknown_provider = Approval::new(0);
+        assert_eq!(
+            unknown_provider.expire_if_due(7_200_000, None, true),
             Some(ApprovalDecision::Deny)
         );
     }
