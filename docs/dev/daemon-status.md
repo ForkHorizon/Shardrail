@@ -1,6 +1,6 @@
 # N2 daemon status
 
-Date: 2026-10-20  
+Date: 2026-10-20
 Branch: `p1a/coordinator`
 
 ## Implemented
