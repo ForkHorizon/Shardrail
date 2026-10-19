@@ -9,14 +9,29 @@
     "approval_state": {
       "$ref": "#/$defs/ApprovalState"
     },
+    "client_frame": {
+      "$ref": "#/$defs/ClientFrame"
+    },
+    "client_hello": {
+      "$ref": "#/$defs/ClientHello"
+    },
     "client_scope": {
       "$ref": "#/$defs/ClientScope"
+    },
+    "command_request": {
+      "$ref": "#/$defs/CommandRequest"
+    },
+    "daemon_frame": {
+      "$ref": "#/$defs/DaemonFrame"
     },
     "event": {
       "$ref": "#/$defs/DurableEvent"
     },
     "option_class": {
       "$ref": "#/$defs/OptionClass"
+    },
+    "server_hello": {
+      "$ref": "#/$defs/ServerHello"
     },
     "session_lifecycle": {
       "$ref": "#/$defs/SessionLifecycle"
@@ -28,7 +43,12 @@
     "approval_state",
     "session_lifecycle",
     "option_class",
-    "client_scope"
+    "client_scope",
+    "client_hello",
+    "server_hello",
+    "command_request",
+    "client_frame",
+    "daemon_frame"
   ],
   "$defs": {
     "ApprovalDecision": {
@@ -91,11 +111,167 @@
         "delivered_unconfirmed"
       ]
     },
+    "ClientFrame": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CommandRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resume_after": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      }
+    },
+    "ClientHello": {
+      "description": "First frame on a local client connection. Public-key proof verification is\nintentionally represented explicitly even while dev admission is UID based.",
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "journal_epoch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "max_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "proof": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resume_after": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "min_version",
+        "max_version",
+        "client_id",
+        "resume_after"
+      ]
+    },
     "ClientScope": {
       "type": "string",
       "enum": [
         "full",
         "limited"
+      ]
+    },
+    "CommandRequest": {
+      "type": "object",
+      "properties": {
+        "command_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expected_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "command_id",
+        "kind",
+        "payload"
+      ]
+    },
+    "DaemonFrame": {
+      "type": "object",
+      "properties": {
+        "command_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "cursor": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DurableEvent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "receipt_monotonic_ns": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receipt_wall_clock_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "required": [
+        "kind"
       ]
     },
     "DurableEvent": {
@@ -167,6 +343,42 @@
         "once",
         "widening",
         "boundary_breaking"
+      ]
+    },
+    "ServerHello": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "host_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "journal_epoch": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "resync_required": {
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/$defs/ClientScope"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "host_id",
+        "journal_epoch",
+        "scope",
+        "cursor",
+        "resync_required"
       ]
     },
     "SessionLifecycle": {

@@ -82,4 +82,58 @@ pub struct ContractSchema {
     pub session_lifecycle: SessionLifecycle,
     pub option_class: OptionClass,
     pub client_scope: ClientScope,
+    pub client_hello: ClientHello,
+    pub server_hello: ServerHello,
+    pub command_request: CommandRequest,
+    pub client_frame: ClientFrame,
+    pub daemon_frame: DaemonFrame,
+}
+
+/// First frame on a local client connection. Public-key proof verification is
+/// intentionally represented explicitly even while dev admission is UID based.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ClientHello {
+    pub min_version: u32,
+    pub max_version: u32,
+    pub client_id: Uuid,
+    pub public_key: Option<String>,
+    pub proof: Option<String>,
+    pub resume_after: i64,
+    pub journal_epoch: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ServerHello {
+    pub protocol_version: u32,
+    pub host_id: Uuid,
+    pub journal_epoch: Uuid,
+    pub scope: ClientScope,
+    pub cursor: i64,
+    pub resync_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CommandRequest {
+    pub command_id: Uuid,
+    pub kind: String,
+    pub expected_state: Option<String>,
+    pub expected_turn_id: Option<Uuid>,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ClientFrame {
+    pub request: Option<CommandRequest>,
+    pub resume_after: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DaemonFrame {
+    pub kind: String,
+    pub command_id: Option<Uuid>,
+    pub event: Option<DurableEvent>,
+    pub receipt_monotonic_ns: Option<String>,
+    pub receipt_wall_clock_ms: Option<i64>,
+    pub cursor: Option<i64>,
+    pub error: Option<String>,
 }

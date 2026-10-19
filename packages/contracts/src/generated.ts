@@ -22,9 +22,14 @@ export type SessionLifecycle = "open" | "closing" | "closed" | "purging" | "purg
 export interface ContractSchema {
   approval_response: ApprovalResponding;
   approval_state: ApprovalState;
+  client_frame: ClientFrame;
+  client_hello: ClientHello;
   client_scope: ClientScope;
+  command_request: CommandRequest;
+  daemon_frame: DaemonFrame;
   event: DurableEvent;
   option_class: OptionClass;
+  server_hello: ServerHello;
   session_lifecycle: SessionLifecycle;
   [k: string]: unknown;
 }
@@ -36,6 +41,43 @@ export interface ApprovalResponding {
   option_id?: string | null;
   responded_at_ms: number;
   responder: string;
+  [k: string]: unknown;
+}
+export interface ClientFrame {
+  request?: CommandRequest | null;
+  resume_after?: number | null;
+  [k: string]: unknown;
+}
+export interface CommandRequest {
+  command_id: string;
+  expected_state?: string | null;
+  expected_turn_id?: string | null;
+  kind: string;
+  payload: unknown;
+  [k: string]: unknown;
+}
+/**
+ * First frame on a local client connection. Public-key proof verification is
+ * intentionally represented explicitly even while dev admission is UID based.
+ */
+export interface ClientHello {
+  client_id: string;
+  journal_epoch?: string | null;
+  max_version: number;
+  min_version: number;
+  proof?: string | null;
+  public_key?: string | null;
+  resume_after: number;
+  [k: string]: unknown;
+}
+export interface DaemonFrame {
+  command_id?: string | null;
+  cursor?: number | null;
+  error?: string | null;
+  event?: DurableEvent | null;
+  kind: string;
+  receipt_monotonic_ns?: string | null;
+  receipt_wall_clock_ms?: number | null;
   [k: string]: unknown;
 }
 export interface DurableEvent {
@@ -50,5 +92,14 @@ export interface DurableEvent {
   redaction_flags: string[];
   schema_version: number;
   session_id: string;
+  [k: string]: unknown;
+}
+export interface ServerHello {
+  cursor: number;
+  host_id: string;
+  journal_epoch: string;
+  protocol_version: number;
+  resync_required: boolean;
+  scope: ClientScope;
   [k: string]: unknown;
 }
