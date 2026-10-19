@@ -28,6 +28,7 @@ Branch: `p1a/coordinator`
 - The workspace contains M02, M03/M07 logic, M04, M18, and the P1a coordinator core. Other modules remain outside the authorized scope. M09/M10 integration remains deferred: `ApprovalResponseRequest` still receives `option_class` and `client_scope` from its caller. There is no authenticated gateway or trusted provider option catalog in this slice to derive those values; do not treat this API as a secured client boundary until those sources are connected.
 - Fail-closed protocol actions use `set_fail_closed_effect`; the fake ACP integration registers the hook, rejects the pending approval, cancels the turn, and observes the child exit. No real provider adapter exists in P1a; future adapters must register equivalent protocol effects and map pending IDs to provider reject options.
 - `host_id` is currently generated and retained in the journal metadata row. A separate daemon-installation identity that survives replacing the database remains part of M01/data-directory wiring.
+- N2 daemon startup, local Unix socket, schema-backed handshake/command/event frames, receipt timestamps, and real-binary lifecycle checks are documented in [daemon-status.md](daemon-status.md). The daemon is a development skeleton; authentication and approval routing are still open as listed there.
 - `AGENTS.md` records the Rust and contract-generation dependencies. The contracts-only npm package has signature and license checks; `cargo-deny` covers the Rust graph.
 
 ## Deviations and reversible choices
@@ -43,11 +44,11 @@ Branch: `p1a/coordinator`
 
 ## Open questions for Daliys
 
-- Should the generated TypeScript contract package export only schema DTOs, or also include hand-authored client helpers once the gateway is started?
-- Should M01 refuse network filesystems for the journal data directory or only emit a diagnostic, as left open in 11 §2? This implementation does not attempt filesystem-type detection.
-- Confirm the permitted Rust dependency allowlist before expanding beyond the current foundation crates; `deny.toml` is the initial list for this task.
-- `planning/12-decisions.md` ends at D48; D50 and D51 do not currently exist in the decision register. No decisions were inferred or added as part of this implementation.
+- `packages/client` exports generated DTO types and a typed stub; a local socket relay is still needed before it can connect.
+- N2 implements refuse-on-known-network-or-synced storage detection. Filesystem naming heuristics and platform coverage remain an implementation limit; see [daemon-status.md](daemon-status.md).
+- The N2 task authorized `tokio`, `clap`, and `nix`; these are recorded in `AGENTS.md` and `deny.toml`.
+- `planning/12-decisions.md` ends at D48; D50–D54 remain absent from the register. N2's requested auth/approval details are not all realized; see [daemon-status.md](daemon-status.md).
 
 ## Final summary
 
-P1a provider-free foundations, the coordinator core, and M01 directory/lock guards are implemented on `p1a/coordinator`. The scoped crates, regression tests, schema and generated types, lockfiles, agent guidance, and CI configuration are present. No provider executable or model API was used.
+P1a foundations, the coordinator core, M01 directory/lock guards, and the N2 `shardraild` development skeleton are present on `p1a/coordinator`. The gateway still lacks asymmetric authentication and daemon-routed approval handling; see [daemon-status.md](daemon-status.md). No real provider executable or model API was used.
