@@ -5,7 +5,7 @@ export type {
   DaemonFrame,
   DurableEvent,
   ServerHello,
-} from "../../contracts/src/generated.js";
+} from "@shardrail/contracts";
 
 /** Browser clients cannot open the daemon's local Unix socket directly. */
 export function connect(): never {

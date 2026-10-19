@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": "./src/generated.ts",
   "scripts": {
     "generate": "json2ts -i ../../schema/contracts.schema.json -o src/generated.ts"
   },

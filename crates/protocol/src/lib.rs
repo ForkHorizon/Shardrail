@@ -122,18 +122,35 @@ pub struct CommandRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ClientFrame {
-    pub request: Option<CommandRequest>,
-    pub resume_after: Option<i64>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClientFrame {
+    Request { request: CommandRequest },
+    Resume { resume_after: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct DaemonFrame {
-    pub kind: String,
-    pub command_id: Option<Uuid>,
-    pub event: Option<DurableEvent>,
-    pub receipt_monotonic_ns: Option<String>,
-    pub receipt_wall_clock_ms: Option<i64>,
-    pub cursor: Option<i64>,
-    pub error: Option<String>,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DaemonFrame {
+    CommandAccepted {
+        command_id: Uuid,
+        cursor: i64,
+        receipt_monotonic_ns: Option<String>,
+        receipt_wall_clock_ms: Option<i64>,
+    },
+    CommandRejected {
+        command_id: Uuid,
+        error: String,
+    },
+    DurableEvent {
+        event: DurableEvent,
+        cursor: i64,
+        receipt_monotonic_ns: Option<String>,
+        receipt_wall_clock_ms: Option<i64>,
+    },
+    Error {
+        error: String,
+    },
+    ResyncRequired {
+        cursor: i64,
+    },
 }

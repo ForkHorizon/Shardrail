@@ -17,6 +17,50 @@ export type ApprovalState =
   | "expired"
   | "withdrawn"
   | "delivered_unconfirmed";
+export type ClientFrame =
+  | {
+      kind: "request";
+      request: CommandRequest;
+      [k: string]: unknown;
+    }
+  | {
+      kind: "resume";
+      resume_after: number;
+      [k: string]: unknown;
+    };
+export type DaemonFrame =
+  | {
+      command_id: string;
+      cursor: number;
+      kind: "command_accepted";
+      receipt_monotonic_ns?: string | null;
+      receipt_wall_clock_ms?: number | null;
+      [k: string]: unknown;
+    }
+  | {
+      command_id: string;
+      error: string;
+      kind: "command_rejected";
+      [k: string]: unknown;
+    }
+  | {
+      cursor: number;
+      event: DurableEvent;
+      kind: "durable_event";
+      receipt_monotonic_ns?: string | null;
+      receipt_wall_clock_ms?: number | null;
+      [k: string]: unknown;
+    }
+  | {
+      error: string;
+      kind: "error";
+      [k: string]: unknown;
+    }
+  | {
+      cursor: number;
+      kind: "resync_required";
+      [k: string]: unknown;
+    };
 export type SessionLifecycle = "open" | "closing" | "closed" | "purging" | "purged";
 
 export interface ContractSchema {
@@ -43,11 +87,6 @@ export interface ApprovalResponding {
   responder: string;
   [k: string]: unknown;
 }
-export interface ClientFrame {
-  request?: CommandRequest | null;
-  resume_after?: number | null;
-  [k: string]: unknown;
-}
 export interface CommandRequest {
   command_id: string;
   expected_state?: string | null;
@@ -68,16 +107,6 @@ export interface ClientHello {
   proof?: string | null;
   public_key?: string | null;
   resume_after: number;
-  [k: string]: unknown;
-}
-export interface DaemonFrame {
-  command_id?: string | null;
-  cursor?: number | null;
-  error?: string | null;
-  event?: DurableEvent | null;
-  kind: string;
-  receipt_monotonic_ns?: string | null;
-  receipt_wall_clock_ms?: number | null;
   [k: string]: unknown;
 }
 export interface DurableEvent {

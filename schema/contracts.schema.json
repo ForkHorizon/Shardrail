@@ -112,26 +112,41 @@
       ]
     },
     "ClientFrame": {
-      "type": "object",
-      "properties": {
-        "request": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CommandRequest"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "request"
             },
-            {
-              "type": "null"
+            "request": {
+              "$ref": "#/$defs/CommandRequest"
             }
+          },
+          "required": [
+            "kind",
+            "request"
           ]
         },
-        "resume_after": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resume"
+            },
+            "resume_after": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "kind",
+            "resume_after"
+          ]
         }
-      }
+      ]
     },
     "ClientHello": {
       "description": "First frame on a local client connection. Public-key proof verification is\nintentionally represented explicitly even while dev admission is UID based.",
@@ -221,57 +236,130 @@
       ]
     },
     "DaemonFrame": {
-      "type": "object",
-      "properties": {
-        "command_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "uuid"
-        },
-        "cursor": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "command_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "cursor": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "command_accepted"
+            },
+            "receipt_monotonic_ns": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "receipt_wall_clock_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          "required": [
+            "kind",
+            "command_id",
+            "cursor"
           ]
         },
-        "event": {
-          "anyOf": [
-            {
+        {
+          "type": "object",
+          "properties": {
+            "command_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "error": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "command_rejected"
+            }
+          },
+          "required": [
+            "kind",
+            "command_id",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "event": {
               "$ref": "#/$defs/DurableEvent"
             },
-            {
-              "type": "null"
+            "kind": {
+              "type": "string",
+              "const": "durable_event"
+            },
+            "receipt_monotonic_ns": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "receipt_wall_clock_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
             }
+          },
+          "required": [
+            "kind",
+            "event",
+            "cursor"
           ]
         },
-        "kind": {
-          "type": "string"
-        },
-        "receipt_monotonic_ns": {
-          "type": [
-            "string",
-            "null"
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
           ]
         },
-        "receipt_wall_clock_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resync_required"
+            }
+          },
+          "required": [
+            "kind",
+            "cursor"
+          ]
         }
-      },
-      "required": [
-        "kind"
       ]
     },
     "DurableEvent": {
