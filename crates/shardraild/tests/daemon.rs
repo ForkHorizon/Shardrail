@@ -648,6 +648,38 @@ fn epoch_mismatch_signals_resync_and_streams_history_on_same_connection() {
     daemon.wait().unwrap();
 }
 
+#[test]
+fn fake_agent_stream_chunks_are_durable_events_with_receipt_timestamps() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--fake-acp-path")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/shardrail-fake-acp"),
+        )
+        .env("SHARDRAIL_FAKE_ACP_STREAM_EVENTS", "3")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    writeln!(stream, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
+    let mut chunks = 0;
+    while chunks < 3 {
+        let frame = read_json(&mut reader);
+        if frame["kind"] == "durable_event" && frame["event"]["kind"] == "agent_message_chunk" {
+            assert!(frame["receipt_wall_clock_ms"].as_i64().is_some());
+            assert!(frame["receipt_monotonic_ns"].as_str().is_some());
+            chunks += 1;
+        }
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn journal_symlink_is_refused_without_touching_target() {

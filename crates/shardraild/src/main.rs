@@ -237,6 +237,38 @@ async fn run_fake_acp_inner(
         if frame["method"] == "session/request_permission" {
             break frame;
         }
+        if frame["method"] == "session/update" {
+            let params = &frame["params"];
+            let update = &params["update"];
+            let (journal_epoch, host_id) = {
+                let journal = daemon.journal.lock().await;
+                (
+                    journal.journal_epoch().map_err(io::Error::other)?,
+                    journal.host_id().map_err(io::Error::other)?,
+                )
+            };
+            daemon
+                .journal
+                .lock()
+                .await
+                .append_event(&DurableEvent {
+                    event_id: 0,
+                    journal_epoch,
+                    host_id,
+                    session_id,
+                    schema_version: 1,
+                    kind: update["sessionUpdate"]
+                        .as_str()
+                        .unwrap_or("agent_update")
+                        .to_owned(),
+                    occurred_at_ms: wall_clock_ms(),
+                    provider_ref: params["sessionId"].as_str().map(str::to_owned),
+                    causation: None,
+                    redaction_flags: Vec::new(),
+                    payload: update.clone(),
+                })
+                .map_err(io::Error::other)?;
+        }
     };
     let params = &permission["params"];
     let options = params["options"].as_array().ok_or_else(|| {
@@ -1217,21 +1249,22 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
     }
     write_frame(&outbound, &DaemonFrame::Authenticated).await?;
     push_events(&outbound, &daemon, &mut cursor).await?;
+    let mut lines = read.lines();
     let mut tick = interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        line.clear();
         let read_result = tokio::select! {
-            result = read.read_line(&mut line) => Some(result?),
+            result = lines.next_line() => Some(result?),
             _ = tick.tick() => None,
         };
-        if let Some(0) = read_result {
-            return Ok(());
-        }
-        if read_result.is_none() {
-            push_events(&outbound, &daemon, &mut cursor).await?;
-            continue;
-        }
+        let line = match read_result {
+            Some(Some(line)) => line,
+            Some(None) => return Ok(()),
+            None => {
+                push_events(&outbound, &daemon, &mut cursor).await?;
+                continue;
+            }
+        };
         let frame = parse_client_frame(&line)?;
         let (request, resolution, resume_after) = match frame {
             ClientFrame::Authenticate { .. } => {
@@ -1367,28 +1400,38 @@ async fn push_events(
     daemon: &Daemon,
     cursor: &mut i64,
 ) -> io::Result<()> {
-    let events = {
-        let journal = daemon.journal.lock().await;
-        journal
-            .events_after_with_receipts(*cursor, 16)
-            .map_err(io::Error::other)?
-    };
-    for item in events {
-        let event = item.event;
-        let receipt = item.receipt;
-        write_frame(
-            outbound,
-            &DaemonFrame::DurableEvent {
-                cursor: event.event_id,
-                event: event.clone(),
-                receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
-                receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
-            },
-        )
-        .await?;
-        *cursor = event.event_id;
+    loop {
+        let events = {
+            let journal = daemon.journal.lock().await;
+            journal
+                .events_after_with_receipts(*cursor, 16)
+                .map_err(io::Error::other)?
+        };
+        if events.is_empty() {
+            return Ok(());
+        }
+        let full_page = events.len() == 16;
+        for item in events {
+            let event = item.event;
+            let receipt = item.receipt;
+            write_frame(
+                outbound,
+                &DaemonFrame::DurableEvent {
+                    cursor: event.event_id,
+                    event: event.clone(),
+                    receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
+                    receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
+                },
+            )
+            .await?;
+            *cursor = event.event_id;
+            tokio::task::yield_now().await;
+        }
+        if !full_page {
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
     }
-    Ok(())
 }
 
 async fn write_frame(outbound: &mpsc::Sender<Vec<u8>>, frame: &DaemonFrame) -> io::Result<()> {
@@ -1401,15 +1444,17 @@ async fn write_json_line<T: serde::Serialize>(
 ) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     bytes.push(b'\n');
-    outbound.try_send(bytes).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => io::Error::new(
+    match timeout(Duration::from_secs(1), outbound.send(bytes)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "client writer closed",
+        )),
+        Err(_) => Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "client outbound queue overflow; reconnect and resume from your last received cursor",
-        ),
-        mpsc::error::TrySendError::Closed(_) => {
-            io::Error::new(io::ErrorKind::BrokenPipe, "client writer closed")
-        }
-    })
+            "client outbound queue stayed full for one second; reconnect and resume from your last received cursor",
+        )),
+    }
 }
 
 fn handshake_timeout() -> io::Error {

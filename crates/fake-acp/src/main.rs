@@ -34,8 +34,15 @@ fn main() -> io::Result<()> {
                 Some(reply(id, json!({"sessionId":session_id})))
             }
             "session/prompt" => {
-                let notification = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fake streamed response"}}}});
-                writeln!(out, "{}", notification)?;
+                let count = std::env::var("SHARDRAIL_FAKE_ACP_STREAM_EVENTS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .min(50_000);
+                for seq in 0..count {
+                    let notification = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("fake streamed response {seq}")}}}});
+                    writeln!(out, "{}", notification)?;
+                }
                 let mut permission_request = json!({
                     "jsonrpc":"2.0",
                     "id":"permission-1",
