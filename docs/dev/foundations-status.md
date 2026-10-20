@@ -1,6 +1,6 @@
 # P1a foundations status
 
-Date: 2026-10-20
+Date: 2026-10-21
 Branch: `p1a/coordinator`
 
 ## Done
@@ -40,17 +40,19 @@ Branch: `p1a/coordinator`
 - The journal uses SQLite WAL with `synchronous=FULL`; M01 now retains an OS advisory lock for the daemon lifetime. Stale lock files are harmless because ownership comes from the kernel lock, not file contents.
 - Session and approval policy timers are deterministic pure functions taking caller-supplied timestamps; the daemon scheduler that invokes them is deferred.
 - Corruption is tested by replacing a closed test database with invalid bytes. Disk-full is tested with SQLite `max_page_count` and a forced page allocation rather than filling the host filesystem.
-- The review's M5 symlink TOCTOU finding was not in the authorized finding list and remains open for a later M01 hardening pass.
+- M5 data-folder symlink races are closed: operations stay relative to the retained `O_NOFOLLOW` directory descriptor. Regression tests cover a path swap after opening and a symlink swap between directory creation and open.
 
 ## Open questions for Daliys
 
-- `packages/client` exports generated DTO types and a typed stub; a local socket relay is still needed before it can connect.
+- D62's `@noble/ed25519` is pinned exactly to 3.1.0. The Node client authenticates with Ed25519, consumes generated contracts, and supports durable event cursors and reconnect.
 - N2 implements refuse-on-known-network-or-synced storage detection. Filesystem naming heuristics and platform coverage remain an implementation limit; see [daemon-status.md](daemon-status.md).
 - The N2 task authorized `tokio`, `clap`, and `nix`; these are recorded in `AGENTS.md` and `deny.toml`.
 - `planning/12-decisions.md` ends at D48; D50–D54 remain absent from the register. N2's requested auth/approval details are not all realized; see [daemon-status.md](daemon-status.md).
-- W4-a authorized `ed25519-dalek` and `sha2`; the daemon now authenticates registered client keys, bounds client output queues, checks the data directory through a retained descriptor, and redacts high-entropy token-like runs. The requested review file and D50/D51/D53/D55/D57/D60 entries are missing from this checkout, so no decision rationale was inferred. Pairing UI and a native client transport remain deferred; see [daemon-status.md](daemon-status.md).
-- W4-b (authorized in the 2026-10-20 task as D56) routes fake ACP approvals through authenticated clients, enforces daemon-derived option classes and registered scopes, commits intent before provider writes, records acknowledgements and expiry, and recovers uncertain delivery safely. Review fixes add write-failure lifecycle cleanup, expiry-state preservation, strict client-frame parsing, bounded approval/task lifetime, and concurrent-resolution coverage. The requested D55/D56 register details and planning §Г are absent here; the concrete task requirements were followed without inventing the missing rationale. Real adapter supervision, provider option catalog recovery, and visual UI verification remain deferred; see [daemon-status.md](daemon-status.md).
+- W4-a authorized `ed25519-dalek` and `sha2`; the daemon now authenticates registered client keys, bounds client output queues, checks the data directory through a retained descriptor, and redacts high-entropy token-like runs. The requested review file and D50/D51/D53/D55/D57/D60 entries are missing from this checkout, so no decision rationale was inferred.
+- W4-b (authorized in the 2026-10-20 task as D56) routes fake ACP approvals through authenticated clients, enforces daemon-derived option classes and registered scopes, commits intent before provider writes, records acknowledgements and expiry, and recovers uncertain delivery safely. Review fixes add write-failure lifecycle cleanup, expiry-state preservation, strict client-frame parsing, bounded approval/task lifetime, and concurrent-resolution coverage. The requested D55/D56 register details and planning §Г are absent here; the concrete task requirements were followed without inventing the missing rationale. Real adapter supervision and provider option catalog recovery remain deferred; see [daemon-status.md](daemon-status.md).
+- W4-c adds the real Unix socket TypeScript client, strict `tsc --noEmit`, and a real-binary Node integration test. The Tauri release app relays authenticated daemon frames and records B4 measurements; all 12 B4 scenarios exceeded the p95 ≤50 ms target. M5 path-swap protections passed the requested 50-run regression loop. The task references D49/D54/D58/D59/D62 and planning §Г; the checked-out decision register ends at D48 and the owner decision file ends at §Б, so missing rationale was not inferred.
+- Accepted for now: best-effort redaction can mask harmless long strings and miss short secrets until real providers are integrated. Slow-client disconnect reasons remain in the daemon log; this is sufficient for now.
 
 ## Final summary
 
-P1a foundations, the coordinator core, M01 directory/lock guards, the authenticated `shardraild` gateway, and fake ACP approvals through the daemon are present on `p1a/coordinator`. Production provider adapters and interactive UI verification remain outside this slice. See [daemon-status.md](daemon-status.md). No real provider executable or model API was used.
+P1a foundations, the coordinator core, M01 directory/lock guards, the authenticated `shardraild` gateway, fake ACP approvals through the daemon, and the TypeScript socket client are present on `p1a/coordinator`. Production provider adapters and interactive pairing UI remain outside this slice. See [daemon-status.md](daemon-status.md). No real provider executable or model API was used.

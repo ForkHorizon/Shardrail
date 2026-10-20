@@ -1,6 +1,6 @@
 # N2 daemon status
 
-Date: 2026-10-20
+Date: 2026-10-21
 Branch: `p1a/coordinator`
 
 ## Implemented
@@ -8,20 +8,19 @@ Branch: `p1a/coordinator`
 - Added the `shardraild` binary with a single startup function ordered as requested: resolve path, refuse known synced paths and network filesystem names, descriptor-relative data-dir create/open and permission check, acquire the process lock, descriptor-relative `openat(O_NOFOLLOW)` journal probe, open SQLite with `SQLITE_OPEN_NOFOLLOW`, verify epoch/host metadata, recover global approval state once, then bind the Unix listener (`0600`).
 - The socket protocol negotiates protocol v1 and journal epoch, accepts a host cursor, emits durable events after resume, and supports `session.create` with a UUID command ID. Events carry journal-persisted daemon monotonic and wall-clock receipt stamps. Wire frames use tagged Rust enums and generated TypeScript contracts.
 - Real-binary tests cover session creation, event delivery and fan-out, cursor replay after SIGKILL, duplicate-daemon refusal, command retries, epoch mismatch replay, and symlink refusal without modifying the target. Filesystem-name checks have unit coverage.
-- Added `packages/client` as a typed stub over the generated contract types. Browser JavaScript cannot open the local Unix socket; a Tauri/native relay is still required.
+- `packages/client` now opens the Unix socket in Node, verifies the Ed25519 handshake and daemon host key, sends command IDs, tracks durable event cursors, resumes after reconnect, and exposes typed daemon frames. It uses generated contracts only. `@noble/ed25519` is pinned to exactly `3.1.0` per D62; TypeScript `5.9.3` and Node types `26.1.0` are pinned in the lockfile. `tsc --noEmit` and a Node test against the real daemon and fake ACP are wired into CI.
 
 ## Limits and open decisions
 
 - The checked-in decision register stops at D48. Requested D50/D51/D53/D55/D57/D60 entries and `spikes/reviews4/n2-final.md` are absent; this implementation follows the concrete task scope without inventing decision rationales.
-- Authentication now uses Ed25519 keys. `authorized-clients.json` stores each registered public key, label and scope; the daemon verifies a transcript digest covering both nonces, version range/selection and both public keys, signs it with the host key and verifies the client's signature before sending events or handling commands. `shardraild client add|list|remove` manages key registration. Host and client private keys are `0600` files. Pairing UI and native client transport remain deferred.
-- The fake ACP remains connected directly to the coordinator foundation, not through the daemon. Allow/deny/timeout commands and kill/restart approval tests through the socket remain unfinished.
-- `packages/client` declares the generated contracts dependency; TypeScript build/typecheck scripts remain absent because a TypeScript compiler is not allowlisted.
+- Authentication uses Ed25519 keys. `authorized-clients.json` stores each registered public key, label and scope; the daemon verifies a transcript digest covering both nonces, version range/selection and both public keys, signs it with the host key and verifies the client's signature before sending events or handling commands. `shardraild client add|list|remove` manages key registration. Host and client private keys are `0600` files. Interactive pairing UI remains deferred.
+- The S5 prototype connects the release app to the daemon through a Tauri shell relay. The relay authenticates with a registered Ed25519 key in an isolated temporary data directory; the production pairing screen remains deferred.
 - SQLite's public rusqlite API opens paths, not adopted descriptors. Startup performs the no-follow `openat` probe and the SQLite open itself uses `SQLITE_OPEN_NOFOLLOW`; the private directory and retained daemon lock prevent other users and cooperating daemons from swapping the file. This does not make a file-backed database tamper-proof against a malicious process running as the same UID; D20 already classifies such a host as unprotected.
 - The first receipt's monotonic timestamp is relative to the first journal append after process start. Wall-clock receipts persist across restarts. Historical rows created before this change have no stored receipt stamp.
 
 ## Verification
 
-All repository checks passed for this work: formatting, Clippy, all workspace tests, cargo-deny, npm CI install, and schema drift. Provider executables and model APIs are not invoked.
+Repository checks passed: formatting, Clippy, all workspace tests, cargo-deny, npm CI installs for contracts and client, client `tsc --noEmit` and Node integration test, and schema drift. Provider executables and model APIs are not invoked.
 
 ## Review fixes (2026-10-20)
 
@@ -33,7 +32,7 @@ All repository checks passed for this work: formatting, Clippy, all workspace te
 ## W4-a hardening (2026-10-20)
 
 - Data-dir creation/open uses `mkdirat` and `openat(O_NOFOLLOW)`, then checks ownership and mode with `fstat` on the retained descriptor and applies `0700` with `fchmod`. The process uses descriptor-relative access for the lock and journal probe. On macOS it changes the daemon process working directory with `fchdir` on the checked descriptor, so SQLite and socket APIs that accept only paths resolve relative to that pinned directory; SQLite still independently uses `SQLITE_OPEN_NOFOLLOW` because rusqlite cannot adopt the already-open descriptor.
-- Each connection has a 32-frame outbound queue. Overflow disconnects that client with a reconnect/resume reason in the daemon log; the slow-client integration test confirms a second authenticated client can catch up and continue.
+- Each connection has a 32-frame outbound queue. Producers wait up to one second for queue space, then disconnect a stalled client with a reconnect/resume reason in the daemon log; the slow-client integration test confirms a second authenticated client can catch up and continue.
 - Journal redaction additionally detects base64-like runs of at least 32 characters with Shannon entropy ≥4 bits/character and hex runs of at least 32 characters with entropy ≥3.0. `/`, `-`, and whitespace split candidate runs, which keeps common paths, URLs, branch names, and diff headers readable; recognized Git hash contexts are also preserved. Long underscore-delimited identifiers may still be redacted, while short or low-entropy secrets may evade this best-effort heuristic. Event kind, provider reference, causation, and payload strings are redacted before persistence.
 - Client registry updates use a separate advisory lock across each read-modify-write. Handshake reads time out after five seconds; pre-authentication errors are flushed before close; limited clients cannot create sessions; and a connected client can replay from an earlier cursor. Session creation still opens a new `Journal` connection and reruns idempotent schema setup; sharing the coordinator-owned connection is deferred until the gateway owns broader session commands.
 
@@ -46,3 +45,14 @@ All repository checks passed for this work: formatting, Clippy, all workspace te
 - The injected write-ahead delay is asynchronous and remains between the durable intent and provider stdin write. Provider-write completion is synchronized with the request handler before `responded_unacked` is journaled; no SQLite polling loop is used.
 - Real-binary integration tests use only `shardrail-fake-acp` via `--fake-acp-path`. `--approval-timeout-secs` controls the daemon policy timer; `--test-write-ahead-delay-ms` is a fault-injection pause used to kill the daemon after the durable response intent and before the fake provider write. No real provider or model API is invoked.
 - This remains a fake-provider slice: production provider supervision, ACP option normalization for real adapters, restart/reconnect of live providers, UI rendering, and durable reconstruction of provider option catalogs remain deferred to M05/M06/M09/M14. The task authorization names D55/D56 and planning §Г, but this checkout's register ends at D48 and `planning/17-owner-decisions-2026-10-19.md` ends at §Б; no missing decision text was inferred.
+
+## W4-c client and UI measurement (2026-10-21)
+
+- The client integration test uses the real `shardraild` binary and `shardrail-fake-acp`; fake ACP `session/update` chunks are journaled as durable events with daemon receipt stamps. Event delivery pages are sent without a 100 ms pause between full pages, so the 50k-event benchmark workload can be delivered.
+- The M5 data-directory path-swap race is closed by descriptor-relative access and no-follow opens. Regression coverage checks a path swap after open, a symlink swap between `mkdirat` and `openat`, and daemon operations after a path swap.
+- B4 was measured in the packaged Tauri release app (WKWebView), using 60 fake-agent runs: cold/warm × 5k/50k events × 1/4/8 streams × five repetitions. Daemon durable-event receipt wall-clock timestamps were mapped to `performance.now()` using five clock samples per run; maximum observed uncertainty was ±1 ms. The calibrated daemon-wall-minus-page-performance offset ranged from 1,792,535,777,147 to 1,792,536,258,509 ms over the run sequence; group medians and raw per-run values are in the ignored S5 `results/b4-summary.json` and `b4-*.json`. B4 median / p95 / maximum milliseconds by cold then warm were: 5k×1 183/293/294, 192/335/350; 5k×4 87/214/214, 90/249/249; 5k×8 65/141/142, 63/169/170; 50k×1 1077/2329/2482, 1076/1995/2068; 50k×4 627/1747/1788, 461/1326/1431; 50k×8 288/1025/1086, 277/651/932. All exceed the B4 p95 ≤50 ms target. Each run sampled only rows that were mounted and measured by the first rAF; virtualized rows are not included. The external planning note is for owner review.
+- B5 was rechecked from the same runs. First-frame matches were cold/warm: 5k×1 99.33%/100%, 5k×4 100%/100%, 5k×8 99.33%/99.33%; 50k×1 96.67%/96%, 50k×4 94%/94%, and 50k×8 97.33%/95.33%. Both 50k×4 cases fall below D58's 95% first-frame target.
+- DEFERRED: interactive pairing screen. The spike has no reviewed key-confirmation UI; benchmark pairing uses `shardraild client add` in an isolated temporary data directory.
+- Approval-card visual review was completed in the packaged app and saved to the ignored S5 results directory. No provider or model API was used.
+- Accepted for now: high-entropy redaction may mask harmless long strings and may miss short secrets until real providers are integrated. Slow-client disconnect reasons appear only in the daemon log, which is sufficient for now.
+- Flaky-test reruns after replacing the daemon's cancellable `read_line` with cancellation-safe `Lines::next_line`: `epoch_mismatch_signals_resync_and_streams_history_on_same_connection` passed 50/50; `daemon_file_access_stays_in_opened_directory_after_path_swap` passed 50/50.
