@@ -899,18 +899,24 @@ impl Journal {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let approvals = {
             let mut statement = tx.prepare(
-                "SELECT approval_id,state FROM approvals WHERE session_id=?1 AND state IN ('pending','responded_unacked')",
+                "SELECT approval_id,state,terminal_state FROM approvals WHERE session_id=?1 AND state IN ('pending','responded_unacked')",
             )?;
             statement
                 .query_map([session_id.to_string()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        for (id, state) in approvals {
+        for (id, state, terminal_state) in approvals {
             let approval_id = Uuid::parse_str(&id).expect("stored approval UUID");
             let (kind, next_state, terminal_reason) = if state == "pending" {
                 ("approval_withdrawn", "withdrawn", Some(reason))
+            } else if terminal_state.as_deref() == Some("expired") {
+                ("approval_expired", "expired", Some("approval_expired"))
             } else {
                 (
                     "approval_delivered_unconfirmed",
@@ -1450,6 +1456,43 @@ mod tests {
             .unwrap();
         assert_eq!(event.kind, "withdrawn");
         assert_eq!(event.payload["reason"], "cancelled");
+    }
+
+    #[test]
+    fn expired_cancel_remains_expired_when_the_turn_finishes() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let id = Uuid::now_v7();
+        let approval = pending_approval(id);
+        let session_id = approval.session_id;
+        journal.create_pending_approval(&approval).unwrap();
+        let response = ApprovalResponding {
+            approval_id: id,
+            decision: ApprovalDecision::Cancel,
+            option_id: None,
+            responder: "timeout-policy".into(),
+            responded_at_ms: 10,
+            option_class: OptionClass::Once,
+            client_scope: ClientScope::Full,
+        };
+        journal
+            .begin_expired_approval_response(&response, session_id)
+            .unwrap();
+        journal.mark_response_sent(id, 11).unwrap();
+        journal
+            .withdraw_pending_approvals(session_id, "turn_end", 12)
+            .unwrap();
+        assert_eq!(
+            journal.approval_state(id).unwrap().as_deref(),
+            Some("expired")
+        );
+        let events = journal.events_for_session(session_id).unwrap();
+        assert!(events.iter().any(|event| event.kind == "approval_expired"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.kind == "approval_delivered_unconfirmed")
+        );
     }
 
     #[test]
