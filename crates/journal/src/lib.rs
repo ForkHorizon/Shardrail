@@ -48,11 +48,15 @@ impl Journal {
                     "journal path has no filename",
                 )
             })?;
-            let path = parent.canonicalize()?.join(name);
+            let path = if parent == Path::new(".") || parent.starts_with("/proc/self/fd/") {
+                path.to_path_buf()
+            } else {
+                parent.canonicalize()?.join(name)
+            };
             reject_non_regular_path(&path)?;
             set_private_file_mode(&path)?;
             Connection::open_with_flags(
-                &path,
+                path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE
                     | OpenFlags::SQLITE_OPEN_CREATE
                     | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -165,8 +169,37 @@ impl Journal {
         if event.journal_epoch != self.journal_epoch()? || event.host_id != self.host_id()? {
             return Err(JournalError::EpochMismatch);
         }
-        let (payload, redacted) = redact_value(event.payload.clone());
-        let mut flags = event.redaction_flags.clone();
+        let (payload, payload_redacted) = redact_value(event.payload.clone());
+        let (kind, kind_redacted) = redact_value(serde_json::Value::String(event.kind.clone()));
+        let (provider_ref, provider_ref_redacted) =
+            event.provider_ref.as_ref().map_or((None, false), |value| {
+                let (value, redacted) = redact_value(serde_json::Value::String(value.clone()));
+                (value.as_str().map(str::to_owned), redacted)
+            });
+        let (causation, causation_redacted) =
+            event.causation.as_ref().map_or((None, false), |value| {
+                let (value, redacted) = redact_value(serde_json::Value::String(value.clone()));
+                (value.as_str().map(str::to_owned), redacted)
+            });
+        let (redaction_flags, flags_redacted) = redact_value(serde_json::Value::Array(
+            event
+                .redaction_flags
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ));
+        let mut flags: Vec<String> = redaction_flags
+            .as_array()
+            .expect("redaction flags remain an array")
+            .iter()
+            .filter_map(|flag| flag.as_str().map(str::to_owned))
+            .collect();
+        let redacted = payload_redacted
+            || kind_redacted
+            || provider_ref_redacted
+            || causation_redacted
+            || flags_redacted;
         if redacted && !flags.iter().any(|flag| flag == "redacted") {
             flags.push("redacted".into());
         }
@@ -175,7 +208,7 @@ impl Journal {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO events(journal_epoch,host_id,session_id,schema_version,kind,occurred_at_ms,provider_ref,causation,redaction_flags,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![event.journal_epoch.to_string(), event.host_id.to_string(), event.session_id.to_string(), event.schema_version, event.kind, event.occurred_at_ms, event.provider_ref, event.causation, serde_json::to_string(&flags).expect("redaction flags serialize"), payload.to_string()],
+            params![event.journal_epoch.to_string(), event.host_id.to_string(), event.session_id.to_string(), event.schema_version, kind.as_str().unwrap_or("[REDACTED]"), event.occurred_at_ms, provider_ref, causation, serde_json::to_string(&flags).expect("redaction flags serialize"), payload.to_string()],
         )?;
         let event_id = tx.last_insert_rowid();
         let monotonic_ns = MONOTONIC_ORIGIN
@@ -1001,14 +1034,14 @@ fn redact_entropy_runs(text: &str) -> (String, bool) {
     let mut cursor = 0;
     let mut changed = false;
     while cursor < chars.len() {
-        if !chars[cursor].is_ascii_alphanumeric() && !"+/=_-".contains(chars[cursor]) {
+        if !chars[cursor].is_ascii_alphanumeric() && !"+=_".contains(chars[cursor]) {
             output.push(chars[cursor]);
             cursor += 1;
             continue;
         }
         let start = cursor;
         while cursor < chars.len()
-            && (chars[cursor].is_ascii_alphanumeric() || "+/=_-".contains(chars[cursor]))
+            && (chars[cursor].is_ascii_alphanumeric() || "+=_".contains(chars[cursor]))
         {
             cursor += 1;
         }
@@ -1026,7 +1059,11 @@ fn redact_entropy_runs(text: &str) -> (String, bool) {
         let is_known_git_hash = prefix.contains("git ")
             || prefix.contains("commit ")
             || prefix.contains("sha")
-            || prefix.contains("revision ");
+            || prefix.contains("revision ")
+            || prefix.contains("index ")
+            || prefix.contains("\"head\"")
+            || prefix.contains("\"tree\"")
+            || prefix.contains("\"parent\"");
         let is_uuid = run.len() == 36
             && [8, 13, 18, 23]
                 .iter()
@@ -1041,9 +1078,9 @@ fn redact_entropy_runs(text: &str) -> (String, bool) {
             && run.bytes().any(|byte| byte.is_ascii_alphabetic())
             && run.bytes().any(|byte| byte.is_ascii_digit())
             && shannon_entropy(&run) >= 4.0;
-        let hex_like = run.len() >= 40
+        let hex_like = run.len() >= 32
             && run.bytes().all(|byte| byte.is_ascii_hexdigit())
-            && shannon_entropy(&run) >= 3.5
+            && shannon_entropy(&run) >= 3.0
             && !is_known_git_hash;
         if base64_like || hex_like {
             output.push_str("[REDACTED]");
@@ -1056,7 +1093,7 @@ fn redact_entropy_runs(text: &str) -> (String, bool) {
 }
 
 fn shannon_entropy(value: &str) -> f64 {
-    let mut counts = [0usize; 128];
+    let mut counts = [0usize; 256];
     for byte in value.bytes() {
         counts[byte as usize] += 1;
     }
@@ -1562,6 +1599,34 @@ mod tests {
     }
 
     #[test]
+    fn secret_shaped_event_metadata_is_redacted_before_persistence() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let session_id = Uuid::now_v7();
+        let secret = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A";
+        let event = DurableEvent {
+            event_id: 0,
+            journal_epoch: journal.journal_epoch().unwrap(),
+            host_id: journal.host_id().unwrap(),
+            session_id,
+            schema_version: 1,
+            kind: "provider_output".into(),
+            occurred_at_ms: 10,
+            provider_ref: Some(secret.into()),
+            causation: Some(secret.into()),
+            redaction_flags: vec![secret.into()],
+            payload: serde_json::json!({"text": "ordinary text"}),
+        };
+
+        journal.append_event(&event).unwrap();
+        let stored = journal.events_for_session(session_id).unwrap().remove(0);
+
+        assert_eq!(stored.provider_ref.as_deref(), Some("[REDACTED]"));
+        assert_eq!(stored.causation.as_deref(), Some("[REDACTED]"));
+        assert_eq!(stored.redaction_flags, ["[REDACTED]", "redacted"]);
+    }
+
+    #[test]
     fn common_credential_fields_and_token_prefixes_are_redacted() {
         let (payload, redacted) = redact_value(serde_json::json!({
             "cookie": "session=private-value",
@@ -1579,13 +1644,22 @@ mod tests {
 
     #[test]
     fn high_entropy_tokens_are_redacted_without_hiding_common_text() {
+        assert!(shannon_entropy("café") > 0.0);
         let fake_token = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A";
         let git_hash = "a4d3f0c7b1e29a6c8d5f0b7e3a1c9d2f4b6e8a0c";
+        let short_hex_secret = "e4d909c290d0fb1ca068ffaddf22cbd0";
         let (payload, redacted) = redact_value(serde_json::json!({
             "output": format!("token {fake_token} was rejected"),
             "code": "fn parse_uuid(value: Uuid) -> Result<()> { Ok(()) }",
             "commit": format!("git hash {git_hash}"),
+            "short_hex": short_hex_secret,
+            "diff": format!("index {git_hash}..{git_hash} 100644"),
+            "head": format!("{{\"head\":\"{git_hash}\"}}"),
             "uuid": Uuid::now_v7().to_string(),
+            "prefixed_uuid": format!("session-{}", Uuid::now_v7()),
+            "path": "/Users/dev/project/v2/src/components/AuthenticationModalContainer.tsx",
+            "branch": "feature/jira-1234-fix-authentication-boundary-issue",
+            "url": "https://example.com/v2/api/authentication-boundary",
             "note": "The implementation reads code and explains the result in plain prose.",
         }));
 
@@ -1596,7 +1670,31 @@ mod tests {
             "fn parse_uuid(value: Uuid) -> Result<()> { Ok(()) }"
         );
         assert_eq!(payload["commit"], format!("git hash {git_hash}"));
+        assert_eq!(payload["short_hex"], "[REDACTED]");
+        assert_eq!(
+            payload["diff"],
+            format!("index {git_hash}..{git_hash} 100644")
+        );
+        assert_eq!(payload["head"], format!("{{\"head\":\"{git_hash}\"}}"));
         assert!(Uuid::parse_str(payload["uuid"].as_str().unwrap()).is_ok());
+        assert!(
+            payload["prefixed_uuid"]
+                .as_str()
+                .unwrap()
+                .starts_with("session-")
+        );
+        assert_eq!(
+            payload["path"],
+            "/Users/dev/project/v2/src/components/AuthenticationModalContainer.tsx"
+        );
+        assert_eq!(
+            payload["branch"],
+            "feature/jira-1234-fix-authentication-boundary-issue"
+        );
+        assert_eq!(
+            payload["url"],
+            "https://example.com/v2/api/authentication-boundary"
+        );
         assert_eq!(
             payload["note"],
             "The implementation reads code and explains the result in plain prose."
