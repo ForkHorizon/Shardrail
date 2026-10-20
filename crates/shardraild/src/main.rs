@@ -40,6 +40,8 @@ struct Args {
     fake_acp_path: Option<PathBuf>,
     #[arg(long)]
     fake_acp_no_reject: bool,
+    #[arg(long, hide = true)]
+    fake_acp_disconnect_after_permission: bool,
     #[arg(long, default_value_t = 180)]
     approval_timeout_secs: u64,
     #[arg(long, default_value_t = 0)]
@@ -68,10 +70,7 @@ async fn resolve_approval(
         .find(|option| option.id == request.option_id)
         .cloned()
         .ok_or_else(|| "option is not offered for this approval".to_owned())?;
-    if option.decision == ApprovalDecision::Allow
-        && client.scope == ClientScope::Limited
-        && option.class != OptionClass::Once
-    {
+    if client.scope == ClientScope::Limited && option.class != OptionClass::Once {
         return Err("limited clients cannot choose widening or boundary-breaking options".into());
     }
     let sender = entry
@@ -79,7 +78,6 @@ async fn resolve_approval(
         .as_ref()
         .cloned()
         .ok_or_else(|| "approval is already resolved".to_owned())?;
-    let write_delay = daemon.test_write_ahead_delay_ms;
     let coordinator = daemon
         .sessions
         .lock()
@@ -88,6 +86,7 @@ async fn resolve_approval(
         .cloned()
         .ok_or_else(|| "session coordinator unavailable".to_owned())?;
     let mut coordinator = coordinator.lock().await;
+    let write_delay = Duration::from_millis(daemon.test_write_ahead_delay_ms);
     let result = coordinator.respond_approval(
         &mut entry.approval,
         shardrail_coordinator::ApprovalResponseRequest {
@@ -101,12 +100,17 @@ async fn resolve_approval(
             client_scope: client.scope,
         },
         move |_decision, option_id| {
-            if write_delay > 0 {
-                std::thread::sleep(Duration::from_millis(write_delay));
-            }
-            sender.send(option_id.map(str::to_owned)).map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "fake provider disconnected")
-            })
+            let (written, result) = std::sync::mpsc::sync_channel(1);
+            sender
+                .send(ProviderCommand {
+                    option_id: option_id.map(str::to_owned),
+                    written,
+                    delay: write_delay,
+                })
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "fake provider disconnected")
+                })?;
+            tokio::task::block_in_place(|| result.recv().map_err(io::Error::other))?
         },
     );
     if let Err(error) = result {
@@ -117,17 +121,48 @@ async fn resolve_approval(
             return Err("approval is already resolved".into());
         }
         if let Some(provider) = entry.provider.take() {
-            let _ = provider.send(None);
+            let _ = provider.send(ProviderCommand::cancel());
         }
         return Err(error.to_string());
     }
-    entry.provider = None;
+    if let Some(task) = entry.timeout_task.take() {
+        task.abort();
+    }
+    approvals.remove(&request.approval_id);
     Ok(())
 }
 
 async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
-    if let Err(error) = run_fake_acp_inner(daemon, path, session_id).await {
+    if let Err(error) = run_fake_acp_inner(Arc::clone(&daemon), path, session_id).await {
         eprintln!("fake ACP session {session_id} ended: {error}");
+        if let Some(coordinator) = daemon.sessions.lock().await.get(&session_id).cloned() {
+            let mut coordinator = coordinator.lock().await;
+            let _ = coordinator.turn_finished(
+                wall_clock_ms(),
+                shardrail_session_core::TurnOutcome::Interrupted,
+                false,
+                json!({"source":"fake-acp","error":"provider_failed"}),
+                || Ok(()),
+            );
+            let _ = coordinator.transition(
+                wall_clock_ms(),
+                "process_exited",
+                json!({"source":"fake-acp","error":"provider_failed"}),
+                || Ok(()),
+            );
+        }
+    }
+    let mut approvals = daemon.approvals.lock().await;
+    let ids = approvals
+        .iter()
+        .filter_map(|(id, entry)| (entry.session_id == session_id).then_some(*id))
+        .collect::<Vec<_>>();
+    for id in ids {
+        if let Some(mut entry) = approvals.remove(&id)
+            && let Some(task) = entry.timeout_task.take()
+        {
+            task.abort();
+        }
     }
 }
 
@@ -139,6 +174,9 @@ async fn run_fake_acp_inner(
     let mut command = TokioCommand::new(path);
     if daemon.fake_acp_no_reject {
         command.env("SHARDRAIL_FAKE_ACP_NO_REJECT", "1");
+    }
+    if daemon.fake_acp_disconnect_after_permission {
+        command.env("SHARDRAIL_FAKE_ACP_DISCONNECT_AFTER_PERMISSION", "1");
     }
     let mut child = command
         .stdin(std::process::Stdio::piped())
@@ -204,7 +242,8 @@ async fn run_fake_acp_inner(
     let options = params["options"].as_array().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "fake provider options missing")
     })?;
-    let approval = Approval::new(wall_clock_ms());
+    let mut approval = Approval::new(wall_clock_ms());
+    approval.session_id = session_id;
     let approval_id = approval.id;
     let provider_options = options
         .iter()
@@ -286,21 +325,24 @@ async fn run_fake_acp_inner(
             approval,
             options: provider_options,
             provider: Some(provider_tx),
+            timeout_task: None,
         },
     );
     let timeout_daemon = Arc::clone(&daemon);
-    tokio::spawn(async move {
+    let timeout_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(timeout_daemon.approval_timeout_secs)).await;
         expire_approval(&timeout_daemon, approval_id).await;
     });
-    let selected = provider_rx.recv().await.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "approval response channel closed",
-        )
-    })?;
-    let responded = selected.is_some();
-    if let Some(option_id) = selected {
+    if let Some(entry) = daemon.approvals.lock().await.get_mut(&approval_id) {
+        entry.timeout_task = Some(timeout_task.abort_handle());
+    }
+    let command = tokio::select! {
+        command = provider_rx.recv() => command.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "approval response channel closed"))?,
+        status = child.wait() => return Err(io::Error::other(format!("fake ACP exited while approval was pending: {status:?}"))),
+    };
+    tokio::time::sleep(command.delay).await;
+    let responded = command.option_id.is_some();
+    let write_result = if let Some(option_id) = command.option_id.as_ref() {
         write_agent(
             &mut input,
             &json!({
@@ -308,22 +350,23 @@ async fn run_fake_acp_inner(
                 "result":{"outcome":{"outcome":"selected","optionId":option_id}}
             }),
         )
-        .await?;
+        .await
+    } else {
+        write_agent(&mut input, &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"fake-session-1"}})).await
+    };
+    let _ = command.written.send(
+        write_result
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| io::Error::new(error.kind(), error.to_string())),
+    );
+    write_result?;
+    if responded {
         loop {
             let frame: serde_json::Value =
                 serde_json::from_str(&read_agent_line(&mut output).await?)
                     .map_err(io::Error::other)?;
             if frame["id"] == 3 {
-                loop {
-                    let state = Journal::open(daemon.data.journal_path())
-                        .map_err(io::Error::other)?
-                        .approval_state(approval_id)
-                        .map_err(io::Error::other)?;
-                    if state.as_deref() != Some("responding") {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
                 let coordinator = daemon
                     .sessions
                     .lock()
@@ -338,8 +381,6 @@ async fn run_fake_acp_inner(
                 break;
             }
         }
-    } else {
-        write_agent(&mut input, &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"fake-session-1"}})).await?;
     }
     let _ = child.wait().await?;
     let coordinator = daemon
@@ -402,17 +443,27 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
         &mut entry.approval,
         request,
         |_decision, option_id| {
-            provider.send(option_id.map(str::to_owned)).map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "fake provider disconnected")
-            })
+            let (written, result) = std::sync::mpsc::sync_channel(1);
+            provider
+                .send(ProviderCommand {
+                    option_id: option_id.map(str::to_owned),
+                    written,
+                    delay: Duration::ZERO,
+                })
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "fake provider disconnected")
+                })?;
+            tokio::task::block_in_place(|| result.recv().map_err(io::Error::other))?
         },
         || Ok(()),
     );
     match response {
-        Ok(()) => entry.provider = None,
+        Ok(()) => {
+            approvals.remove(&approval_id);
+        }
         Err(error) => {
             if let Some(provider) = entry.provider.take() {
-                let _ = provider.send(None);
+                let _ = provider.send(ProviderCommand::cancel());
             }
             eprintln!("approval expiry failed closed: {error}");
         }
@@ -420,17 +471,57 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
 }
 
 fn classify_option(kind: &str) -> OptionClass {
-    if kind == "allow_once" {
+    if kind == "allow_once" || kind == "reject_once" || kind == "deny_once" {
         OptionClass::Once
     } else if kind.contains("sandbox")
         || kind.contains("permission")
         || kind == "allow_boundary_breaking"
     {
         OptionClass::BoundaryBreaking
-    } else if kind.starts_with("allow") {
-        OptionClass::Widening
     } else {
-        OptionClass::Once
+        OptionClass::Widening
+    }
+}
+
+fn parse_client_frame(line: &str) -> io::Result<ClientFrame> {
+    let value: serde_json::Value = serde_json::from_str(line).map_err(io::Error::other)?;
+    let object = value.as_object().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "client frame must be an object")
+    })?;
+    let allowed = match object.get("kind").and_then(serde_json::Value::as_str) {
+        Some("authenticate") => &["kind", "signature"][..],
+        Some("request" | "approval_resolution") => &["kind", "request"][..],
+        Some("resume") => &["kind", "resume_after"][..],
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown client frame kind",
+            ));
+        }
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown client frame field",
+        ));
+    }
+    serde_json::from_value(value).map_err(io::Error::other)
+}
+
+struct ProviderCommand {
+    option_id: Option<String>,
+    written: std::sync::mpsc::SyncSender<io::Result<()>>,
+    delay: Duration,
+}
+
+impl ProviderCommand {
+    fn cancel() -> Self {
+        let (written, _result) = std::sync::mpsc::sync_channel(1);
+        Self {
+            option_id: None,
+            written,
+            delay: Duration::ZERO,
+        }
     }
 }
 
@@ -520,6 +611,7 @@ struct Daemon {
     host_key: SigningKey,
     fake_acp_path: Option<PathBuf>,
     fake_acp_no_reject: bool,
+    fake_acp_disconnect_after_permission: bool,
     approval_timeout_secs: u64,
     test_write_ahead_delay_ms: u64,
     approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
@@ -530,7 +622,8 @@ struct DaemonApproval {
     session_id: Uuid,
     approval: Approval,
     options: Vec<ProviderOption>,
-    provider: Option<mpsc::UnboundedSender<Option<String>>>,
+    provider: Option<mpsc::UnboundedSender<ProviderCommand>>,
+    timeout_task: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Clone)]
@@ -551,6 +644,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             args.fake_acp_path,
             args.fake_acp_no_reject,
+            args.fake_acp_disconnect_after_permission,
             args.approval_timeout_secs,
             args.test_write_ahead_delay_ms,
         )
@@ -563,6 +657,7 @@ async fn run(
     path: PathBuf,
     fake_acp_path: Option<PathBuf>,
     fake_acp_no_reject: bool,
+    fake_acp_disconnect_after_permission: bool,
     approval_timeout_secs: u64,
     test_write_ahead_delay_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -591,6 +686,7 @@ async fn run(
         host_key,
         fake_acp_path,
         fake_acp_no_reject,
+        fake_acp_disconnect_after_permission,
         approval_timeout_secs,
         test_write_ahead_delay_ms,
         approvals: Mutex::new(HashMap::new()),
@@ -1104,7 +1200,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
     {
         return Ok(());
     }
-    let auth: ClientFrame = serde_json::from_str(&line).map_err(io::Error::other)?;
+    let auth = parse_client_frame(&line)?;
     let ClientFrame::Authenticate { signature } = auth else {
         return finish_with_error(outbound, &mut abort_writer, "authentication required").await;
     };
@@ -1136,7 +1232,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             push_events(&outbound, &daemon, &mut cursor).await?;
             continue;
         }
-        let frame: ClientFrame = serde_json::from_str(&line).map_err(io::Error::other)?;
+        let frame = parse_client_frame(&line)?;
         let (request, resolution, resume_after) = match frame {
             ClientFrame::Authenticate { .. } => {
                 return Err(io::Error::new(
@@ -1395,5 +1491,22 @@ mod tests {
         let resolved = absolute_path(Path::new(".shardrail-test-data")).unwrap();
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(".shardrail-test-data"));
+    }
+
+    #[test]
+    fn unknown_permission_options_require_full_scope() {
+        assert_eq!(classify_option("allow_once"), OptionClass::Once);
+        assert_eq!(classify_option("reject_once"), OptionClass::Once);
+        assert_eq!(classify_option("grant_access"), OptionClass::Widening);
+        assert_eq!(
+            classify_option("grant_sandbox_bypass"),
+            OptionClass::BoundaryBreaking
+        );
+    }
+
+    #[test]
+    fn rejects_forged_root_policy_fields() {
+        let frame = r#"{"kind":"approval_resolution","scope":"full","request":{"approval_id":"019b0000-0000-7000-8000-000000000001","option_id":"allow_once"}}"#;
+        assert!(parse_client_frame(frame).is_err());
     }
 }

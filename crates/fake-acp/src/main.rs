@@ -47,7 +47,9 @@ fn main() -> io::Result<()> {
                             {"optionId":"allow_once","name":"Allow once","kind":"allow_once"},
                             {"optionId":"allow_always","name":"Allow always","kind":"allow_always"},
                             {"optionId":"allow_boundary","name":"Allow permission change","kind":"allow_boundary_breaking"},
-                            {"optionId":"reject_once","name":"Reject once","kind":"reject_once"}
+                            {"optionId":"reject_once","name":"Reject once","kind":"reject_once"},
+                            {"optionId":"grant_access","name":"Grant access","kind":"grant_access"},
+                            {"optionId":"grant_sandbox_bypass","name":"Grant sandbox bypass","kind":"grant_sandbox_bypass"}
                         ]
                     }
                 });
@@ -59,11 +61,19 @@ fn main() -> io::Result<()> {
                 }
                 writeln!(out, "{}", permission_request)?;
                 out.flush()?;
+                if std::env::var_os("SHARDRAIL_FAKE_ACP_DISCONNECT_AFTER_PERMISSION").is_some() {
+                    return Ok(());
+                }
 
                 let mut response_line = String::new();
                 input.read_line(&mut response_line)?;
                 let permission_response: Value = serde_json::from_str(&response_line)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if permission_response.get("method").and_then(Value::as_str)
+                    == Some("session/cancel")
+                {
+                    return Ok(());
+                }
                 if permission_response.get("id") != Some(&json!("permission-1")) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,

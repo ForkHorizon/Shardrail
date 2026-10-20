@@ -92,6 +92,22 @@ fn start_fake_daemon_with(
         .unwrap()
 }
 
+fn start_disconnect_after_approval_daemon(path: &Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(path)
+        .arg("--fake-acp-path")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/shardrail-fake-acp"),
+        )
+        .arg("--fake-acp-disconnect-after-permission")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap()
+}
+
 fn connect(path: &Path) -> (UnixStream, BufReader<UnixStream>) {
     let socket = path.join("shardraild.sock");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -704,6 +720,14 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
             .unwrap()
             .contains("limited clients")
     );
+    send_resolution(&mut limited_stream, &approval_id, "grant_access");
+    let limited_result = read_command_reply(&mut limited_reader);
+    assert!(
+        limited_result["error"]
+            .as_str()
+            .unwrap()
+            .contains("limited clients")
+    );
     send_resolution(&mut limited_stream, &approval_id, "allow_boundary");
     let limited_result = read_command_reply(&mut limited_reader);
     assert!(
@@ -713,10 +737,22 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
             .contains("limited clients")
     );
 
-    send_resolution(&mut full_stream, &approval_id, "allow_once");
-    send_resolution(&mut limited_stream, &approval_id, "reject_once");
-    let full_result = read_command_reply(&mut full_reader);
-    let limited_result = read_command_reply(&mut limited_reader);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let full_barrier = std::sync::Arc::clone(&barrier);
+    let full_approval_id = approval_id.clone();
+    let limited_approval_id = approval_id.clone();
+    let full_thread = thread::spawn(move || {
+        full_barrier.wait();
+        send_resolution(&mut full_stream, &full_approval_id, "allow_once");
+        read_command_reply(&mut full_reader)
+    });
+    let limited_thread = thread::spawn(move || {
+        barrier.wait();
+        send_resolution(&mut limited_stream, &limited_approval_id, "reject_once");
+        read_command_reply(&mut limited_reader)
+    });
+    let full_result = full_thread.join().unwrap();
+    let limited_result = limited_thread.join().unwrap();
     let replies = [full_result, limited_result];
     assert_eq!(
         replies
@@ -732,7 +768,8 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
             .any(|frame| frame["error"]
                 .as_str()
                 .unwrap()
-                .contains("already resolved"))
+                .contains("already resolved")),
+        "unexpected race replies: {replies:?}"
     );
     let approval_id = Uuid::parse_str(approval_id.as_str().unwrap()).unwrap();
     let ack_deadline = Instant::now() + Duration::from_secs(3);
@@ -750,7 +787,135 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
         );
         thread::sleep(Duration::from_millis(10));
     }
+    let state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+        .unwrap()
+        .approval_state(approval_id)
+        .unwrap();
+    let responses = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+        .unwrap()
+        .events_after_with_receipts(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|item| {
+            item.event.kind == "approval_responding"
+                && item.event.payload["approval_id"] == approval_id.to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 1);
+    assert_eq!(
+        responses[0].event.payload["option_id"],
+        if state.as_deref() == Some("allowed") {
+            "allow_once"
+        } else {
+            "reject_once"
+        }
+    );
 
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn limited_client_can_choose_once_option() {
+    let dir = tempdir().unwrap();
+    let full = add_client(dir.path());
+    let limited = add_client_with_scope(dir.path(), "limited");
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut full_stream, mut full_reader, _) = handshake(dir.path(), None, 0, &full);
+    let (mut limited_stream, mut limited_reader, _) = handshake(dir.path(), None, 0, &limited);
+    request_session(&mut full_stream, &mut full_reader);
+    let _ = next_approval(&mut full_reader);
+    let approval = next_approval(&mut limited_reader);
+    send_resolution(&mut limited_stream, &approval["approval_id"], "allow_once");
+    assert_eq!(
+        read_command_reply(&mut limited_reader)["kind"],
+        "approval_resolved"
+    );
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap();
+        if state.as_deref() == Some("allowed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider acknowledgement was not recorded"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn early_provider_exit_finishes_the_turn_and_process_lifecycle() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--fake-acp-path")
+        .arg("/usr/bin/false")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .events_after_with_receipts(0, 100)
+            .unwrap();
+        if events
+            .iter()
+            .any(|item| item.event.kind == "process_exited")
+        {
+            assert!(events.iter().any(|item| item.event.kind == "turn_finished"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failed provider lifecycle was not finalized"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn provider_disconnect_after_publishing_approval_withdraws_it_and_exits() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_disconnect_after_approval_daemon(dir.path());
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let journal = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3")).unwrap();
+        let state = journal.approval_state(approval_id).unwrap();
+        let events = journal.events_after_with_receipts(0, 100).unwrap();
+        if state.as_deref() == Some("withdrawn")
+            && events
+                .iter()
+                .any(|item| item.event.kind == "process_exited")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider disconnect left a live approval"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
@@ -826,6 +991,11 @@ fn approval_expiry_uses_reject_option_and_never_allows() {
         assert!(Instant::now() < deadline, "approval did not expire");
         thread::sleep(Duration::from_millis(20));
     }
+    let final_state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+        .unwrap()
+        .approval_state(approval_id)
+        .unwrap();
+    assert_eq!(final_state.as_deref(), Some("expired"));
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
@@ -854,6 +1024,29 @@ fn approval_expiry_cancels_turn_when_provider_has_no_reject_option() {
         }
         assert!(Instant::now() < deadline, "expiry did not cancel the turn");
         thread::sleep(Duration::from_millis(20));
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap();
+        let events = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .events_after_with_receipts(0, 100)
+            .unwrap();
+        if state.as_deref() == Some("expired")
+            && events
+                .iter()
+                .any(|item| item.event.kind == "process_exited")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expired approval terminal state was lost"
+        );
+        thread::sleep(Duration::from_millis(10));
     }
     daemon.kill().unwrap();
     daemon.wait().unwrap();
