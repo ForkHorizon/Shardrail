@@ -26,8 +26,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: packages/contracts/package-lock.json
+          cache-dependency-path: |
+            packages/contracts/package-lock.json
+            packages/client/package-lock.json
       - run: npm ci --prefix packages/contracts
+      - run: npm ci --prefix packages/client
       - run: npm audit signatures --prefix packages/contracts
+      - run: npm audit signatures --prefix packages/client
       - run: node scripts/check-npm-licenses.mjs
+      - run: npm run typecheck --prefix packages/client
+      - run: npm test --prefix packages/client
       - run: scripts/check-schema-drift.sh

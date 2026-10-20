@@ -4,7 +4,7 @@ These rules follow `planning/11-modules.md` §3 and `planning/08-ui-ux.md` §6. 
 
 - Read the relevant planning sections before changing a module. Keep changes within the requested phase and record uncovered decisions in `docs/dev/foundations-status.md`.
 - Do not run providers, call model APIs, or add provider integration without explicit authorization. Never use experimental provider APIs.
-- Direct dependencies are allowlisted here: Rust `serde`, `serde_json`, `schemars`, `thiserror`, `uuid`, `rusqlite`, `tokio`, `clap`, `nix`, `ed25519-dalek`, `sha2`; dev-only `tempfile`, `proptest`; TypeScript `json-schema-to-typescript`. Additions require owner authorization and an update here; keep all lockfiles committed. `cargo-deny` checks the Rust dependency graph. Check official documentation for pinned dependencies before relying on APIs.
+- Direct dependencies are allowlisted here: Rust `serde`, `serde_json`, `schemars`, `thiserror`, `uuid`, `rusqlite`, `tokio`, `clap`, `nix`, `ed25519-dalek`, `sha2`; dev-only `tempfile`, `proptest`; TypeScript `json-schema-to-typescript`, `typescript`, `@types/node`; runtime `@noble/ed25519` pinned to `3.1.0` for the client handshake (D62). Additions require owner authorization and an update here; keep all lockfiles committed. `cargo-deny` checks the Rust dependency graph. Check official documentation for pinned dependencies before relying on APIs.
 - Rust contract types are the source of truth. Export JSON Schema to `schema/`, generate TypeScript from that schema, and never hand-edit generated files.
 - Approval defaults, failures, disconnects, timeouts and recovery must never produce `allow`. Journal approval intent durably before writing a provider response.
 - Durable journal events are append-only. Journal errors fail closed; do not dispatch or send an approval without a durable write.
@@ -21,6 +21,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo deny check
 npm --prefix packages/contracts ci
+npm --prefix packages/client ci
+npm --prefix packages/client run typecheck
+npm --prefix packages/client test
 scripts/check-schema-drift.sh
 ```
 

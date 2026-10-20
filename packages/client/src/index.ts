@@ -1,3 +1,8 @@
+import { connect as openSocket, type Socket } from "node:net";
+import { randomBytes, createHash } from "node:crypto";
+import * as ed from "@noble/ed25519";
+import type { ClientFrame, DaemonFrame, ServerHello } from "@shardrail/contracts";
+
 export type {
   ApprovalResolutionRequest,
   ClientFrame,
@@ -8,9 +13,142 @@ export type {
   ServerHello,
 } from "@shardrail/contracts";
 
-/** Browser clients cannot open the daemon's local Unix socket directly. */
-export function connect(): never {
-  throw new Error(
-    "No client transport is available yet; use a native Unix socket relay.",
-  );
+export type ClientOptions = {
+  socketPath: string;
+  clientId: string;
+  privateKey: Uint8Array;
+  hostPublicKey?: string;
+  cursor?: number;
+  journalEpoch?: string;
+};
+
+export type DaemonEvent = Extract<DaemonFrame, { kind: "durable_event" }>;
+export type Client = {
+  host: ServerHello;
+  onFrame(listener: (frame: DaemonFrame) => void): () => void;
+  reconnect(): Promise<Client>;
+  request(request: Extract<ClientFrame, { kind: "request" }>["request"]): void;
+  resolveApproval(request: Extract<ClientFrame, { kind: "approval_resolution" }>["request"]): void;
+  resume(cursor: number): void;
+  close(): void;
+};
+
+const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+const unhex = (value: string) => {
+  if (!/^(?:[0-9a-f]{2})+$/i.test(value)) throw new Error("invalid hex in daemon handshake");
+  return Buffer.from(value, "hex");
+};
+
+function transcript(versions: number[], fields: string[]) {
+  const hash = createHash("sha256").update("Shardrail mutual client handshake v1\0");
+  for (const version of versions) {
+    const encoded = Buffer.alloc(4);
+    encoded.writeUInt32BE(version);
+    hash.update(encoded);
+  }
+  for (const field of fields) {
+    const bytes = unhex(field);
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    hash.update(length).update(bytes);
+  }
+  return new Uint8Array(hash.digest());
+}
+
+function frameReader(socket: Socket) {
+  let buffer = Buffer.alloc(0);
+  const waiting: { resolve: (line: string) => void; reject: (error: Error) => void }[] = [];
+  const queued: string[] = [];
+  let failure: Error | undefined;
+  const fail = (error: Error) => {
+    failure = error;
+    waiting.splice(0).forEach(({ reject }) => reject(error));
+  };
+  socket.on("data", (data: Buffer) => {
+    buffer = Buffer.concat([buffer, data]);
+    let newline;
+    while ((newline = buffer.indexOf(10)) >= 0) {
+      if (newline > 1_048_576) { const error = new Error("daemon frame exceeds 1 MiB"); fail(error); socket.destroy(error); return; }
+      const line = buffer.subarray(0, newline).toString("utf8");
+      buffer = buffer.subarray(newline + 1);
+      const waiter = waiting.shift();
+      if (waiter) waiter.resolve(line); else queued.push(line);
+    }
+    if (buffer.length > 1_048_576) { const error = new Error("daemon frame exceeds 1 MiB"); fail(error); socket.destroy(error); }
+  });
+  socket.on("error", fail);
+  socket.on("close", () => fail(failure ?? new Error("daemon socket closed")));
+  return () => new Promise<string>((resolve, reject) => {
+    const line = queued.shift();
+    if (line !== undefined) resolve(line);
+    else if (failure) reject(failure);
+    else waiting.push({ resolve, reject });
+  });
+}
+
+function writeFrame(socket: Socket, frame: ClientFrame | import("@shardrail/contracts").ClientHello) {
+  socket.write(`${JSON.stringify(frame)}\n`);
+}
+
+/** Opens an authenticated protocol-v1 connection to a local shardraild socket. */
+export async function connect(options: ClientOptions): Promise<Client> {
+  if (options.privateKey.byteLength !== 32) throw new Error("client private key must be a 32-byte Ed25519 seed");
+  const socket = openSocket(options.socketPath);
+  const nextFrame = frameReader(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  const publicKey = hex(await ed.getPublicKeyAsync(options.privateKey));
+  const clientNonce = hex(randomBytes(32));
+  writeFrame(socket, {
+    min_version: 1, max_version: 1, client_id: options.clientId,
+    public_key: publicKey, nonce: clientNonce, resume_after: options.cursor ?? 0,
+    journal_epoch: options.journalEpoch ?? null,
+  });
+  const host = JSON.parse(await nextFrame()) as ServerHello | { error: string };
+  if ("error" in host) { socket.destroy(); throw new Error(String(host.error)); }
+  if (host.protocol_version !== 1) { socket.destroy(); throw new Error("unsupported daemon protocol version"); }
+  if (options.hostPublicKey && host.public_key !== options.hostPublicKey) {
+    socket.destroy(); throw new Error("daemon host key does not match the pinned key");
+  }
+  const message = transcript([1, 1, host.protocol_version], [clientNonce, host.nonce, publicKey, host.public_key]);
+  if (!await ed.verifyAsync(unhex(host.signature), message, unhex(host.public_key))) {
+    socket.destroy(); throw new Error("daemon handshake signature is invalid");
+  }
+  writeFrame(socket, { kind: "authenticate", signature: hex(await ed.signAsync(message, options.privateKey)) });
+  const auth = JSON.parse(await nextFrame()) as DaemonFrame;
+  if (auth.kind !== "authenticated") { socket.destroy(); throw new Error(auth.kind === "error" ? auth.error : "daemon authentication failed"); }
+
+  const listeners = new Set<(frame: DaemonFrame) => void>();
+  const pendingFrames: DaemonFrame[] = [];
+  let cursor = options.cursor ?? 0;
+  void (async () => {
+    while (!socket.destroyed) {
+      try {
+        const line = await nextFrame();
+        if (line) {
+          const frame = JSON.parse(line) as DaemonFrame;
+          if (frame.kind === "durable_event" || frame.kind === "command_accepted") cursor = Math.max(cursor, frame.cursor);
+          if (listeners.size) listeners.forEach((listener) => listener(frame));
+          else if (pendingFrames.length < 32) pendingFrames.push(frame);
+          else { socket.destroy(new Error("client frame queue overflow")); break; }
+        }
+      } catch { break; }
+    }
+  })();
+  return {
+    host,
+    onFrame(listener) {
+      listeners.add(listener);
+      const pending = pendingFrames.splice(0);
+      queueMicrotask(() => { if (listeners.has(listener)) pending.forEach(listener); });
+      return () => listeners.delete(listener);
+    },
+    reconnect() { return connect({ ...options, cursor, journalEpoch: host.journal_epoch, hostPublicKey: options.hostPublicKey ?? host.public_key }); },
+    request(request) { writeFrame(socket, { kind: "request", request }); },
+    resolveApproval(request) { writeFrame(socket, { kind: "approval_resolution", request }); },
+    resume(cursor) { writeFrame(socket, { kind: "resume", resume_after: cursor }); },
+    close() { socket.end(); },
+  };
 }
