@@ -115,6 +115,13 @@ pub struct ServerHello {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalResolutionRequest {
+    pub approval_id: Uuid,
+    pub option_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CommandRequest {
     pub command_id: Uuid,
     pub kind: String,
@@ -128,6 +135,7 @@ pub struct CommandRequest {
 pub enum ClientFrame {
     Authenticate { signature: String },
     Request { request: CommandRequest },
+    ApprovalResolution { request: ApprovalResolutionRequest },
     Resume { resume_after: i64 },
 }
 
@@ -144,6 +152,9 @@ pub enum DaemonFrame {
     CommandRejected {
         command_id: Uuid,
         error: String,
+    },
+    ApprovalResolved {
+        approval_id: Uuid,
     },
     DurableEvent {
         event: DurableEvent,

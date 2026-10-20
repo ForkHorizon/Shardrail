@@ -59,6 +59,23 @@
         "cancel"
       ]
     },
+    "ApprovalResolutionRequest": {
+      "type": "object",
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "option_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "approval_id",
+        "option_id"
+      ]
+    },
     "ApprovalResponding": {
       "type": "object",
       "properties": {
@@ -138,6 +155,22 @@
             },
             "request": {
               "$ref": "#/$defs/CommandRequest"
+            }
+          },
+          "required": [
+            "kind",
+            "request"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "approval_resolution"
+            },
+            "request": {
+              "$ref": "#/$defs/ApprovalResolutionRequest"
             }
           },
           "required": [
@@ -315,6 +348,23 @@
             "kind",
             "command_id",
             "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "approval_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "approval_resolved"
+            }
+          },
+          "required": [
+            "kind",
+            "approval_id"
           ]
         },
         {

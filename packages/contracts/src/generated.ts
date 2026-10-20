@@ -29,6 +29,11 @@ export type ClientFrame =
       [k: string]: unknown;
     }
   | {
+      kind: "approval_resolution";
+      request: ApprovalResolutionRequest;
+      [k: string]: unknown;
+    }
+  | {
       kind: "resume";
       resume_after: number;
       [k: string]: unknown;
@@ -50,6 +55,11 @@ export type DaemonFrame =
       command_id: string;
       error: string;
       kind: "command_rejected";
+      [k: string]: unknown;
+    }
+  | {
+      approval_id: string;
+      kind: "approval_resolved";
       [k: string]: unknown;
     }
   | {
@@ -103,6 +113,10 @@ export interface CommandRequest {
   kind: string;
   payload: unknown;
   [k: string]: unknown;
+}
+export interface ApprovalResolutionRequest {
+  approval_id: string;
+  option_id: string;
 }
 /**
  * First frame on a client connection; authentication completes before streaming.

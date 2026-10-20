@@ -1,4 +1,5 @@
 export type {
+  ApprovalResolutionRequest,
   ClientFrame,
   ClientHello,
   CommandRequest,
