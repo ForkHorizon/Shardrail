@@ -8,6 +8,7 @@ license.workspace = true
 test-utils = ["shardrail-journal/test-utils"]
 
 [dependencies]
+nix.workspace = true
 shardrail-journal = { path = "../journal", version = "0.1.0" }
 shardrail-protocol = { path = "../protocol", version = "0.1.0" }
 shardrail-session-core = { path = "../session-core", version = "0.1.0" }

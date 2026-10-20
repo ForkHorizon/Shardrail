@@ -4,14 +4,14 @@ ignore = []
 
 [licenses]
 version = 2
-allow = ["Apache-2.0", "LicenseRef-Proprietary", "MIT", "Unicode-3.0", "Zlib"]
+allow = ["Apache-2.0", "BSD-3-Clause", "LicenseRef-Proprietary", "MIT", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 # Task N2 direct-dependency additions, also allowlisted in AGENTS.md:
-# tokio, clap, nix. This list is a blocklist, so approved dependencies do not belong here.
+# tokio, clap, nix, ed25519-dalek, sha2. This list is a blocklist, so approved dependencies do not belong here.
 deny = []
 
 [sources]

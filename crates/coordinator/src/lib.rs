@@ -1,10 +1,17 @@
+#[cfg(target_os = "macos")]
+use nix::fcntl::{FcntlArg, fcntl};
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::{Mode, fchmod, fstat, mkdirat};
 use shardrail_journal::{Journal, JournalError};
 use shardrail_protocol::{
     ApprovalDecision, ApprovalResponding, ClientScope, DurableEvent, OptionClass,
 };
 use shardrail_session_core::{Approval, Session};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io;
+use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
@@ -57,28 +64,38 @@ pub struct FailClosedPlan {
 /// Owns M01's private data directory and process-lifetime advisory lock.
 pub struct DaemonDataDir {
     path: PathBuf,
+    _directory: File,
     _lock: File,
 }
 
 impl DaemonDataDir {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CoordinatorError> {
-        let path = path.as_ref();
-        create_private_dir(path)?;
-        let metadata = fs::symlink_metadata(path)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(CoordinatorError::InvalidDataDirectory);
-        }
-        set_private_dir_mode(path)?;
-
-        let lock_path = path.join("daemon.lock");
-        if fs::symlink_metadata(&lock_path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        let directory = open_private_directory(path.as_ref())?;
+        let anchored_path = descriptor_path(&directory).map_err(CoordinatorError::Io)?;
+        let lock_fd = openat(
+            directory.as_fd(),
+            "daemon.lock",
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(io::Error::other)?;
+        let lock_meta = fstat(&lock_fd).map_err(io::Error::other)?;
+        if !nix::sys::stat::SFlag::from_bits_truncate(lock_meta.st_mode)
+            .contains(nix::sys::stat::SFlag::S_IFREG)
+            || lock_meta.st_uid != nix::unistd::geteuid().as_raw()
         {
             return Err(CoordinatorError::InvalidDataDirectory);
         }
-        let lock = open_private_file(&lock_path)?;
+        fchmod(&lock_fd, Mode::from_bits_truncate(0o600)).map_err(io::Error::other)?;
+        let lock_meta = fstat(&lock_fd).map_err(io::Error::other)?;
+        if lock_meta.st_mode & 0o777 != 0o600 {
+            return Err(CoordinatorError::InvalidDataDirectory);
+        }
+        let lock: File = lock_fd.into();
         match lock.try_lock() {
             Ok(()) => Ok(Self {
-                path: path.to_path_buf(),
+                path: anchored_path,
+                _directory: directory,
                 _lock: lock,
             }),
             Err(std::fs::TryLockError::WouldBlock) => Err(CoordinatorError::AlreadyRunning),
@@ -90,9 +107,113 @@ impl DaemonDataDir {
         self.path.join("journal.sqlite3")
     }
 
+    pub fn directory_path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn open_journal(&self) -> Result<Journal, JournalError> {
         Journal::open(self.journal_path())
     }
+
+    pub fn open_journal_entry(&self) -> io::Result<std::os::fd::OwnedFd> {
+        let entry = openat(
+            self._directory.as_fd(),
+            "journal.sqlite3",
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(io::Error::other)?;
+        let metadata = fstat(&entry).map_err(io::Error::other)?;
+        if !nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode)
+            .contains(nix::sys::stat::SFlag::S_IFREG)
+            || metadata.st_uid != nix::unistd::geteuid().as_raw()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "journal must be an owner-owned regular file",
+            ));
+        }
+        fchmod(&entry, Mode::from_bits_truncate(0o600)).map_err(io::Error::other)?;
+        Ok(entry)
+    }
+}
+
+fn descriptor_path(directory: &File) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    return Ok(PathBuf::from("/proc/self/fd").join(directory.as_raw_fd().to_string()));
+    #[cfg(target_os = "macos")]
+    {
+        let mut path = PathBuf::new();
+        fcntl(directory, FcntlArg::F_GETPATH(&mut path)).map_err(io::Error::other)?;
+        Ok(path)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = directory;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "descriptor-anchored data paths are unsupported on this platform",
+        ))
+    }
+}
+
+pub fn open_private_data_directory(path: impl AsRef<Path>) -> io::Result<(File, PathBuf)> {
+    let directory = open_private_directory(path.as_ref())?;
+    let anchored_path = descriptor_path(&directory)?;
+    Ok((directory, anchored_path))
+}
+
+fn open_private_directory(path: &Path) -> io::Result<File> {
+    open_private_directory_with(path, || {})
+}
+
+fn open_private_directory_with(path: &Path, after_open: impl FnOnce()) -> io::Result<File> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let parent_path = path.parent().unwrap_or(Path::new("/"));
+    fs::create_dir_all(parent_path)?;
+    let parent = File::open(parent_path)?;
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "data directory path has no final component",
+        )
+    })?;
+    match mkdirat(parent.as_fd(), name, Mode::from_bits_truncate(0o700)) {
+        Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+        Err(error) => return Err(io::Error::other(error)),
+    }
+    let directory_fd = openat(
+        parent.as_fd(),
+        name,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(io::Error::other)?;
+    let directory: File = directory_fd.into();
+    after_open();
+    let metadata = fstat(&directory).map_err(io::Error::other)?;
+    if !nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode)
+        .contains(nix::sys::stat::SFlag::S_IFDIR)
+        || metadata.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "data directory must be owned by the current user",
+        ));
+    }
+    fchmod(&directory, Mode::from_bits_truncate(0o700)).map_err(io::Error::other)?;
+    let metadata = fstat(&directory).map_err(io::Error::other)?;
+    if metadata.st_mode & 0o777 != 0o700 || metadata.st_uid != nix::unistd::geteuid().as_raw() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "data directory ownership or permissions are invalid",
+        ));
+    }
+    Ok(directory)
 }
 
 /// Provider effects are invoked only after their event has committed.
@@ -725,54 +846,6 @@ fn scope_allows(decision: ApprovalDecision, class: OptionClass, scope: ClientSco
     decision != ApprovalDecision::Allow || scope == ClientScope::Full || class == OptionClass::Once
 }
 
-#[cfg(unix)]
-fn create_private_dir(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)
-}
-
-#[cfg(unix)]
-fn set_private_dir_mode(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn set_private_dir_mode(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn open_private_file(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_private_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +903,29 @@ mod tests {
             fs::metadata(&fresh_data).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_swap_after_open_keeps_operations_on_the_checked_descriptor() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let data = dir.path().join("data");
+        let moved = dir.path().join("data-opened");
+        let external = dir.path().join("external");
+        fs::create_dir(&data).unwrap();
+        fs::create_dir(&external).unwrap();
+
+        let opened = open_private_directory_with(&data, || {
+            fs::rename(&data, &moved).unwrap();
+            symlink(&external, &data).unwrap();
+        })
+        .unwrap();
+        let pinned_path = descriptor_path(&opened).unwrap().join("swap-probe");
+        fs::write(&pinned_path, b"pinned").unwrap();
+
+        assert_eq!(fs::read(moved.join("swap-probe")).unwrap(), b"pinned");
+        assert!(!external.join("swap-probe").exists());
     }
 
     #[test]
@@ -1754,6 +1850,7 @@ mod tests {
         coordinator.acknowledge_approval(id, 7_200_003).unwrap();
     }
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn regression_journal_failure_invokes_protocol_fail_closed_hook() {
         use std::sync::{Arc, Mutex};

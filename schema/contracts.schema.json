@@ -118,6 +118,22 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "authenticate"
+            },
+            "signature": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "signature"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "request"
             },
             "request": {
@@ -149,7 +165,7 @@
       ]
     },
     "ClientHello": {
-      "description": "First frame on a local client connection. Public-key proof verification is\nintentionally represented explicitly even while dev admission is UID based.",
+      "description": "First frame on a client connection; authentication completes before streaming.",
       "type": "object",
       "properties": {
         "client_id": {
@@ -173,17 +189,11 @@
           "format": "uint32",
           "minimum": 0
         },
-        "proof": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "nonce": {
+          "type": "string"
         },
         "public_key": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "resume_after": {
           "type": "integer",
@@ -194,6 +204,8 @@
         "min_version",
         "max_version",
         "client_id",
+        "public_key",
+        "nonce",
         "resume_after"
       ]
     },
@@ -237,6 +249,18 @@
     },
     "DaemonFrame": {
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "authenticated"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
         {
           "type": "object",
           "properties": {
@@ -448,22 +472,34 @@
           "type": "string",
           "format": "uuid"
         },
+        "nonce": {
+          "type": "string"
+        },
         "protocol_version": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "public_key": {
+          "type": "string"
         },
         "resync_required": {
           "type": "boolean"
         },
         "scope": {
           "$ref": "#/$defs/ClientScope"
+        },
+        "signature": {
+          "type": "string"
         }
       },
       "required": [
         "protocol_version",
         "host_id",
         "journal_epoch",
+        "public_key",
+        "nonce",
+        "signature",
         "scope",
         "cursor",
         "resync_required"

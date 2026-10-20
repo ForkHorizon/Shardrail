@@ -1,4 +1,6 @@
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -7,6 +9,41 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+struct TestClient {
+    id: Uuid,
+    public_key: String,
+    key: SigningKey,
+}
+
+fn add_client(path: &Path) -> TestClient {
+    let result = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(path)
+        .args(["client", "add", "--label", "test", "--scope", "full"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let registered: Value =
+        serde_json::from_slice(&std::fs::read(path.join("authorized-clients.json")).unwrap())
+            .unwrap();
+    let client = &registered["clients"][0];
+    let id = Uuid::parse_str(client["client_id"].as_str().unwrap()).unwrap();
+    let public_key = client["public_key"].as_str().unwrap().to_string();
+    let secret: [u8; 32] = std::fs::read(path.join(format!("client-{id}.key")))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    TestClient {
+        id,
+        public_key,
+        key: SigningKey::from_bytes(&secret),
+    }
+}
 
 fn start_daemon(path: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_shardraild"))
@@ -51,30 +88,189 @@ fn handshake(
     path: &Path,
     epoch: Option<Uuid>,
     cursor: i64,
+    client: &TestClient,
 ) -> (UnixStream, BufReader<UnixStream>, Value) {
     let (mut stream, mut reader) = connect(path);
+    let nonce = "11".repeat(32);
     writeln!(
         stream,
         "{}",
         json!({
-            "min_version": 1, "max_version": 1, "client_id": Uuid::now_v7(),
-            "public_key": null, "proof": null, "resume_after": cursor,
+            "min_version": 1, "max_version": 1, "client_id": client.id,
+            "public_key": client.public_key, "nonce": nonce, "resume_after": cursor,
             "journal_epoch": epoch,
         })
     )
     .unwrap();
     let hello = read_json(&mut reader);
+    let host_secret: [u8; 32] = std::fs::read(path.join("host.key"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let host_key = SigningKey::from_bytes(&host_secret).verifying_key();
+    assert_eq!(hello["public_key"], encode_hex(&host_key.to_bytes()));
+    let signature =
+        Signature::from_slice(&decode_hex(hello["signature"].as_str().unwrap())).unwrap();
+    let transcript = transcript_hash(
+        [1, 1, 1],
+        &nonce,
+        hello["nonce"].as_str().unwrap(),
+        &client.public_key,
+        hello["public_key"].as_str().unwrap(),
+    );
+    host_key.verify_strict(&transcript, &signature).unwrap();
+    let client_signature = client.key.sign(&transcript);
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"authenticate", "signature":encode_hex(&client_signature.to_bytes())})
+    )
+    .unwrap();
+    assert_eq!(read_json(&mut reader)["kind"], "authenticated");
     (stream, reader, hello)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_hex(value: &str) -> Vec<u8> {
+    value
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
+
+fn transcript_hash(
+    versions: [u32; 3],
+    client_nonce: &str,
+    server_nonce: &str,
+    client_key: &str,
+    host_key: &str,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"Shardrail mutual client handshake v1\0");
+    for version in versions {
+        hasher.update(version.to_be_bytes());
+    }
+    for field in [
+        decode_hex(client_nonce),
+        decode_hex(server_nonce),
+        decode_hex(client_key),
+        decode_hex(host_key),
+    ] {
+        hasher.update((field.len() as u32).to_be_bytes());
+        hasher.update(field);
+    }
+    hasher.finalize().into()
+}
+
+#[test]
+fn handshake_rejects_pre_auth_commands_and_cross_session_signature_replay() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+    let nonce = "22".repeat(32);
+    let hello = json!({"min_version":1,"max_version":1,"client_id":client.id,
+        "public_key":client.public_key,"nonce":nonce,"resume_after":0,"journal_epoch":null});
+
+    let (mut first, mut first_reader) = connect(dir.path());
+    writeln!(first, "{hello}").unwrap();
+    let first_server = read_json(&mut first_reader);
+    let first_transcript = transcript_hash(
+        [1, 1, 1],
+        &nonce,
+        first_server["nonce"].as_str().unwrap(),
+        &client.public_key,
+        first_server["public_key"].as_str().unwrap(),
+    );
+    let replay_signature = client.key.sign(&first_transcript);
+    drop(first);
+
+    let (mut second, mut second_reader) = connect(dir.path());
+    writeln!(second, "{hello}").unwrap();
+    let second_server = read_json(&mut second_reader);
+    assert_ne!(first_server["nonce"], second_server["nonce"]);
+    writeln!(
+        second,
+        "{}",
+        json!({"kind":"authenticate","signature":encode_hex(&replay_signature.to_bytes())})
+    )
+    .unwrap();
+    let mut line = String::new();
+    assert_eq!(
+        second_reader.read_line(&mut line).unwrap(),
+        0,
+        "replayed proof must close without an authenticated or event frame"
+    );
+
+    let (mut reordered, mut reordered_reader) = connect(dir.path());
+    writeln!(reordered, "{hello}").unwrap();
+    let _ = read_json(&mut reordered_reader);
+    writeln!(reordered, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
+    let mut response = String::new();
+    assert_eq!(reordered_reader.read_line(&mut response).unwrap(), 0);
+
+    let (mut healthy, mut healthy_reader, _) = handshake(dir.path(), None, 0, &client);
+    writeln!(healthy, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
+    assert_eq!(read_json(&mut healthy_reader)["kind"], "command_accepted");
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn client_key_commands_register_list_and_remove_private_keys() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    for name in [format!("client-{}.key", client.id), "host.key".into()] {
+        assert_eq!(
+            std::fs::metadata(dir.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let listed = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["client", "list"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(&client.id.to_string()));
+
+    let client_id = client.id.to_string();
+    let removed = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["client", "remove", &client_id])
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    assert!(
+        !dir.path()
+            .join(format!("client-{}.key", client.id))
+            .exists()
+    );
+    let registrations: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("authorized-clients.json")).unwrap())
+            .unwrap();
+    assert_eq!(registrations["clients"].as_array().unwrap().len(), 0);
 }
 
 #[test]
 fn real_daemon_creates_streams_recovers_and_rejects_second_instance() {
     let dir = tempdir().unwrap();
+    let client_key = add_client(dir.path());
     let mut daemon = start_daemon(dir.path());
-    let (mut client, mut reader, hello) = handshake(dir.path(), None, 0);
+    let (mut client, mut reader, hello) = handshake(dir.path(), None, 0, &client_key);
     let epoch = Uuid::parse_str(hello["journal_epoch"].as_str().unwrap()).unwrap();
     assert_eq!(hello["protocol_version"], 1);
-    assert_eq!(hello["scope"], "limited");
+    assert_eq!(hello["scope"], "full");
 
     let mut second = start_daemon(dir.path());
     assert!(second.wait().unwrap().code().is_some_and(|code| code != 0));
@@ -102,7 +298,8 @@ fn real_daemon_creates_streams_recovers_and_rejects_second_instance() {
     daemon.kill().unwrap(); // Child::kill is SIGKILL on Unix.
     daemon.wait().unwrap();
     let mut daemon = start_daemon(dir.path());
-    let (mut resumed, mut resumed_reader, resumed_hello) = handshake(dir.path(), Some(epoch), 0);
+    let (mut resumed, mut resumed_reader, resumed_hello) =
+        handshake(dir.path(), Some(epoch), 0, &client_key);
     assert_eq!(resumed_hello["resync_required"], false);
     writeln!(resumed, "{}", json!({"kind": "resume", "resume_after": 0})).unwrap();
     let replayed = read_json(&mut resumed_reader);
@@ -115,21 +312,22 @@ fn real_daemon_creates_streams_recovers_and_rejects_second_instance() {
 #[test]
 fn replay_fanout_and_command_retries_preserve_the_cursor() {
     let dir = tempdir().unwrap();
+    let client_key = add_client(dir.path());
     let mut daemon = start_daemon(dir.path());
-    let (mut writer, mut writer_reader, _) = handshake(dir.path(), None, 0);
+    let (mut writer, mut writer_reader, _) = handshake(dir.path(), None, 0, &client_key);
     let command_id = Uuid::now_v7();
     let request = json!({
         "kind": "request",
         "request": {"command_id": command_id, "kind": "session.create", "expected_state": null, "expected_turn_id": null, "payload": {}}
     });
-    writeln!(writer, "{request}").unwrap();
+    writeln!(writer, "{}", serde_json::to_string(&request).unwrap()).unwrap();
     assert_eq!(read_json(&mut writer_reader)["kind"], "command_accepted");
     assert_eq!(read_json(&mut writer_reader)["event"]["event_id"], 1);
 
-    let (subscriber, mut subscriber_reader, _) = handshake(dir.path(), None, 0);
+    let (subscriber, mut subscriber_reader, _) = handshake(dir.path(), None, 0, &client_key);
     assert_eq!(read_json(&mut subscriber_reader)["event"]["event_id"], 1);
 
-    writeln!(writer, "{request}").unwrap();
+    writeln!(writer, "{}", serde_json::to_string(&request).unwrap()).unwrap();
     let retry = read_json(&mut writer_reader);
     assert_eq!(retry["kind"], "command_accepted");
     assert_eq!(retry["cursor"], 1);
@@ -138,7 +336,12 @@ fn replay_fanout_and_command_retries_preserve_the_cursor() {
         "kind": "request",
         "request": {"command_id": Uuid::now_v7(), "kind": "session.create", "expected_state": null, "expected_turn_id": null, "payload": {}}
     });
-    writeln!(writer, "{second_request}").unwrap();
+    writeln!(
+        writer,
+        "{}",
+        serde_json::to_string(&second_request).unwrap()
+    )
+    .unwrap();
     assert_eq!(read_json(&mut writer_reader)["kind"], "command_accepted");
     assert_eq!(read_json(&mut writer_reader)["event"]["event_id"], 2);
     assert_eq!(read_json(&mut subscriber_reader)["event"]["event_id"], 2);
@@ -148,10 +351,65 @@ fn replay_fanout_and_command_retries_preserve_the_cursor() {
 }
 
 #[test]
+fn slow_client_is_disconnected_without_blocking_other_clients_or_journaling() {
+    let dir = tempdir().unwrap();
+    let client_key = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+    let (mut slow, mut slow_reader, _) = handshake(dir.path(), None, 0, &client_key);
+    slow.set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    for _ in 0..500 {
+        let frame = json!({"kind":"request","request":{
+            "command_id":Uuid::now_v7(), "kind":"session.create",
+            "expected_state":null,"expected_turn_id":null,"payload":{}
+        }});
+        if writeln!(slow, "{}", serde_json::to_string(&frame).unwrap()).is_err() {
+            break;
+        }
+    }
+    let mut closed = false;
+    for _ in 0..100 {
+        let mut line = String::new();
+        if slow_reader.read_line(&mut line).unwrap() == 0 {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "slow client connection stayed open after its output queue filled"
+    );
+
+    let (mut healthy, mut healthy_reader, hello) = handshake(dir.path(), None, 0, &client_key);
+    let mut cursor = 0;
+    while cursor < hello["cursor"].as_i64().unwrap() {
+        cursor = read_json(&mut healthy_reader)["cursor"].as_i64().unwrap();
+    }
+    writeln!(
+        healthy,
+        "{}",
+        json!({"kind":"request","request":{
+            "command_id":Uuid::now_v7(),"kind":"session.create",
+            "expected_state":null,"expected_turn_id":null,"payload":{}
+        }})
+    )
+    .unwrap();
+    assert_eq!(read_json(&mut healthy_reader)["kind"], "command_accepted");
+    assert_eq!(
+        read_json(&mut healthy_reader)["event"]["kind"],
+        "session_created"
+    );
+    drop(slow);
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn epoch_mismatch_signals_resync_and_streams_history_on_same_connection() {
     let dir = tempdir().unwrap();
+    let client_key = add_client(dir.path());
     let mut daemon = start_daemon(dir.path());
-    let (mut client, mut reader, _) = handshake(dir.path(), None, 0);
+    let (mut client, mut reader, _) = handshake(dir.path(), None, 0, &client_key);
     writeln!(
         client,
         "{}",
@@ -168,7 +426,8 @@ fn epoch_mismatch_signals_resync_and_streams_history_on_same_connection() {
     let _ = read_json(&mut reader);
     drop(client);
 
-    let (_resumed, mut resumed_reader, hello) = handshake(dir.path(), Some(Uuid::now_v7()), 99);
+    let (_resumed, mut resumed_reader, hello) =
+        handshake(dir.path(), Some(Uuid::now_v7()), 99, &client_key);
     assert_eq!(hello["resync_required"], true);
     assert_eq!(read_json(&mut resumed_reader)["kind"], "durable_event");
     daemon.kill().unwrap();

@@ -19,6 +19,11 @@ export type ApprovalState =
   | "delivered_unconfirmed";
 export type ClientFrame =
   | {
+      kind: "authenticate";
+      signature: string;
+      [k: string]: unknown;
+    }
+  | {
       kind: "request";
       request: CommandRequest;
       [k: string]: unknown;
@@ -29,6 +34,10 @@ export type ClientFrame =
       [k: string]: unknown;
     };
 export type DaemonFrame =
+  | {
+      kind: "authenticated";
+      [k: string]: unknown;
+    }
   | {
       command_id: string;
       cursor: number;
@@ -96,16 +105,15 @@ export interface CommandRequest {
   [k: string]: unknown;
 }
 /**
- * First frame on a local client connection. Public-key proof verification is
- * intentionally represented explicitly even while dev admission is UID based.
+ * First frame on a client connection; authentication completes before streaming.
  */
 export interface ClientHello {
   client_id: string;
   journal_epoch?: string | null;
   max_version: number;
   min_version: number;
-  proof?: string | null;
-  public_key?: string | null;
+  nonce: string;
+  public_key: string;
   resume_after: number;
   [k: string]: unknown;
 }
@@ -127,8 +135,11 @@ export interface ServerHello {
   cursor: number;
   host_id: string;
   journal_epoch: string;
+  nonce: string;
   protocol_version: number;
+  public_key: string;
   resync_required: boolean;
   scope: ClientScope;
+  signature: string;
   [k: string]: unknown;
 }

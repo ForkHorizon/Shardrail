@@ -48,6 +48,7 @@ Branch: `p1a/coordinator`
 - N2 implements refuse-on-known-network-or-synced storage detection. Filesystem naming heuristics and platform coverage remain an implementation limit; see [daemon-status.md](daemon-status.md).
 - The N2 task authorized `tokio`, `clap`, and `nix`; these are recorded in `AGENTS.md` and `deny.toml`.
 - `planning/12-decisions.md` ends at D48; D50–D54 remain absent from the register. N2's requested auth/approval details are not all realized; see [daemon-status.md](daemon-status.md).
+- W4-a authorized `ed25519-dalek` and `sha2`; the daemon now authenticates registered client keys, bounds client output queues, checks the data directory through a retained descriptor, and redacts high-entropy token-like runs. The requested review file and D50/D51/D53/D55/D57/D60 entries are missing from this checkout, so no decision rationale was inferred. Pairing UI and a native client transport remain deferred; see [daemon-status.md](daemon-status.md).
 
 ## Final summary
 

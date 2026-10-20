@@ -89,15 +89,14 @@ pub struct ContractSchema {
     pub daemon_frame: DaemonFrame,
 }
 
-/// First frame on a local client connection. Public-key proof verification is
-/// intentionally represented explicitly even while dev admission is UID based.
+/// First frame on a client connection; authentication completes before streaming.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ClientHello {
     pub min_version: u32,
     pub max_version: u32,
     pub client_id: Uuid,
-    pub public_key: Option<String>,
-    pub proof: Option<String>,
+    pub public_key: String,
+    pub nonce: String,
     pub resume_after: i64,
     pub journal_epoch: Option<Uuid>,
 }
@@ -107,6 +106,9 @@ pub struct ServerHello {
     pub protocol_version: u32,
     pub host_id: Uuid,
     pub journal_epoch: Uuid,
+    pub public_key: String,
+    pub nonce: String,
+    pub signature: String,
     pub scope: ClientScope,
     pub cursor: i64,
     pub resync_required: bool,
@@ -124,6 +126,7 @@ pub struct CommandRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientFrame {
+    Authenticate { signature: String },
     Request { request: CommandRequest },
     Resume { resume_after: i64 },
 }
@@ -131,6 +134,7 @@ pub enum ClientFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonFrame {
+    Authenticated,
     CommandAccepted {
         command_id: Uuid,
         cursor: i64,
