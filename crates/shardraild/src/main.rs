@@ -23,8 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{ChildStdin, Command as TokioCommand};
-use tokio::sync::{Mutex, mpsc};
-use tokio::time::{Duration, MissedTickBehavior, interval, timeout};
+use tokio::sync::{Mutex, mpsc, watch};
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -240,34 +240,32 @@ async fn run_fake_acp_inner(
         if frame["method"] == "session/update" {
             let params = &frame["params"];
             let update = &params["update"];
-            let (journal_epoch, host_id) = {
-                let journal = daemon.journal.lock().await;
-                (
-                    journal.journal_epoch().map_err(io::Error::other)?,
-                    journal.host_id().map_err(io::Error::other)?,
-                )
-            };
+            {
+                let mut journal = daemon.journal.lock().await;
+                let journal_epoch = journal.journal_epoch().map_err(io::Error::other)?;
+                let host_id = journal.host_id().map_err(io::Error::other)?;
+                journal
+                    .append_event(&DurableEvent {
+                        event_id: 0,
+                        journal_epoch,
+                        host_id,
+                        session_id,
+                        schema_version: 1,
+                        kind: update["sessionUpdate"]
+                            .as_str()
+                            .unwrap_or("agent_update")
+                            .to_owned(),
+                        occurred_at_ms: wall_clock_ms(),
+                        provider_ref: params["sessionId"].as_str().map(str::to_owned),
+                        causation: None,
+                        redaction_flags: Vec::new(),
+                        payload: update.clone(),
+                    })
+                    .map_err(io::Error::other)?;
+            }
             daemon
-                .journal
-                .lock()
-                .await
-                .append_event(&DurableEvent {
-                    event_id: 0,
-                    journal_epoch,
-                    host_id,
-                    session_id,
-                    schema_version: 1,
-                    kind: update["sessionUpdate"]
-                        .as_str()
-                        .unwrap_or("agent_update")
-                        .to_owned(),
-                    occurred_at_ms: wall_clock_ms(),
-                    provider_ref: params["sessionId"].as_str().map(str::to_owned),
-                    causation: None,
-                    redaction_flags: Vec::new(),
-                    payload: update.clone(),
-                })
-                .map_err(io::Error::other)?;
+                .event_generation
+                .send_modify(|generation| *generation += 1);
         }
     };
     let params = &permission["params"];
@@ -350,6 +348,9 @@ async fn run_fake_acp_inner(
             payload: details,
         })
         .map_err(io::Error::other)?;
+    daemon
+        .event_generation
+        .send_modify(|generation| *generation += 1);
     daemon.approvals.lock().await.insert(
         approval_id,
         DaemonApproval {
@@ -639,6 +640,7 @@ struct AuthorizedClients {
 struct Daemon {
     data: DaemonDataDir,
     journal: Mutex<Journal>,
+    event_generation: watch::Sender<u64>,
     command_lock: Mutex<()>,
     host_key: SigningKey,
     fake_acp_path: Option<PathBuf>,
@@ -711,9 +713,11 @@ async fn run(
     Coordinator::recover_journal(&mut journal)?;
     let socket = path.join("shardraild.sock");
     let listener = bind_private_socket(&socket)?;
+    let (event_generation, _) = watch::channel(0);
     let daemon = Arc::new(Daemon {
         data,
         journal: Mutex::new(journal),
+        event_generation,
         command_lock: Mutex::new(()),
         host_key,
         fake_acp_path,
@@ -1248,14 +1252,16 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         return finish_with_error(outbound, &mut abort_writer, "client proof is invalid").await;
     }
     write_frame(&outbound, &DaemonFrame::Authenticated).await?;
+    let mut event_generation = daemon.event_generation.subscribe();
     push_events(&outbound, &daemon, &mut cursor).await?;
     let mut lines = read.lines();
-    let mut tick = interval(Duration::from_millis(100));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         let read_result = tokio::select! {
             result = lines.next_line() => Some(result?),
-            _ = tick.tick() => None,
+            changed = event_generation.changed() => {
+                changed.map_err(io::Error::other)?;
+                None
+            },
         };
         let line = match read_result {
             Some(Some(line)) => line,
@@ -1358,6 +1364,9 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                     || Ok::<_, io::Error>(()),
                 )
                 .map_err(io::Error::other)?;
+            daemon
+                .event_generation
+                .send_modify(|generation| *generation += 1);
             daemon
                 .sessions
                 .lock()
