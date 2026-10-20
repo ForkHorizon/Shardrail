@@ -34,6 +34,7 @@ jobs:
       - run: npm audit signatures --prefix packages/contracts
       - run: npm audit signatures --prefix packages/client
       - run: node scripts/check-npm-licenses.mjs
+      - run: cargo build --bin shardraild --bin shardrail-fake-acp
       - run: npm run typecheck --prefix packages/client
       - run: npm test --prefix packages/client
       - run: scripts/check-schema-drift.sh

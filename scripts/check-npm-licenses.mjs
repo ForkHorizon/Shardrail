@@ -5,7 +5,7 @@ const allowed = new Set(["0BSD", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "
 const failures = locks.flatMap((lock) => Object.entries(lock.packages)
   .filter(([path]) => path !== "")
   .flatMap(([path, metadata]) => {
-    if (metadata.link) return [];
+    if (metadata.link || path.startsWith("../")) return [];
     const license = metadata.license;
     return typeof license === "string" && allowed.has(license)
       ? []
