@@ -12,7 +12,7 @@ Branch: `p1a/coordinator`
 
 ## Limits and open decisions
 
-- The checked-in decision register stops at D48. Requested D50/D51/D53/D55/D57/D60 entries and `spikes/reviews4/n2-final.md` are absent; this implementation follows the concrete task scope without inventing decision rationales.
+- The decision register in `planning/12-decisions.md` stops at D48; the owner decision file `planning/17-owner-decisions-2026-10-19.md` contains sections В and Г with D49–D62.
 - Authentication uses Ed25519 keys. `authorized-clients.json` stores each registered public key, label and scope; the daemon verifies a transcript digest covering both nonces, version range/selection and both public keys, signs it with the host key and verifies the client's signature before sending events or handling commands. `shardraild client add|list|remove` manages key registration. Host and client private keys are `0600` files. Interactive pairing UI remains deferred.
 - The S5 prototype connects the release app to the daemon through a Tauri shell relay. The relay authenticates with a registered Ed25519 key in an isolated temporary data directory; the production pairing screen remains deferred.
 - SQLite's public rusqlite API opens paths, not adopted descriptors. Startup performs the no-follow `openat` probe and the SQLite open itself uses `SQLITE_OPEN_NOFOLLOW`; the private directory and retained daemon lock prevent other users and cooperating daemons from swapping the file. This does not make a file-backed database tamper-proof against a malicious process running as the same UID; D20 already classifies such a host as unprotected.
@@ -56,3 +56,11 @@ Repository checks passed: formatting, Clippy, all workspace tests, cargo-deny, n
 - Approval-card visual review was completed in the packaged app and saved to the ignored S5 results directory. No provider or model API was used.
 - Accepted for now: high-entropy redaction may mask harmless long strings and may miss short secrets until real providers are integrated. Slow-client disconnect reasons appear only in the daemon log, which is sufficient for now.
 - Flaky-test reruns after replacing the daemon's cancellable `read_line` with cancellation-safe `Lines::next_line`: `epoch_mismatch_signals_resync_and_streams_history_on_same_connection` passed 50/50; `daemon_file_access_stays_in_opened_directory_after_path_swap` passed 50/50.
+
+## W4-d follow-up (2026-10-21)
+
+- The TypeScript client requires a pinned host key, caps its pre-listener replay queue at 128 frames, destroys the connection with an explicit reconnect/resync error on overflow, and reports failures even when the socket closes while paused. Real-binary tests cover fake-daemon rejection, approval denial, replay to two listeners in cursor order, and dead-socket notification. CI builds the daemon and fake ACP before those tests.
+- The S5 shell uses structured Tauri events for daemon frames; it gets the host public key from `shardraild client add` output and never reads `host.key`. Daemon payloads are not interpolated into JavaScript.
+- B4's previous first-rAF callback endpoint was before the browser's paint. The attempted correction records the next rAF callback after React commits a live-tail row, a conservative indication that the prior frame had a paint opportunity. The packaged release smoke authenticated the native relay and read 5,000 frames, but the frontend did not complete its receive/count gate or write a result; a command-channel attempt also failed to reach its handler. No valid B4 samples were produced. Median/p95 and the ≤50 ms verdict remain unavailable; raw attempts and logs are under the ignored `spikes/s5-ui/results-w4d/` directory.
+- B5's two 50k×4 cases have not been re-run because the packaged shell did not deliver its fake-agent stream to the UI. The prior 94% results remain below D58's ≥95% budget and are not replaced by new numbers.
+- `daemon_file_access_stays_in_opened_directory_after_path_swap` passed 50/50 in this follow-up.
