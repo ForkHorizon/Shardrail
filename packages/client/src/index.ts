@@ -3,6 +3,8 @@ import { randomBytes, createHash } from "node:crypto";
 import * as ed from "@noble/ed25519";
 import type { ClientFrame, DaemonFrame, ServerHello } from "@shardrail/contracts";
 
+const MAX_QUEUED_FRAMES = 128;
+
 export type {
   ApprovalResolutionRequest,
   ClientFrame,
@@ -62,7 +64,8 @@ function frameReader(socket: Socket) {
   const queued: string[] = [];
   let failure: Error | undefined;
   const fail = (error: Error) => {
-    failure = error;
+    failure ??= error;
+    queued.length = 0;
     waiting.splice(0).forEach(({ reject }) => reject(error));
   };
   socket.on("data", (data: Buffer) => {
@@ -73,7 +76,14 @@ function frameReader(socket: Socket) {
       const line = buffer.subarray(0, newline).toString("utf8");
       buffer = buffer.subarray(newline + 1);
       const waiter = waiting.shift();
-      if (waiter) waiter.resolve(line); else queued.push(line);
+      if (waiter) waiter.resolve(line);
+      else if (queued.length < MAX_QUEUED_FRAMES) queued.push(line);
+      else {
+        const error = new Error("daemon replay buffer overflow; reconnect to resync from the last delivered cursor");
+        fail(error);
+        socket.destroy(error);
+        return;
+      }
     }
     if (buffer.length > 1_048_576) { const error = new Error("daemon frame exceeds 1 MiB"); fail(error); socket.destroy(error); }
   });
@@ -124,12 +134,16 @@ export async function connect(options: ClientOptions): Promise<Client> {
   const listeners = new Set<(frame: DaemonFrame) => void>();
   const errorListeners = new Set<(error: Error) => void>();
   const listenerWaiters: (() => void)[] = [];
-  socket.once("close", () => errorListeners.forEach((listener) => listener(new Error("daemon socket closed"))));
+  let connectionError: Error | undefined;
+  socket.once("close", () => {
+    connectionError ??= new Error("daemon socket closed");
+    errorListeners.forEach((listener) => listener(connectionError!));
+  });
   let cursor = options.cursor ?? 0;
   let resumed = false;
   socket.pause();
   void (async () => {
-    while (!socket.destroyed) {
+    while (true) {
       try {
         const line = await nextFrame();
         if (!listeners.size) await new Promise<void>((resolve) => listenerWaiters.push(resolve));
@@ -141,6 +155,7 @@ export async function connect(options: ClientOptions): Promise<Client> {
         }
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
+        connectionError = failure;
         errorListeners.forEach((listener) => listener(failure));
         break;
       }
@@ -160,7 +175,12 @@ export async function connect(options: ClientOptions): Promise<Client> {
         if (listeners.size === 0) socket.pause();
       };
     },
-    onError(listener) { errorListeners.add(listener); socket.resume(); return () => errorListeners.delete(listener); },
+    onError(listener) {
+      errorListeners.add(listener);
+      if (connectionError) listener(connectionError);
+      socket.resume();
+      return () => errorListeners.delete(listener);
+    },
     reconnect() { return connect({ ...options, cursor, journalEpoch: host.journal_epoch }); },
     request(request) { writeFrame(socket, { kind: "request", request }); },
     resolveApproval(request) { writeFrame(socket, { kind: "approval_resolution", request }); },
