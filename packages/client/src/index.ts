@@ -17,7 +17,7 @@ export type ClientOptions = {
   socketPath: string;
   clientId: string;
   privateKey: Uint8Array;
-  hostPublicKey?: string;
+  hostPublicKey: string;
   cursor?: number;
   journalEpoch?: string;
 };
@@ -26,6 +26,7 @@ export type DaemonEvent = Extract<DaemonFrame, { kind: "durable_event" }>;
 export type Client = {
   host: ServerHello;
   onFrame(listener: (frame: DaemonFrame) => void): () => void;
+  onError(listener: (error: Error) => void): () => void;
   reconnect(): Promise<Client>;
   request(request: Extract<ClientFrame, { kind: "request" }>["request"]): void;
   resolveApproval(request: Extract<ClientFrame, { kind: "approval_resolution" }>["request"]): void;
@@ -109,7 +110,7 @@ export async function connect(options: ClientOptions): Promise<Client> {
   const host = JSON.parse(await nextFrame()) as ServerHello | { error: string };
   if ("error" in host) { socket.destroy(); throw new Error(String(host.error)); }
   if (host.protocol_version !== 1) { socket.destroy(); throw new Error("unsupported daemon protocol version"); }
-  if (options.hostPublicKey && host.public_key !== options.hostPublicKey) {
+  if (host.public_key !== options.hostPublicKey) {
     socket.destroy(); throw new Error("daemon host key does not match the pinned key");
   }
   const message = transcript([1, 1, host.protocol_version], [clientNonce, host.nonce, publicKey, host.public_key]);
@@ -121,34 +122,49 @@ export async function connect(options: ClientOptions): Promise<Client> {
   if (auth.kind !== "authenticated") { socket.destroy(); throw new Error(auth.kind === "error" ? auth.error : "daemon authentication failed"); }
 
   const listeners = new Set<(frame: DaemonFrame) => void>();
-  const pendingFrames: DaemonFrame[] = [];
+  const errorListeners = new Set<(error: Error) => void>();
+  const listenerWaiters: (() => void)[] = [];
+  socket.once("close", () => errorListeners.forEach((listener) => listener(new Error("daemon socket closed"))));
   let cursor = options.cursor ?? 0;
+  let resumed = false;
+  socket.pause();
   void (async () => {
     while (!socket.destroyed) {
       try {
         const line = await nextFrame();
+        if (!listeners.size) await new Promise<void>((resolve) => listenerWaiters.push(resolve));
         if (line) {
           const frame = JSON.parse(line) as DaemonFrame;
-          if (frame.kind === "durable_event" || frame.kind === "command_accepted") cursor = Math.max(cursor, frame.cursor);
-          if (listeners.size) listeners.forEach((listener) => listener(frame));
-          else if (pendingFrames.length < 32) pendingFrames.push(frame);
-          else { socket.destroy(new Error("client frame queue overflow")); break; }
+          if (frame.kind === "durable_event" && frame.cursor <= cursor) continue;
+          listeners.forEach((listener) => listener(frame));
+          if (frame.kind === "durable_event") cursor = Math.max(cursor, frame.cursor);
         }
-      } catch { break; }
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        errorListeners.forEach((listener) => listener(failure));
+        break;
+      }
     }
   })();
   return {
     host,
     onFrame(listener) {
+      const wasPaused = listeners.size === 0;
       listeners.add(listener);
-      const pending = pendingFrames.splice(0);
-      queueMicrotask(() => { if (listeners.has(listener)) pending.forEach(listener); });
-      return () => listeners.delete(listener);
+      listenerWaiters.splice(0).forEach((resume) => resume());
+      if (wasPaused && resumed) writeFrame(socket, { kind: "resume", resume_after: cursor });
+      resumed = true;
+      socket.resume();
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) socket.pause();
+      };
     },
-    reconnect() { return connect({ ...options, cursor, journalEpoch: host.journal_epoch, hostPublicKey: options.hostPublicKey ?? host.public_key }); },
+    onError(listener) { errorListeners.add(listener); socket.resume(); return () => errorListeners.delete(listener); },
+    reconnect() { return connect({ ...options, cursor, journalEpoch: host.journal_epoch }); },
     request(request) { writeFrame(socket, { kind: "request", request }); },
     resolveApproval(request) { writeFrame(socket, { kind: "approval_resolution", request }); },
-    resume(cursor) { writeFrame(socket, { kind: "resume", resume_after: cursor }); },
+    resume(nextCursor) { cursor = Math.max(0, nextCursor); writeFrame(socket, { kind: "resume", resume_after: cursor }); },
     close() { socket.end(); },
   };
 }
