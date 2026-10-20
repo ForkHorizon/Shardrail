@@ -601,9 +601,13 @@ impl Journal {
             }
             return Err(JournalError::AlreadyResponded);
         }
+        let (redacted_response, _) =
+            redact_value(serde_json::to_value(response).expect("approval response serializes"));
+        let redacted_response: ApprovalResponding =
+            serde_json::from_value(redacted_response).expect("redaction preserves approval shape");
         tx.execute(
             "UPDATE approvals SET state='responding',decision=?2,terminal_state=?3,terminal_reason=?4,option_id=?5,responder=?6,responded_at_ms=?7,confirmed_at_ms=?7 WHERE approval_id=?1 AND session_id=?8 AND state='pending'",
-            params![response.approval_id.to_string(), serde_json::to_string(&response.decision).expect("enum serialization"), terminal, terminal_reason, response.option_id, response.responder, response.responded_at_ms, session.to_string()],
+            params![redacted_response.approval_id.to_string(), serde_json::to_string(&redacted_response.decision).expect("enum serialization"), terminal, terminal_reason, redacted_response.option_id, redacted_response.responder, redacted_response.responded_at_ms, session.to_string()],
         )?;
         let session_id: String = tx.query_row(
             "SELECT session_id FROM approvals WHERE approval_id=?1",
@@ -937,6 +941,12 @@ fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
                 if secret {
                     *text = "[REDACTED]".into();
                     *changed = true;
+                } else {
+                    let (redacted, entropy_redacted) = redact_entropy_runs(text);
+                    if entropy_redacted {
+                        *text = redacted;
+                        *changed = true;
+                    }
                 }
             }
             serde_json::Value::Array(values) => {
@@ -985,6 +995,82 @@ fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
     (value, changed)
 }
 
+fn redact_entropy_runs(text: &str) -> (String, bool) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    while cursor < chars.len() {
+        if !chars[cursor].is_ascii_alphanumeric() && !"+/=_-".contains(chars[cursor]) {
+            output.push(chars[cursor]);
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < chars.len()
+            && (chars[cursor].is_ascii_alphanumeric() || "+/=_-".contains(chars[cursor]))
+        {
+            cursor += 1;
+        }
+        let run: String = chars[start..cursor].iter().collect();
+        let prefix: String = chars[..start]
+            .iter()
+            .rev()
+            .take(48)
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let is_known_git_hash = prefix.contains("git ")
+            || prefix.contains("commit ")
+            || prefix.contains("sha")
+            || prefix.contains("revision ");
+        let is_uuid = run.len() == 36
+            && [8, 13, 18, 23]
+                .iter()
+                .all(|index| run.as_bytes()[*index] == b'-')
+            && run
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit());
+        let base64_like = !is_uuid
+            && !(is_known_git_hash && run.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            && run.len() >= 32
+            && run.bytes().any(|byte| byte.is_ascii_alphabetic())
+            && run.bytes().any(|byte| byte.is_ascii_digit())
+            && shannon_entropy(&run) >= 4.0;
+        let hex_like = run.len() >= 40
+            && run.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && shannon_entropy(&run) >= 3.5
+            && !is_known_git_hash;
+        if base64_like || hex_like {
+            output.push_str("[REDACTED]");
+            changed = true;
+        } else {
+            output.push_str(&run);
+        }
+    }
+    (output, changed)
+}
+
+fn shannon_entropy(value: &str) -> f64 {
+    let mut counts = [0usize; 128];
+    for byte in value.bytes() {
+        counts[byte as usize] += 1;
+    }
+    let length = value.len() as f64;
+    counts
+        .into_iter()
+        .filter(|count| *count != 0)
+        .map(|count| {
+            let probability = count as f64 / length;
+            -probability * probability.log2()
+        })
+        .sum()
+}
+
 fn ensure_columns(connection: &Connection) -> Result<bool, JournalError> {
     let mut legacy_events = false;
     for (table, name, declaration) in [
@@ -1030,9 +1116,16 @@ fn insert_approval_event(
     kind: &str,
     data: &str,
 ) -> Result<(), JournalError> {
+    let value = serde_json::from_str(data).map_err(std::io::Error::other)?;
+    let (value, _) = redact_value(value);
     tx.execute(
         "INSERT INTO approval_events(approval_id,session_id,kind,data) VALUES (?1,?2,?3,?4)",
-        params![approval_id.to_string(), session_id.to_string(), kind, data],
+        params![
+            approval_id.to_string(),
+            session_id.to_string(),
+            kind,
+            value.to_string()
+        ],
     )?;
     Ok(())
 }
@@ -1043,9 +1136,11 @@ fn insert_unlinked_approval_event(
     kind: &str,
     data: &str,
 ) -> Result<(), JournalError> {
+    let value = serde_json::from_str(data).map_err(std::io::Error::other)?;
+    let (value, _) = redact_value(value);
     tx.execute(
         "INSERT INTO approval_events(approval_id,session_id,kind,data) VALUES (?1,'',?2,?3)",
-        params![approval_id.to_string(), kind, data],
+        params![approval_id.to_string(), kind, value.to_string()],
     )?;
     Ok(())
 }
@@ -1085,7 +1180,9 @@ fn insert_session_event(
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    tx.execute("INSERT INTO events(journal_epoch,host_id,session_id,schema_version,kind,occurred_at_ms,redaction_flags,payload) VALUES (?1,?2,?3,1,?4,?5,'[]',?6)", params![epoch, host, session_id.to_string(), kind, occurred_at_ms, payload.to_string()])?;
+    let (payload, redacted) = redact_value(payload);
+    let flags = if redacted { "[\"redacted\"]" } else { "[]" };
+    tx.execute("INSERT INTO events(journal_epoch,host_id,session_id,schema_version,kind,occurred_at_ms,redaction_flags,payload) VALUES (?1,?2,?3,1,?4,?5,?6,?7)", params![epoch, host, session_id.to_string(), kind, occurred_at_ms, flags, payload.to_string()])?;
     Ok(())
 }
 
@@ -1336,6 +1433,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn full_database_rejects_writes_and_corruption_refuses_to_open() {
         let dir = tempdir().unwrap();
@@ -1477,6 +1575,77 @@ mod tests {
         assert_eq!(payload["password"], "[REDACTED]");
         assert_eq!(payload["nested"]["client_secret"], "[REDACTED]");
         assert_eq!(payload["output"], "[REDACTED]");
+    }
+
+    #[test]
+    fn high_entropy_tokens_are_redacted_without_hiding_common_text() {
+        let fake_token = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A";
+        let git_hash = "a4d3f0c7b1e29a6c8d5f0b7e3a1c9d2f4b6e8a0c";
+        let (payload, redacted) = redact_value(serde_json::json!({
+            "output": format!("token {fake_token} was rejected"),
+            "code": "fn parse_uuid(value: Uuid) -> Result<()> { Ok(()) }",
+            "commit": format!("git hash {git_hash}"),
+            "uuid": Uuid::now_v7().to_string(),
+            "note": "The implementation reads code and explains the result in plain prose.",
+        }));
+
+        assert!(redacted);
+        assert_eq!(payload["output"], "token [REDACTED] was rejected");
+        assert_eq!(
+            payload["code"],
+            "fn parse_uuid(value: Uuid) -> Result<()> { Ok(()) }"
+        );
+        assert_eq!(payload["commit"], format!("git hash {git_hash}"));
+        assert!(Uuid::parse_str(payload["uuid"].as_str().unwrap()).is_ok());
+        assert_eq!(
+            payload["note"],
+            "The implementation reads code and explains the result in plain prose."
+        );
+    }
+
+    #[test]
+    fn approval_storage_and_session_events_share_the_redaction_boundary() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let approval = pending_approval(Uuid::now_v7());
+        let fake_key = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A";
+        journal.create_pending_approval(&approval).unwrap();
+        let response = ApprovalResponding {
+            approval_id: approval.id,
+            decision: ApprovalDecision::Deny,
+            option_id: Some(fake_key.to_string()),
+            responder: "test client".into(),
+            responded_at_ms: 12,
+            option_class: OptionClass::Once,
+            client_scope: ClientScope::Full,
+        };
+        journal
+            .begin_approval_response(&response, approval.session_id)
+            .unwrap();
+
+        let persisted_option: Option<String> = journal
+            .0
+            .query_row(
+                "SELECT option_id FROM approvals WHERE approval_id=?1",
+                [approval.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_option.as_deref(), Some("[REDACTED]"));
+        let persisted_approval_event: String = journal.0.query_row(
+            "SELECT data FROM approval_events WHERE approval_id=?1 AND kind='approval_responding'",
+            [approval.id.to_string()],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(!persisted_approval_event.contains(fake_key));
+        let session_event = journal
+            .events_for_session(approval.session_id)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "approval_responding")
+            .unwrap();
+        assert_eq!(session_event.payload["option_id"], "[REDACTED]");
+        assert_eq!(session_event.redaction_flags, ["redacted"]);
     }
 
     #[test]
