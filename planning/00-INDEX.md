@@ -1,7 +1,7 @@
 # Shardrail — Architecture Plan (Index)
 
-**Organization:** Fork Horizon · **Date:** 2026-10-15 · **Revised:** 2026-10-18 (independent review applied, see 15)
-**Status:** consolidated candidate — **not owner-approved** (exceptions, owner-approved 2026-10-18: D1 daemon language Rust; D3 UI stack React; D44 code written by AI agents; 2026-10-19: D27 contract types Rust → JSON Schema → TypeScript; D29 Claude with the user's own API key; D45 internal-use scope; D46 single-user scope; D47 no "protected" status in v1, verification checklist; D48 Hermes not in Phase 1; all remaining owner questions answered in bulk — 17).
+**Organization:** Fork Horizon · **Date:** 2026-10-15 · **Revised:** 2026-10-20 (owner decisions D49–D61 synced)
+**Status:** consolidated candidate — **not owner-approved** (exceptions, owner-approved 2026-10-18: D1 daemon language Rust; D3 UI stack React; D44 code written by AI agents; 2026-10-19: D27 contract types Rust → JSON Schema → TypeScript; D29 Claude with the user's own API key; D45 internal-use scope; D46 single-user scope; D47 no "protected" status in v1, verification checklist; D48 Hermes not in Phase 1; D49 React retained after partial S5 measurements; D50 atomic no-follow journal open; D51 refuse network/synced data filesystems; D52 Codex first in P1a; D53 daemon dependencies tokio/clap/nix allowed; D54 generated contracts and separate client package; D55 client key auth; D56 approvals through the daemon; D57 high-entropy redaction; D58 B5 budget; D59 tsc dev dependency; D60 data-dir race and slow clients; D61 docs sync; all remaining owner questions answered in bulk — 17).
 **Product scope (owner, 2026-10-19):** internal tool for the owner and Fork Horizon — not commercial, hosted or distributed to third parties (D45); a scope change reopens U9/U25 before release (R46). Until the product fully works, the only user is Daliys on his own machines (D46); distribution items are parked in 09 §5 until a first other user appears (R47).
 **Development model (owner constraint):** all Shardrail code is written by AI coding agents; technology choices are optimized for AI-codegen reliability (N13, D44; rules in 11 §3 and 08 §6). **Authorized (owner, 2026-10-19): the core Phase 0 spikes S1-lite, S2, S5, S9-lite only.** S7, S8, full S9 and all product code (Phase 1a onward) are not authorized.
 **Language:** English for all planning documents.
@@ -20,12 +20,12 @@ A workspace for supervising several AI coding agents (Codex, Claude Code, Grok B
 | 04 | [Sessions, events, data](04-sessions-events-data.md) | identifiers, event tiers, commands, journal storage, recovery, handoff |
 | 05 | [State machine](05-state-machine.md) | normative transition tables, timers, badges, invariants |
 | 06 | [Security](06-security.md) | threat model, trust boundaries, approval protection, client identity, rendering, safe Git, containment, secrets |
-| 07 | [Performance](07-performance.md) | budgets B1–B16 (proposed, unmeasured), measurement rules |
+| 07 | [Performance](07-performance.md) | budgets B1–B16; partial S5 measurements for B3/B5, B4 still open; measurement rules |
 | 08 | [UI/UX](08-ui-ux.md) | principles, information architecture, rendering pipeline, visual identity, mobile |
 | 09 | [Release and licensing](09-release-and-licensing.md) | targets, licensing, privacy, name; §5 items deferred until other users |
 | 10 | [Roadmap and backlog](10-roadmap-and-backlog.md) | phases P0–P4 (P1a slim slice, P1e hardening), spikes S1–S9, epics, candidate tasks, dependencies |
 | 11 | [Modules](11-modules.md) | module table M01–M18, outlines of the foundational modules, engineering rules for AI agents |
-| 12 | [Decisions](12-decisions.md) | D1–D48 with rationale and what earlier versions got wrong |
+| 12 | [Decisions](12-decisions.md) | D1–D61 with rationale and what earlier versions got wrong |
 | 13 | [Risks and open questions](13-risks-and-open-questions.md) | owner decisions U1–U26 (all answered except U5/U7, deferred until other users), risks R1–R47, tensions, unverified assumptions |
 | 14 | [Evidence](14-evidence.md) | sources with access dates and confidence labels (EV-01–EV-31) |
 | 15 | [Independent review](15-independent-review.md) | 2026-10-18 review by a different model family (in Russian) with a resolution-status table showing where each finding was applied |
@@ -48,7 +48,7 @@ A workspace for supervising several AI coding agents (Codex, Claude Code, Grok B
 3. Keep owner decisions explicit; never mark anything approved — only the owner approves.
 4. Do not write application code, install dependencies, run providers or commit without the owner's explicit authorization.
 5. Spikes (authorized: S1-lite, S2, S5, S9-lite): code in the gitignored `spikes/<id>/` folder of the repository, live-agent test repos without real secrets in `spikes/<id>/workdir/`; the written note in `planning/spikes/<id>.md` (template: [spikes/README.md](spikes/README.md)) is committed (10 §2).
-6. Highest-value next steps: run the **authorized** core spikes S1-lite, S2, S5, S9-lite (authorized 2026-10-19; 10 §2) and write their notes; choose the P1a provider from S1-lite/S2; then ask the owner to authorize P1a (S7, S8, full S9 before Phase 1e, not yet authorized). Owner questions: all answered (17) except U5/U7, deferred until other users. The independent review is done (15); re-check provider protocols before each phase gate.
+6. Highest-value next steps: run the **authorized** core spikes S1-lite, S2, S5, S9-lite (authorized 2026-10-19; 10 §2) and write their notes; S1-lite verifies the selected Codex app-server path and S2 informs the Grok P1b adapter (D52); then ask the owner to authorize P1a (S7, S8, full S9 before Phase 1e, not yet authorized). Owner questions: all answered (17) except U5/U7, deferred until other users. The independent review is done (15); re-check provider protocols before each phase gate.
 
 ## History (for context only)
 
@@ -65,3 +65,4 @@ The first draft was written by Grok in Russian; three Claude review rounds then 
 - 2026-10-19 — owner answered U21 (D47): v1 never shows a "protected" status; each session shows a verification checklist (06 §3b); "approvals not protected" banner stays; S7 gates any future "protected" status via a separate decision. 05 §7, 06, 08, 10, 11, 12 D20, 13 R5, 01 N10 aligned.
 - 2026-10-19 — owner accepted all remaining recommendations (17): U1, U2, U4, U6, U10, U11, U12, U15–U20, U22–U24, U26 answered (U2 deferred; U4 to Phase 3; U11 to Phase 2); Hermes not in Phase 1 (D48); P1a runtime checklist kept; core spikes S1-lite, S2, S5, S9-lite authorized. 01–08, 10–13, 15 aligned.
 - 2026-10-19 — owner set spike rules: code in gitignored `spikes/<id>/` (test repos in `spikes/<id>/workdir/`), notes committed in `planning/spikes/<id>.md` with the template in `planning/spikes/README.md` (10 §2); plan committed.
+- 2026-10-20 — owner decisions D49–D54 synced across 00–13 (T1.3a daemon skeleton added); then D55–D61 accepted (17 §Г): client key auth, approvals through the daemon, high-entropy redaction, B5 budget, tsc dev dependency, data-dir race and slow clients, docs sync. B3 updated to the final S5 run (idle 113.7 MB, ≈396 MB loaded); T1.15 moved under E1.13; Grok → budget-report link added; Python wording in 07 clarified.

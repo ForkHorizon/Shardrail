@@ -1,4 +1,5 @@
 # 13 — Risks and Open Questions
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): review recommendations added to U12, U22 (since answered); U25, U26 and R32–R43 added. 2026-10-18: U13 answered by the owner (Rust) and moved to §1a. 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44); U8 moved to §1a; R44–R45 added. 2026-10-19 (owner): U9/U25 answered — internal-use scope (D45); Claude via Agent SDK / `claude-agent-acp` with the user's own API key; Codex app-server with the user's own login; reopen trigger R46. U9, U25 moved to §1a; R3, R43 downgraded. 2026-10-19 (owner): single-user scope (D46) — Daliys is the only user on his own machines until the product fully works; distribution items deferred to 09 §5 (trigger R47). U3/U14 answered; U5, U7, R28, R29 deferred; R31, R41 adjusted; R47 added. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized. All U questions are in §1a except U5/U7 (deferred until other users).
 
@@ -38,7 +39,7 @@ Only U5 and U7 remain, both deferred until other users (D46, R47). Everything el
 | U22 | Terminate automatically when the link breaks but the process lives | never automatically: keep the process contained, mark the session `desynced`, put it in the inbox; the user decides — owner decision 2026-10-19 | 04 §7, 05 §2 |
 | U23 | Exclude the data directory from Time Machine | yes by default, with a visible toggle — owner decision 2026-10-19 | 04 §6 |
 | U24 | Second session on a worktree without provider read-only | refuse and offer a separate worktree — owner decision 2026-10-19 | 06 §7, 12 D31 |
-| U26 | Hermes in Phase 1 | **no** — Hermes is not in Phase 1; if ever added, a permanent "file edits without approval" banner — owner decision 2026-10-19 | 12 D48, 03 §6, 10 P1c |
+| U26 | Hermes in Phase 1 | **no** — Hermes is not in Phase 1; if ever added, a permanent "file edits without approval" banner — owner decision 2026-10-19 | 12 D48, 03 §6, 10 Post-P1 candidate |
 
 ## 2. Risks
 
@@ -77,7 +78,7 @@ Only U5 and U7 remain, both deferred until other users (D46, R47). Everything el
 | R31 | `clientInfo.name` exposure to OpenAI compliance logs | low | known to the single user; user-facing disclosure deferred (09 §5) |
 | R32 | ACP v2 changes again before final; v1 agents and v2 agents coexist for a long time | medium | dual-stack (D35); fake agent speaks both; normalized model independent of wire version |
 | R33 | Codex routes approvals to its automatic reviewer (`approvalsReviewer`) or relies on experimental methods, so the human never sees a request | high | D37 pinning + echo check; D36 no experimental API; S1-lite |
-| R34 | Grok sandbox is weaker than assumed: default `off`, every profile writes `~/.grok/`, project `.grok/sandbox.toml` adds profiles, fails open when it cannot be applied | high | runtime confirmation, fail closed, config hash before every turn, never set bypass flags (03 §6); first provider chosen by spikes (D40) |
+| R34 | Grok sandbox is weaker than assumed: default `off`, every profile writes `~/.grok/`, project `.grok/sandbox.toml` adds profiles, fails open when it cannot be applied | high | runtime confirmation, fail closed, config hash before every turn, never set bypass flags (03 §6); Grok follows Codex in P1b (D52) |
 | R35 | Claude settings allow rules skip `canUseTool` silently; an omitted `permissionMode` may start in `auto` | high | explicit `permissionMode: "default"` (D37); allow rules shown as "pre-approved" (06 §3a); S4 |
 | R36 | Hermes file edits never request approval | high (if Hermes included) | indicator; U26 |
 | R37 | Agent-written approval text disguises a dangerous action ("safe cleanup" over `rm -rf`) | high | D38; rendering fixtures T1.10 |
@@ -94,7 +95,7 @@ Only U5 and U7 remain, both deferred until other users (D46, R47). Everything el
 
 ## 3. Known tensions (accepted, revisit with evidence)
 
-- **Protection vs provider choice:** a provider without an OS sandbox (Hermes likely) makes the host unprotected while it runs; no provider is presumed "sandboxed" any more — Grok writes its own config and fails open (R34) — so Phase 1a shows an honest "not protected" banner (Hermes is not in Phase 1, D48) and the first provider is chosen by S1-lite/S2 (D40).
+- **Verification vs provider choice:** a provider without an OS sandbox (Hermes likely) leaves checklist items unverified or failed while it runs; Grok writes its own config and fails open (R34), so Codex is first in P1a and Grok follows in P1b (D52). The host banner remains "approvals not protected" and the UI does not show an aggregate status (D47).
 - **Re-confirmation vs mobile convenience:** re-confirmation only when stale or the workspace changed.
 - **Extra processes vs budgets:** Git worker and macOS containment helper are measured in their own columns.
 - **Same-model reviews:** the plan was refined by several Claude reviews; an independent review from a different model family was done on 2026-10-18 (15) and applied; spikes S7–S9 now matter more than further desk review.

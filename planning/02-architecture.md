@@ -1,4 +1,5 @@
 # 02 — System Architecture and Technology
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Decision IDs (D#) are explained in [12-decisions](12-decisions.md). Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): planned restart (D39), Tauri IPC as relay, Claude channel label. 2026-10-18: daemon language Rust approved by the owner (D1, U13). 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44). 2026-10-19 (owner): D27 approved — Rust types → `schemars` JSON Schema (committed) → TypeScript, `ts-rs` fallback, CI drift check. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 
@@ -119,4 +120,4 @@ Data dirs: macOS `~/Library/Application Support/Shardrail/`; Linux `$XDG_DATA_HO
 | Storage (D5) | **SQLite WAL, one file per daemon, single writer**, embedded SQLite | one owner per host; crash behavior well understood | Postgres; CRDTs; JSONL-only (poor random access); "provider is the only truth" (breaks history when the provider is gone). FTS only if measured necessary. |
 | Encoding | JSON; binary (CBOR/MessagePack) only if measurement shows serialization in the latency path | simplicity, debuggability | gRPC / gRPC-web (proxies in browsers, heavier) |
 
-Dependencies at runtime on the user's machine (not build dependencies): provider binaries, system WebView, OpenSSH (remote), Python (Hermes), Node (Claude adapter and possibly the Codex npm wrapper).
+Dependencies at runtime on the user's machine (not build dependencies): provider binaries, system WebView, OpenSSH (remote), Node (Claude adapter and possibly the Codex npm wrapper). Python is needed only if Hermes is added in a later phase; Hermes is not a Phase 1 runtime dependency (D48).

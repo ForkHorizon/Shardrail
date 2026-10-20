@@ -1,4 +1,5 @@
 # 04 — Sessions, Events, Data and Recovery
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. The normative state machine is in [05-state-machine](05-state-machine.md). Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): approval write-ahead (D34), queued instructions and session lifecycle (D42), journal-unavailable behaviour (D41), planned restart (D39), handoff quoting. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 

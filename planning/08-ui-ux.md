@@ -1,4 +1,5 @@
 # 08 — Interface and Visual System
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Product design is a first-class module developed alongside the backend, not decoration added afterwards. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): agent-authored approval text box (D38), per-session bypass indicators, new inbox items. 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44); §6 UI-stack rules for AI agents added. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. 2026-10-19 (owner): U2 brand book deferred.
 

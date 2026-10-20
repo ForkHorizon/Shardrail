@@ -1,4 +1,5 @@
 # 05 — Session State Machine (D18)
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**; normative for detailed planning of the session engine once approved. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized. U22: desynced processes are never terminated automatically.
 > Why separate dimensions: a single linear state (`starting → running → waiting_approval → idle`) could not represent parallel approvals, cancellation in progress, a live process with a broken protocol link, or survivors after a crash.

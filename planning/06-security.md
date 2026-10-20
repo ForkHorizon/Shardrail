@@ -1,4 +1,5 @@
 # 06 — Security and Trust
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Security claims are qualified; none is verified by testing yet — spikes S7–S9 do that. 2026-10-19 (owner, D46): code-signing peer admission verifies Daliys's own local/self-signed identity (no Developer ID); release-signing items deferred to 09 §5. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. §3b added. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 > Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): provider approval-bypass paths (§3a, D37), agent-authored approval text (§5, D38), macOS containment technique (§8, D43), extra inherited capabilities, supply chain (§12), Grok caveats.
@@ -129,6 +130,7 @@ Records resolve exactly once (05 §4). Expiry (default deny after 180 s or a low
 
 - Shardrail has no secret manager for providers; login uses provider commands (`codex login`, `grok login`, `hermes model`, Claude's flow). "Not logged in" is detected from protocol errors; reading `auth.json` to check is forbidden.
 - The journal is sensitive (N3): `0600` file, `0700` data dir, best-effort redaction (prefix denylist + format/entropy detectors) applied to journal, logs, diagnostics export and handoff; retention and purge (04 §6).
+- **Journal open (D50):** the daemon opens or creates the journal atomically relative to the already-open data-directory descriptor, without following symlinks. This ships with the daemon skeleton before real providers are connected; agents are untrusted with respect to the journal even though they share the daemon's UID.
 - Daemon logs record structured spans (`provider.spawn`, `provider.event`, `journal.append`, `client.flush`, `approval.wait`, `approval.respond`, `command.accept`, `command.dispatch`, `gateway.fanout`); prompt bodies and tool output are not logged by default; a per-session debug flag exists.
 - Nothing leaves the machine by default; diagnostics export is a user-saved file with the same redaction. No external APM.
 
