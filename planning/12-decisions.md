@@ -65,6 +65,7 @@
 | D59 | **TypeScript compiler (`typescript`/`tsc`) allowed as a dev dependency (owner, 2026-10-20).** | type checking catches AI-codegen errors (D44) | stub client without tsc | high (owner decision) | — | 17 §Г, 11 §3 |
 | D60 | **Close the data-directory race and disconnect slow clients now (owner, 2026-10-20).** The remaining data-dir creation/open race is closed; a client whose bounded queue overflows is disconnected (it reconnects and replays) | same-UID agents are untrusted (D50); one slow client must not stall the daemon (D17) | defer to P1e | high (owner decision) | — | 17 §Г, 04 §2, 06 |
 | D61 | **Docs sync (owner, 2026-10-20).** B3 updated to the final S5 measurement (idle median 113.7 MB of 180, under load ≈396 MB); review fixes applied; B5 numbers reconciled with the result files | docs must match evidence | — | high | — | 17 §Г, 07, spikes/s5-ui.md |
+| D62 | **`@noble/ed25519` for the TS client (delegated by owner to the assistant, 2026-10-20).** The TypeScript client may use `@noble/ed25519` (audited, zero dependencies) for client key signing, as the TS counterpart of `ed25519-dalek` (D55). Version pinned exactly; reviewers check it like any new dependency | TS client needs Ed25519 for the D55 handshake; a small audited zero-dep library is the lowest-risk option | WebCrypto Ed25519 (uneven support), hand-rolled crypto | high | — | 17 §Г, D55, D59 |
 
 ## Settled — do not reopen without new evidence
 
