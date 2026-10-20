@@ -17,10 +17,14 @@ struct TestClient {
 }
 
 fn add_client(path: &Path) -> TestClient {
+    add_client_with_scope(path, "full")
+}
+
+fn add_client_with_scope(path: &Path, scope: &str) -> TestClient {
     let result = Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(path)
-        .args(["client", "add", "--label", "test", "--scope", "full"])
+        .args(["client", "add", "--label", "test", "--scope", scope])
         .output()
         .unwrap();
     assert!(
@@ -199,24 +203,158 @@ fn handshake_rejects_pre_auth_commands_and_cross_session_signature_replay() {
     )
     .unwrap();
     let mut line = String::new();
-    assert_eq!(
-        second_reader.read_line(&mut line).unwrap(),
-        0,
-        "replayed proof must close without an authenticated or event frame"
-    );
+    assert_eq!(read_json(&mut second_reader)["kind"], "error");
+    assert_eq!(second_reader.read_line(&mut line).unwrap(), 0);
 
     let (mut reordered, mut reordered_reader) = connect(dir.path());
     writeln!(reordered, "{hello}").unwrap();
     let _ = read_json(&mut reordered_reader);
     writeln!(reordered, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
-    let mut response = String::new();
-    assert_eq!(reordered_reader.read_line(&mut response).unwrap(), 0);
+    assert_eq!(read_json(&mut reordered_reader)["kind"], "error");
 
     let (mut healthy, mut healthy_reader, _) = handshake(dir.path(), None, 0, &client);
     writeln!(healthy, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
     assert_eq!(read_json(&mut healthy_reader)["kind"], "command_accepted");
     daemon.kill().unwrap();
     daemon.wait().unwrap();
+}
+
+#[test]
+fn unsupported_versions_and_unauthorized_clients_receive_error_frames() {
+    let dir = tempdir().unwrap();
+    let registered = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+
+    let (mut unsupported, mut unsupported_reader) = connect(dir.path());
+    writeln!(unsupported, "{}", json!({"min_version":2,"max_version":3,"client_id":registered.id,"public_key":registered.public_key,"nonce":"11".repeat(32),"resume_after":0,"journal_epoch":null})).unwrap();
+    assert_eq!(read_json(&mut unsupported_reader)["kind"], "error");
+
+    let (mut unauthorized, mut unauthorized_reader) = connect(dir.path());
+    writeln!(unauthorized, "{}", json!({"min_version":1,"max_version":1,"client_id":Uuid::now_v7(),"public_key":"00".repeat(32),"nonce":"22".repeat(32),"resume_after":0,"journal_epoch":null})).unwrap();
+    assert_eq!(read_json(&mut unauthorized_reader)["kind"], "error");
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn concurrent_client_additions_preserve_every_registration() {
+    let dir = tempdir().unwrap();
+    let children: Vec<_> = (0..5)
+        .map(|index| {
+            let child = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+                .arg("--data-dir")
+                .arg(dir.path())
+                .args([
+                    "client",
+                    "add",
+                    "--label",
+                    &format!("parallel-{index}"),
+                    "--scope",
+                    "full",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            (index, child)
+        })
+        .collect();
+    for (index, child) in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "client {index}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let registry: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("authorized-clients.json")).unwrap())
+            .unwrap();
+    assert_eq!(registry["clients"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn limited_client_cannot_create_sessions() {
+    let dir = tempdir().unwrap();
+    let client = add_client_with_scope(dir.path(), "limited");
+    let mut daemon = start_daemon(dir.path());
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    writeln!(stream, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
+    let response = read_json(&mut reader);
+    assert_eq!(response["kind"], "command_rejected");
+    assert_eq!(response["error"], "limited clients cannot create sessions");
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn client_can_resume_from_an_earlier_cursor_on_the_same_connection() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    writeln!(stream, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
+    let accepted = read_json(&mut reader);
+    assert_eq!(accepted["kind"], "command_accepted");
+    assert!(accepted["cursor"].as_i64().unwrap() > 0);
+    let event = read_json(&mut reader);
+    assert_eq!(event["kind"], "durable_event");
+    let cursor = event["cursor"].as_i64().unwrap();
+
+    writeln!(stream, "{}", json!({"kind":"resume","resume_after":0})).unwrap();
+    let replayed = read_json(&mut reader);
+    assert_eq!(replayed["kind"], "durable_event");
+    assert_eq!(replayed["cursor"], cursor);
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn stalled_handshake_is_closed_after_timeout() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+    let (mut stream, mut reader) = connect(dir.path());
+    reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    writeln!(stream, "{}", json!({"min_version":1,"max_version":1,"client_id":client.id,"public_key":client.public_key,"nonce":"11".repeat(32),"resume_after":0,"journal_epoch":null})).unwrap();
+    assert_eq!(read_json(&mut reader)["protocol_version"], 1);
+    let started = Instant::now();
+    let mut line = String::new();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+    assert!(started.elapsed() >= Duration::from_secs(4));
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_file_access_stays_in_opened_directory_after_path_swap() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let data = dir.path().join("data");
+    let moved = dir.path().join("data-opened");
+    let external = dir.path().join("external");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::create_dir(&external).unwrap();
+    let client = add_client(&data);
+    let mut daemon = start_daemon(&data);
+    let (mut stream, mut reader, _) = handshake(&data, None, 0, &client);
+
+    std::fs::rename(&data, &moved).unwrap();
+    symlink(&external, &data).unwrap();
+    writeln!(stream, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
+    let accepted = read_json(&mut reader);
+    assert_eq!(accepted["kind"], "command_accepted");
+    assert!(accepted["cursor"].as_i64().unwrap() > 0);
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+
+    assert!(moved.join("journal.sqlite3").exists());
+    assert!(!external.join("journal.sqlite3").exists());
 }
 
 #[test]

@@ -1,15 +1,19 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use nix::sys::stat::{Mode, fchmod};
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::{Mode, fchmod, fstat};
 use nix::sys::statfs::statfs;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use shardrail_coordinator::{Coordinator, DaemonDataDir, open_private_data_directory};
+use shardrail_coordinator::{
+    Coordinator, DaemonDataDir, open_private_data_directory, pin_data_directory,
+};
 use shardrail_journal::Journal;
 use shardrail_protocol::{ClientFrame, ClientHello, ClientScope, DaemonFrame, ServerHello};
 use shardrail_session_core::Session;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,11 +21,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
-use tokio::time::{Duration, MissedTickBehavior, interval};
+use tokio::time::{Duration, MissedTickBehavior, interval, timeout};
 use uuid::Uuid;
 
 const PROTOCOL_VERSION: u32 = 1;
 const CLIENT_QUEUE_CAPACITY: usize = 32;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(name = "shardraild", about = "Shardrail local coordinator daemon")]
@@ -96,8 +101,13 @@ async fn run(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
     refuse_network_filesystem(&path)?;
-    let data = DaemonDataDir::open(&path)?;
-    let path = data.directory_path().to_path_buf();
+    let mut data = DaemonDataDir::open(&path)?;
+    data.pin_path_only_apis()?;
+    let path = if cfg!(target_os = "macos") {
+        PathBuf::from(".")
+    } else {
+        data.directory_path().to_path_buf()
+    };
     let _journal_fd = data.open_journal_entry()?;
     let mut journal = data.open_journal()?;
     let epoch = journal.journal_epoch()?;
@@ -145,16 +155,27 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
-    let (_directory, path) = open_private_data_directory(path)?;
-    let path = path.as_path();
-    let mut entries = load_authorized_clients(path)?;
+    let (directory, path) = open_private_data_directory(path)?;
+    pin_data_directory(&directory)?;
+    let _registry_lock = lock_client_registry(&directory)
+        .map_err(|error| io::Error::new(error.kind(), format!("lock client registry: {error}")))?;
+    let path = if cfg!(target_os = "macos") {
+        Path::new(".")
+    } else {
+        path.as_path()
+    };
+    let mut entries = load_authorized_clients(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("load client registry: {error}")))?;
     match command {
         ClientCommand::Add { label, scope } => {
             let id = Uuid::now_v7();
             let key = generate_signing_key()?;
             let public_key = encode_hex(&key.verifying_key().to_bytes());
-            let host_key = load_or_create_signing_key(&path.join("host.key"))?;
-            write_private_bytes(&path.join(format!("client-{id}.key")), &key.to_bytes())?;
+            let host_key = load_or_create_signing_key(&path.join("host.key"))
+                .map_err(|error| io::Error::new(error.kind(), format!("load host key: {error}")))?;
+            write_private_bytes(&path.join(format!("client-{id}.key")), &key.to_bytes()).map_err(
+                |error| io::Error::new(error.kind(), format!("write client key: {error}")),
+            )?;
             entries.clients.push(AuthorizedClient {
                 client_id: id,
                 public_key: public_key.clone(),
@@ -164,7 +185,9 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
                     ScopeArg::Limited => ClientScope::Limited,
                 },
             });
-            save_authorized_clients(path, &entries)?;
+            save_authorized_clients(path, &entries).map_err(|error| {
+                io::Error::new(error.kind(), format!("save client registry: {error}"))
+            })?;
             let client_scope = match scope {
                 ScopeArg::Full => ClientScope::Full,
                 ScopeArg::Limited => ClientScope::Limited,
@@ -207,6 +230,57 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn lock_client_registry(directory: &fs::File) -> io::Result<fs::File> {
+    let create_flags =
+        OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+    let open_flags = OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+    let descriptor = match openat(
+        directory.as_fd(),
+        "authorized-clients.lock",
+        create_flags,
+        Mode::from_bits_truncate(0o600),
+    ) {
+        Ok(descriptor) => Ok(descriptor),
+        Err(nix::errno::Errno::EEXIST) => openat(
+            directory.as_fd(),
+            "authorized-clients.lock",
+            open_flags,
+            Mode::empty(),
+        ),
+        Err(nix::errno::Errno::ENOENT) => match openat(
+            directory.as_fd(),
+            "authorized-clients.lock",
+            open_flags,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => Ok(descriptor),
+            Err(nix::errno::Errno::ENOENT) => openat(
+                directory.as_fd(),
+                "authorized-clients.lock",
+                create_flags,
+                Mode::from_bits_truncate(0o600),
+            ),
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    }
+    .map_err(io::Error::other)?;
+    let metadata = fstat(&descriptor).map_err(io::Error::other)?;
+    if !nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode)
+        .contains(nix::sys::stat::SFlag::S_IFREG)
+        || metadata.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "authorized-clients lock must be an owner-owned regular file",
+        ));
+    }
+    fchmod(&descriptor, Mode::from_bits_truncate(0o600)).map_err(io::Error::other)?;
+    let lock: fs::File = descriptor.into();
+    lock.lock()?;
+    Ok(lock)
 }
 
 fn scope_name(scope: ClientScope) -> &'static str {
@@ -466,19 +540,22 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             }
         }
     });
-    let _abort_writer = AbortWriter(writer_task);
+    let mut abort_writer = AbortWriter(Some(writer_task));
     let mut read = BufReader::new(read);
     let mut line = String::new();
-    if read.read_line(&mut line).await? == 0 {
+    if timeout(HANDSHAKE_TIMEOUT, read.read_line(&mut line))
+        .await
+        .map_err(|_| handshake_timeout())??
+        == 0
+    {
         return Ok(());
     }
     let hello: ClientHello = serde_json::from_str(&line).map_err(io::Error::other)?;
     if hello.min_version > PROTOCOL_VERSION || hello.max_version < PROTOCOL_VERSION {
-        return write_frame(
-            &outbound,
-            &DaemonFrame::Error {
-                error: "no mutually supported protocol version".into(),
-            },
+        return finish_with_error(
+            outbound,
+            &mut abort_writer,
+            "no mutually supported protocol version",
         )
         .await;
     }
@@ -488,20 +565,14 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         .iter()
         .find(|client| client.public_key == hello.public_key)
     else {
-        return write_frame(
-            &outbound,
-            &DaemonFrame::Error {
-                error: "client key is not authorized".into(),
-            },
-        )
-        .await;
+        return finish_with_error(outbound, &mut abort_writer, "client key is not authorized")
+            .await;
     };
     if hello.client_id != client.client_id {
-        return write_frame(
-            &outbound,
-            &DaemonFrame::Error {
-                error: "client id does not match its authorized key".into(),
-            },
+        return finish_with_error(
+            outbound,
+            &mut abort_writer,
+            "client id does not match its authorized key",
         )
         .await;
     }
@@ -552,28 +623,28 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
     };
     write_json_line(&outbound, &server).await?;
     line.clear();
-    if read.read_line(&mut line).await? == 0 {
+    if timeout(HANDSHAKE_TIMEOUT, read.read_line(&mut line))
+        .await
+        .map_err(|_| handshake_timeout())??
+        == 0
+    {
         return Ok(());
     }
     let auth: ClientFrame = serde_json::from_str(&line).map_err(io::Error::other)?;
     let ClientFrame::Authenticate { signature } = auth else {
-        return write_frame(
-            &outbound,
-            &DaemonFrame::Error {
-                error: "authentication required".into(),
-            },
-        )
-        .await;
+        return finish_with_error(outbound, &mut abort_writer, "authentication required").await;
     };
-    let signature = Signature::from_slice(&decode_hex(&signature)?).map_err(io::Error::other)?;
-    client_key
-        .verify_strict(&transcript, &signature)
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "client transcript signature is invalid",
-            )
-        })?;
+    let signature = match decode_hex(&signature)
+        .and_then(|bytes| Signature::from_slice(&bytes).map_err(io::Error::other))
+    {
+        Ok(signature) => signature,
+        Err(_) => {
+            return finish_with_error(outbound, &mut abort_writer, "client proof is invalid").await;
+        }
+    };
+    if client_key.verify_strict(&transcript, &signature).is_err() {
+        return finish_with_error(outbound, &mut abort_writer, "client proof is invalid").await;
+    }
     write_frame(&outbound, &DaemonFrame::Authenticated).await?;
     push_events(&outbound, &daemon, &mut cursor).await?;
     let mut tick = interval(Duration::from_millis(100));
@@ -603,6 +674,17 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             ClientFrame::Resume { resume_after } => (None, Some(resume_after)),
         };
         if let Some(request) = request {
+            if client.scope == ClientScope::Limited {
+                write_frame(
+                    &outbound,
+                    &DaemonFrame::CommandRejected {
+                        command_id: request.command_id,
+                        error: "limited clients cannot create sessions".into(),
+                    },
+                )
+                .await?;
+                continue;
+            }
             if request.kind != "session.create"
                 || request.expected_state.is_some()
                 || request.expected_turn_id.is_some()
@@ -683,7 +765,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             push_events(&outbound, &daemon, &mut cursor).await?;
         }
         if let Some(resume_after) = resume_after {
-            cursor = cursor.max(resume_after).max(0);
+            cursor = resume_after.max(0);
             push_events(&outbound, &daemon, &mut cursor).await?;
         }
     }
@@ -739,11 +821,36 @@ async fn write_json_line<T: serde::Serialize>(
     })
 }
 
-struct AbortWriter(tokio::task::JoinHandle<()>);
+fn handshake_timeout() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "client handshake timed out")
+}
+
+async fn finish_with_error(
+    outbound: mpsc::Sender<Vec<u8>>,
+    writer: &mut AbortWriter,
+    error: &str,
+) -> io::Result<()> {
+    write_frame(
+        &outbound,
+        &DaemonFrame::Error {
+            error: error.into(),
+        },
+    )
+    .await?;
+    drop(outbound);
+    if let Some(task) = writer.0.take() {
+        task.await.map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+struct AbortWriter(Option<tokio::task::JoinHandle<()>>);
 
 impl Drop for AbortWriter {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
 }
 
