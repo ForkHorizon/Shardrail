@@ -35,7 +35,7 @@ fn add_client_with_scope(path: &Path, scope: &str) -> TestClient {
     let registered: Value =
         serde_json::from_slice(&std::fs::read(path.join("authorized-clients.json")).unwrap())
             .unwrap();
-    let client = &registered["clients"][0];
+    let client = registered["clients"].as_array().unwrap().last().unwrap();
     let id = Uuid::parse_str(client["client_id"].as_str().unwrap()).unwrap();
     let public_key = client["public_key"].as_str().unwrap().to_string();
     let secret: [u8; 32] = std::fs::read(path.join(format!("client-{id}.key")))
@@ -53,6 +53,39 @@ fn start_daemon(path: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap()
+}
+
+fn start_fake_daemon(path: &Path, timeout_secs: u64, write_delay_ms: u64) -> Child {
+    start_fake_daemon_with(path, timeout_secs, write_delay_ms, false)
+}
+
+fn start_fake_daemon_with(
+    path: &Path,
+    timeout_secs: u64,
+    write_delay_ms: u64,
+    no_reject: bool,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
+        .arg("--data-dir")
+        .arg(path)
+        .arg("--fake-acp-path")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/shardrail-fake-acp"),
+        )
+        .arg("--approval-timeout-secs")
+        .arg(timeout_secs.to_string())
+        .arg("--test-write-ahead-delay-ms")
+        .arg(write_delay_ms.to_string());
+    if no_reject {
+        command.arg("--fake-acp-no-reject");
+    }
+    command
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -144,6 +177,33 @@ fn decode_hex(value: &str) -> Vec<u8> {
         .chunks(2)
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect()
+}
+
+fn request_session(stream: &mut UnixStream, reader: &mut BufReader<UnixStream>) {
+    writeln!(stream, "{}", json!({"kind":"request","request":{
+        "command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}
+    }})).unwrap();
+    assert_eq!(read_json(reader)["kind"], "command_accepted");
+}
+
+fn next_approval(reader: &mut BufReader<UnixStream>) -> Value {
+    loop {
+        let frame = read_json(reader);
+        if frame["kind"] == "durable_event" && frame["event"]["kind"] == "approval_requested" {
+            return frame["event"]["payload"].clone();
+        }
+    }
+}
+
+fn send_resolution(stream: &mut UnixStream, approval_id: &Value, option_id: &str) {
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"approval_resolution","request":{
+            "approval_id":approval_id,"option_id":option_id
+        }})
+    )
+    .unwrap();
 }
 
 fn transcript_hash(
@@ -614,4 +674,242 @@ fn symlinked_data_directory_is_rejected_without_chmodding_its_target() {
         std::fs::metadata(external).unwrap().permissions().mode() & 0o777,
         0o755
     );
+}
+
+#[test]
+fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
+    let dir = tempdir().unwrap();
+    let full = add_client_with_scope(dir.path(), "full");
+    let limited = add_client_with_scope(dir.path(), "limited");
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut full_stream, mut full_reader, _) = handshake(dir.path(), None, 0, &full);
+    let (mut limited_stream, mut limited_reader, _) = handshake(dir.path(), None, 0, &limited);
+    request_session(&mut full_stream, &mut full_reader);
+    let approval = next_approval(&mut full_reader);
+    assert_eq!(approval["approval_kind"], "execute");
+    assert_eq!(
+        approval["agent_description"]["title"],
+        "Run fixture command"
+    );
+    assert!(approval.get("title").is_none());
+    let _ = next_approval(&mut limited_reader);
+    let approval_id = approval["approval_id"].clone();
+
+    send_resolution(&mut limited_stream, &approval_id, "allow_always");
+    let limited_result = read_command_reply(&mut limited_reader);
+    assert_eq!(limited_result["kind"], "error");
+    assert!(
+        limited_result["error"]
+            .as_str()
+            .unwrap()
+            .contains("limited clients")
+    );
+    send_resolution(&mut limited_stream, &approval_id, "allow_boundary");
+    let limited_result = read_command_reply(&mut limited_reader);
+    assert!(
+        limited_result["error"]
+            .as_str()
+            .unwrap()
+            .contains("limited clients")
+    );
+
+    send_resolution(&mut full_stream, &approval_id, "allow_once");
+    send_resolution(&mut limited_stream, &approval_id, "reject_once");
+    let full_result = read_command_reply(&mut full_reader);
+    let limited_result = read_command_reply(&mut limited_reader);
+    let replies = [full_result, limited_result];
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|frame| frame["kind"] == "approval_resolved")
+            .count(),
+        1
+    );
+    assert!(
+        replies
+            .iter()
+            .filter(|frame| frame["kind"] == "error")
+            .any(|frame| frame["error"]
+                .as_str()
+                .unwrap()
+                .contains("already resolved"))
+    );
+    let approval_id = Uuid::parse_str(approval_id.as_str().unwrap()).unwrap();
+    let ack_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap();
+        if matches!(state.as_deref(), Some("allowed" | "denied")) {
+            break;
+        }
+        assert!(
+            Instant::now() < ack_deadline,
+            "provider acknowledgement was not recorded"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+fn read_command_reply(reader: &mut BufReader<UnixStream>) -> Value {
+    loop {
+        let frame = read_json(reader);
+        if matches!(frame["kind"].as_str(), Some("approval_resolved" | "error")) {
+            return frame;
+        }
+    }
+}
+
+#[test]
+fn daemon_rejects_forged_scope_fields_and_sends_no_approval_before_authentication() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let _ = next_approval(&mut reader);
+
+    let (mut raw, mut raw_reader) = connect(dir.path());
+    raw.set_read_timeout(Some(Duration::from_millis(150)))
+        .unwrap();
+    writeln!(
+        raw,
+        "{}",
+        json!({
+            "min_version":1,"max_version":1,"client_id":client.id,"public_key":client.public_key,
+            "nonce":"22".repeat(32),"resume_after":0,"journal_epoch":null
+        })
+    )
+    .unwrap();
+    assert!(read_json(&mut raw_reader).get("signature").is_some());
+    let mut line = String::new();
+    assert!(raw_reader.read_line(&mut line).is_err());
+
+    // The strict approval frame rejects extra client-supplied policy fields and closes the connection.
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"approval_resolution","request":{
+            "approval_id":Uuid::now_v7(),"option_id":"allow_once","kind":"forged","scope":"full"
+        }})
+    )
+    .unwrap();
+    let mut line = String::new();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn approval_expiry_uses_reject_option_and_never_allows() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 1, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap();
+        if state.as_deref() == Some("expired") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "approval did not expire");
+        thread::sleep(Duration::from_millis(20));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn approval_expiry_cancels_turn_when_provider_has_no_reject_option() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon_with(dir.path(), 1, 0, true);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .events_after_with_receipts(0, 100)
+            .unwrap();
+        if events.iter().any(|item| {
+            item.event.kind == "approval_responding"
+                && item.event.payload["approval_id"] == approval_id.to_string()
+                && item.event.payload["decision"] == "cancel"
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "expiry did not cancel the turn");
+        thread::sleep(Duration::from_millis(20));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn kill_after_write_ahead_recovers_as_delivered_unconfirmed() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 5_000);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    send_resolution(&mut stream, &approval["approval_id"], "allow_once");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .events_after_with_receipts(0, 100)
+            .unwrap();
+        if events
+            .iter()
+            .any(|item| item.event.kind == "approval_responding")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "write-ahead record was not committed"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+
+    let mut restarted = start_daemon(dir.path());
+    let (_stream, mut replay, _) = handshake(dir.path(), None, 0, &client);
+    let mut saw_delivered = false;
+    let replay_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < replay_deadline {
+        let frame = read_json(&mut replay);
+        if frame["kind"] == "durable_event"
+            && frame["event"]["kind"] == "approval_delivered_unconfirmed"
+            && frame["event"]["payload"]["approval_id"] == approval_id.to_string()
+        {
+            saw_delivered = true;
+            break;
+        }
+    }
+    assert!(saw_delivered);
+    let state = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
+        .unwrap()
+        .approval_state(approval_id)
+        .unwrap();
+    assert_eq!(state.as_deref(), Some("delivered_unconfirmed"));
+    restarted.kill().unwrap();
+    restarted.wait().unwrap();
 }

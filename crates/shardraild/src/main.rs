@@ -9,8 +9,10 @@ use shardrail_coordinator::{
     Coordinator, DaemonDataDir, open_private_data_directory, pin_data_directory,
 };
 use shardrail_journal::Journal;
+use shardrail_protocol::{ApprovalDecision, ApprovalResolutionRequest, DurableEvent, OptionClass};
 use shardrail_protocol::{ClientFrame, ClientHello, ClientScope, DaemonFrame, ServerHello};
-use shardrail_session_core::Session;
+use shardrail_session_core::{Approval, Session};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
@@ -20,6 +22,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::process::{ChildStdin, Command as TokioCommand};
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, MissedTickBehavior, interval, timeout};
 use uuid::Uuid;
@@ -33,8 +36,440 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 struct Args {
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    #[arg(long)]
+    fake_acp_path: Option<PathBuf>,
+    #[arg(long)]
+    fake_acp_no_reject: bool,
+    #[arg(long, default_value_t = 180)]
+    approval_timeout_secs: u64,
+    #[arg(long, default_value_t = 0)]
+    test_write_ahead_delay_ms: u64,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
+}
+
+async fn resolve_approval(
+    daemon: &Daemon,
+    client: &AuthorizedClient,
+    request: ApprovalResolutionRequest,
+) -> Result<(), String> {
+    let mut approvals = daemon.approvals.lock().await;
+    let entry = approvals
+        .get_mut(&request.approval_id)
+        .ok_or_else(|| "approval is already resolved or unavailable".to_owned())?;
+    if entry.provider.is_none()
+        || entry.approval.state != shardrail_protocol::ApprovalState::Pending
+    {
+        return Err("approval is already resolved".into());
+    }
+    let option = entry
+        .options
+        .iter()
+        .find(|option| option.id == request.option_id)
+        .cloned()
+        .ok_or_else(|| "option is not offered for this approval".to_owned())?;
+    if option.decision == ApprovalDecision::Allow
+        && client.scope == ClientScope::Limited
+        && option.class != OptionClass::Once
+    {
+        return Err("limited clients cannot choose widening or boundary-breaking options".into());
+    }
+    let sender = entry
+        .provider
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "approval is already resolved".to_owned())?;
+    let write_delay = daemon.test_write_ahead_delay_ms;
+    let coordinator = daemon
+        .sessions
+        .lock()
+        .await
+        .get(&entry.session_id)
+        .cloned()
+        .ok_or_else(|| "session coordinator unavailable".to_owned())?;
+    let mut coordinator = coordinator.lock().await;
+    let result = coordinator.respond_approval(
+        &mut entry.approval,
+        shardrail_coordinator::ApprovalResponseRequest {
+            decision: option.decision,
+            authorized: true,
+            now_ms: wall_clock_ms(),
+            provider_limit_secs: None,
+            option_id: Some(option.id),
+            responder: &client.client_id.to_string(),
+            option_class: option.class,
+            client_scope: client.scope,
+        },
+        move |_decision, option_id| {
+            if write_delay > 0 {
+                std::thread::sleep(Duration::from_millis(write_delay));
+            }
+            sender.send(option_id.map(str::to_owned)).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "fake provider disconnected")
+            })
+        },
+    );
+    if let Err(error) = result {
+        if matches!(
+            error,
+            shardrail_coordinator::CoordinatorError::InvalidApproval
+        ) {
+            return Err("approval is already resolved".into());
+        }
+        if let Some(provider) = entry.provider.take() {
+            let _ = provider.send(None);
+        }
+        return Err(error.to_string());
+    }
+    entry.provider = None;
+    Ok(())
+}
+
+async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
+    if let Err(error) = run_fake_acp_inner(daemon, path, session_id).await {
+        eprintln!("fake ACP session {session_id} ended: {error}");
+    }
+}
+
+async fn run_fake_acp_inner(
+    daemon: Arc<Daemon>,
+    path: PathBuf,
+    session_id: Uuid,
+) -> io::Result<()> {
+    let mut command = TokioCommand::new(path);
+    if daemon.fake_acp_no_reject {
+        command.env("SHARDRAIL_FAKE_ACP_NO_REJECT", "1");
+    }
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let input = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("fake ACP stdin unavailable"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("fake ACP stdout unavailable"))?;
+    let mut input = input;
+    let mut output = BufReader::new(output);
+    let coordinator = daemon
+        .sessions
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| io::Error::other("session coordinator unavailable"))?;
+    let mut coordinator = coordinator.lock().await;
+    coordinator
+        .transition(
+            wall_clock_ms(),
+            "process_started",
+            json!({"provider":"fake-acp"}),
+            || Ok(()),
+        )
+        .map_err(io::Error::other)?;
+    coordinator
+        .transition(
+            wall_clock_ms(),
+            "turn_started",
+            json!({"source":"fake-acp"}),
+            || Ok(()),
+        )
+        .map_err(io::Error::other)?;
+    drop(coordinator);
+    send_agent_request(&mut input, 1, "initialize", json!({"protocolVersion":1})).await?;
+    let _ = read_agent_line(&mut output).await?;
+    send_agent_request(&mut input, 2, "session/new", json!({"cwd":"/tmp"})).await?;
+    let _ = read_agent_line(&mut output).await?;
+    send_agent_request(
+        &mut input,
+        3,
+        "session/prompt",
+        json!({"sessionId":"fake-session-1","prompt":[]}),
+    )
+    .await?;
+    // shortcut: the fake ACP fixture emits one permission request per prompt; loop when fixture coverage adds multiple requests.
+    let permission = loop {
+        let frame: serde_json::Value =
+            serde_json::from_str(&read_agent_line(&mut output).await?).map_err(io::Error::other)?;
+        if frame["method"] == "session/request_permission" {
+            break frame;
+        }
+    };
+    let params = &permission["params"];
+    let options = params["options"].as_array().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "fake provider options missing")
+    })?;
+    let approval = Approval::new(wall_clock_ms());
+    let approval_id = approval.id;
+    let provider_options = options
+        .iter()
+        .map(|option| {
+            let kind = option["kind"].as_str().unwrap_or("unknown");
+            let id = option["optionId"].as_str().unwrap_or("").to_owned();
+            let decision = if kind.starts_with("allow") {
+                ApprovalDecision::Allow
+            } else {
+                ApprovalDecision::Deny
+            };
+            let class = classify_option(kind);
+            ProviderOption {
+                id,
+                class,
+                decision,
+            }
+        })
+        .collect::<Vec<_>>();
+    if provider_options.is_empty() || provider_options.iter().any(|option| option.id.is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "fake provider options are malformed",
+        ));
+    }
+    let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
+    let coordinator = daemon
+        .sessions
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| io::Error::other("session coordinator unavailable"))?;
+    let mut coordinator = coordinator.lock().await;
+    coordinator
+        .create_approval(approval.clone())
+        .map_err(io::Error::other)?;
+    drop(coordinator);
+    let (journal_epoch, host_id) = {
+        let journal = daemon.journal.lock().await;
+        (
+            journal.journal_epoch().map_err(io::Error::other)?,
+            journal.host_id().map_err(io::Error::other)?,
+        )
+    };
+    let kind = params["toolCall"]["kind"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+    let details = json!({
+        "approval_id": approval_id,
+        "approval_kind": kind,
+        "tool_call_id": params["toolCall"]["toolCallId"],
+        "options": options.iter().zip(provider_options.iter()).map(|(raw, option)| json!({"option_id":option.id,"name":raw["name"],"decision":option.decision,"class":option.class})).collect::<Vec<_>>(),
+        "agent_description": {"title":params["toolCall"]["title"],"description":params["description"],"reason":params["reason"]},
+    });
+    daemon
+        .journal
+        .lock()
+        .await
+        .append_event(&DurableEvent {
+            event_id: 0,
+            journal_epoch,
+            host_id,
+            session_id,
+            schema_version: 1,
+            kind: "approval_requested".into(),
+            occurred_at_ms: wall_clock_ms(),
+            provider_ref: Some(approval_id.to_string()),
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload: details,
+        })
+        .map_err(io::Error::other)?;
+    daemon.approvals.lock().await.insert(
+        approval_id,
+        DaemonApproval {
+            session_id,
+            approval,
+            options: provider_options,
+            provider: Some(provider_tx),
+        },
+    );
+    let timeout_daemon = Arc::clone(&daemon);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(timeout_daemon.approval_timeout_secs)).await;
+        expire_approval(&timeout_daemon, approval_id).await;
+    });
+    let selected = provider_rx.recv().await.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "approval response channel closed",
+        )
+    })?;
+    let responded = selected.is_some();
+    if let Some(option_id) = selected {
+        write_agent(
+            &mut input,
+            &json!({
+                "jsonrpc":"2.0", "id":permission["id"],
+                "result":{"outcome":{"outcome":"selected","optionId":option_id}}
+            }),
+        )
+        .await?;
+        loop {
+            let frame: serde_json::Value =
+                serde_json::from_str(&read_agent_line(&mut output).await?)
+                    .map_err(io::Error::other)?;
+            if frame["id"] == 3 {
+                loop {
+                    let state = Journal::open(daemon.data.journal_path())
+                        .map_err(io::Error::other)?
+                        .approval_state(approval_id)
+                        .map_err(io::Error::other)?;
+                    if state.as_deref() != Some("responding") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let coordinator = daemon
+                    .sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned()
+                    .ok_or_else(|| io::Error::other("session coordinator unavailable"))?;
+                let mut coordinator = coordinator.lock().await;
+                coordinator
+                    .acknowledge_approval(approval_id, wall_clock_ms())
+                    .map_err(io::Error::other)?;
+                break;
+            }
+        }
+    } else {
+        write_agent(&mut input, &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"fake-session-1"}})).await?;
+    }
+    let _ = child.wait().await?;
+    let coordinator = daemon
+        .sessions
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| io::Error::other("session coordinator unavailable"))?;
+    let mut coordinator = coordinator.lock().await;
+    coordinator
+        .turn_finished(
+            wall_clock_ms(),
+            if responded {
+                shardrail_session_core::TurnOutcome::Provider
+            } else {
+                shardrail_session_core::TurnOutcome::Interrupted
+            },
+            false,
+            json!({"source":"fake-acp"}),
+            || Ok(()),
+        )
+        .map_err(io::Error::other)?;
+    coordinator
+        .transition(
+            wall_clock_ms(),
+            "process_exited",
+            json!({"source":"fake-acp"}),
+            || Ok(()),
+        )
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
+    let mut approvals = daemon.approvals.lock().await;
+    let Some(entry) = approvals.get_mut(&approval_id) else {
+        return;
+    };
+    let Some(provider) = entry.provider.as_ref().cloned() else {
+        return;
+    };
+    let reject_id = entry
+        .options
+        .iter()
+        .find(|option| {
+            option.decision == ApprovalDecision::Deny && option.class == OptionClass::Once
+        })
+        .map(|option| option.id.clone());
+    let Some(coordinator) = daemon.sessions.lock().await.get(&entry.session_id).cloned() else {
+        return;
+    };
+    let mut coordinator = coordinator.lock().await;
+    let request = shardrail_coordinator::ApprovalTimeoutRequest {
+        now_ms: wall_clock_ms(),
+        provider_limit_secs: Some(daemon.approval_timeout_secs),
+        option_id: reject_id,
+    };
+    let response = coordinator.timeout_approval(
+        &mut entry.approval,
+        request,
+        |_decision, option_id| {
+            provider.send(option_id.map(str::to_owned)).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "fake provider disconnected")
+            })
+        },
+        || Ok(()),
+    );
+    match response {
+        Ok(()) => entry.provider = None,
+        Err(error) => {
+            if let Some(provider) = entry.provider.take() {
+                let _ = provider.send(None);
+            }
+            eprintln!("approval expiry failed closed: {error}");
+        }
+    }
+}
+
+fn classify_option(kind: &str) -> OptionClass {
+    if kind == "allow_once" {
+        OptionClass::Once
+    } else if kind.contains("sandbox")
+        || kind.contains("permission")
+        || kind == "allow_boundary_breaking"
+    {
+        OptionClass::BoundaryBreaking
+    } else if kind.starts_with("allow") {
+        OptionClass::Widening
+    } else {
+        OptionClass::Once
+    }
+}
+
+async fn send_agent_request(
+    input: &mut ChildStdin,
+    id: u32,
+    method: &str,
+    params: serde_json::Value,
+) -> io::Result<()> {
+    write_agent(
+        input,
+        &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+    )
+    .await
+}
+
+async fn write_agent(input: &mut ChildStdin, frame: &serde_json::Value) -> io::Result<()> {
+    input
+        .write_all(
+            serde_json::to_string(frame)
+                .map_err(io::Error::other)?
+                .as_bytes(),
+        )
+        .await?;
+    input.write_all(b"\n").await?;
+    input.flush().await
+}
+
+async fn read_agent_line(
+    output: &mut BufReader<tokio::process::ChildStdout>,
+) -> io::Result<String> {
+    let mut line = String::new();
+    if output.read_line(&mut line).await? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "fake ACP disconnected",
+        ));
+    }
+    Ok(line)
 }
 
 #[derive(Debug, Subcommand)]
@@ -83,6 +518,26 @@ struct Daemon {
     journal: Mutex<Journal>,
     command_lock: Mutex<()>,
     host_key: SigningKey,
+    fake_acp_path: Option<PathBuf>,
+    fake_acp_no_reject: bool,
+    approval_timeout_secs: u64,
+    test_write_ahead_delay_ms: u64,
+    approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
+    sessions: Mutex<HashMap<Uuid, Arc<Mutex<Coordinator>>>>,
+}
+
+struct DaemonApproval {
+    session_id: Uuid,
+    approval: Approval,
+    options: Vec<ProviderOption>,
+    provider: Option<mpsc::UnboundedSender<Option<String>>>,
+}
+
+#[derive(Clone)]
+struct ProviderOption {
+    id: String,
+    class: OptionClass,
+    decision: ApprovalDecision,
 }
 
 #[tokio::main]
@@ -92,12 +547,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(DaemonCommand::Client { command }) = args.command {
         manage_clients(&path, command)?;
     } else {
-        run(path).await?;
+        run(
+            path,
+            args.fake_acp_path,
+            args.fake_acp_no_reject,
+            args.approval_timeout_secs,
+            args.test_write_ahead_delay_ms,
+        )
+        .await?;
     }
     Ok(())
 }
 
-async fn run(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(
+    path: PathBuf,
+    fake_acp_path: Option<PathBuf>,
+    fake_acp_no_reject: bool,
+    approval_timeout_secs: u64,
+    test_write_ahead_delay_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
     refuse_network_filesystem(&path)?;
@@ -121,6 +589,12 @@ async fn run(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         journal: Mutex::new(journal),
         command_lock: Mutex::new(()),
         host_key,
+        fake_acp_path,
+        fake_acp_no_reject,
+        approval_timeout_secs,
+        test_write_ahead_delay_ms,
+        approvals: Mutex::new(HashMap::new()),
+        sessions: Mutex::new(HashMap::new()),
     });
     eprintln!(
         "shardraild listening at {} (host {host_id}, epoch {epoch})",
@@ -663,16 +1137,29 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             continue;
         }
         let frame: ClientFrame = serde_json::from_str(&line).map_err(io::Error::other)?;
-        let (request, resume_after) = match frame {
+        let (request, resolution, resume_after) = match frame {
             ClientFrame::Authenticate { .. } => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "authentication is only valid during handshake",
                 ));
             }
-            ClientFrame::Request { request } => (Some(request), None),
-            ClientFrame::Resume { resume_after } => (None, Some(resume_after)),
+            ClientFrame::Request { request } => (Some(request), None, None),
+            ClientFrame::ApprovalResolution { request } => (None, Some(request), None),
+            ClientFrame::Resume { resume_after } => (None, None, Some(resume_after)),
         };
+        if let Some(request) = resolution {
+            let approval_id = request.approval_id;
+            let _command = daemon.command_lock.lock().await;
+            let result = resolve_approval(&daemon, client, request).await;
+            match result {
+                Ok(()) => {
+                    write_frame(&outbound, &DaemonFrame::ApprovalResolved { approval_id }).await?
+                }
+                Err(error) => write_frame(&outbound, &DaemonFrame::Error { error }).await?,
+            }
+            continue;
+        }
         if let Some(request) = request {
             if client.scope == ClientScope::Limited {
                 write_frame(
@@ -742,6 +1229,11 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                     || Ok::<_, io::Error>(()),
                 )
                 .map_err(io::Error::other)?;
+            daemon
+                .sessions
+                .lock()
+                .await
+                .insert(session_id, Arc::new(Mutex::new(coordinator)));
             let journal = daemon.journal.lock().await;
             let event = journal
                 .events_for_session(session_id)
@@ -763,6 +1255,9 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             .await?;
             drop(journal);
             push_events(&outbound, &daemon, &mut cursor).await?;
+            if let Some(path) = daemon.fake_acp_path.clone() {
+                tokio::spawn(run_fake_acp(Arc::clone(&daemon), path, session_id));
+            }
         }
         if let Some(resume_after) = resume_after {
             cursor = resume_after.max(0);

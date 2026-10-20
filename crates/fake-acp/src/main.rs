@@ -36,7 +36,7 @@ fn main() -> io::Result<()> {
             "session/prompt" => {
                 let notification = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fake streamed response"}}}});
                 writeln!(out, "{}", notification)?;
-                let permission_request = json!({
+                let mut permission_request = json!({
                     "jsonrpc":"2.0",
                     "id":"permission-1",
                     "method":"session/request_permission",
@@ -45,10 +45,18 @@ fn main() -> io::Result<()> {
                         "toolCall":{"toolCallId":"fake-tool-call","title":"Run fixture command","kind":"execute"},
                         "options":[
                             {"optionId":"allow_once","name":"Allow once","kind":"allow_once"},
+                            {"optionId":"allow_always","name":"Allow always","kind":"allow_always"},
+                            {"optionId":"allow_boundary","name":"Allow permission change","kind":"allow_boundary_breaking"},
                             {"optionId":"reject_once","name":"Reject once","kind":"reject_once"}
                         ]
                     }
                 });
+                if std::env::var_os("SHARDRAIL_FAKE_ACP_NO_REJECT").is_some() {
+                    permission_request["params"]["options"]
+                        .as_array_mut()
+                        .expect("fixture options are an array")
+                        .retain(|option| option["kind"] != "reject_once");
+                }
                 writeln!(out, "{}", permission_request)?;
                 out.flush()?;
 
