@@ -111,6 +111,16 @@ impl DaemonDataDir {
         &self.path
     }
 
+    /// Pins path-only APIs to this directory for the daemon process on macOS.
+    pub fn pin_path_only_apis(&mut self) -> io::Result<()> {
+        pin_data_directory(&self._directory)?;
+        #[cfg(target_os = "macos")]
+        {
+            self.path = PathBuf::from(".");
+        }
+        Ok(())
+    }
+
     pub fn open_journal(&self) -> Result<Journal, JournalError> {
         Journal::open(self.journal_path())
     }
@@ -136,6 +146,12 @@ impl DaemonDataDir {
         fchmod(&entry, Mode::from_bits_truncate(0o600)).map_err(io::Error::other)?;
         Ok(entry)
     }
+}
+
+pub fn pin_data_directory(directory: &File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    nix::unistd::fchdir(directory).map_err(io::Error::other)?;
+    Ok(())
 }
 
 fn descriptor_path(directory: &File) -> io::Result<PathBuf> {
@@ -168,6 +184,14 @@ fn open_private_directory(path: &Path) -> io::Result<File> {
 }
 
 fn open_private_directory_with(path: &Path, after_open: impl FnOnce()) -> io::Result<File> {
+    open_private_directory_with_hooks(path, || {}, after_open)
+}
+
+fn open_private_directory_with_hooks(
+    path: &Path,
+    before_open: impl FnOnce(),
+    after_open: impl FnOnce(),
+) -> io::Result<File> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -186,6 +210,7 @@ fn open_private_directory_with(path: &Path, after_open: impl FnOnce()) -> io::Re
         Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
         Err(error) => return Err(io::Error::other(error)),
     }
+    before_open();
     let directory_fd = openat(
         parent.as_fd(),
         name,
@@ -905,7 +930,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn directory_swap_after_open_keeps_operations_on_the_checked_descriptor() {
         use std::os::unix::fs::symlink;
@@ -916,16 +941,40 @@ mod tests {
         fs::create_dir(&data).unwrap();
         fs::create_dir(&external).unwrap();
 
-        let opened = open_private_directory_with(&data, || {
-            fs::rename(&data, &moved).unwrap();
-            symlink(&external, &data).unwrap();
-        })
-        .unwrap();
+        let opened = open_private_directory(&data).unwrap();
         let pinned_path = descriptor_path(&opened).unwrap().join("swap-probe");
+        fs::rename(&data, &moved).unwrap();
+        symlink(&external, &data).unwrap();
         fs::write(&pinned_path, b"pinned").unwrap();
 
         assert_eq!(fs::read(moved.join("swap-probe")).unwrap(), b"pinned");
         assert!(!external.join("swap-probe").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_swap_between_mkdir_and_open_is_refused() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let data = dir.path().join("data");
+        let moved = dir.path().join("data-created");
+        let external = dir.path().join("external");
+        fs::create_dir(&external).unwrap();
+
+        let result = open_private_directory_with_hooks(
+            &data,
+            || {
+                fs::rename(&data, &moved).unwrap();
+                symlink(&external, &data).unwrap();
+            },
+            || {},
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::metadata(&external).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[test]
