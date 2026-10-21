@@ -8,10 +8,18 @@ export async function listenAndAnnounceReady<TFrame>(
   onFrames: (event: { payload: TFrame[] }) => void,
   onStatus: (event: { payload: { connected: boolean; error?: string } }) => void,
 ): Promise<() => void> {
-  const unlisten = await Promise.all([
+  const registrations = await Promise.allSettled([
     bridge.listen('daemon-frames', onFrames),
     bridge.listen('daemon-status', onStatus),
   ]);
+  const unlisten = registrations.flatMap((registration) =>
+    registration.status === 'fulfilled' ? [registration.value] : [],
+  );
+  const failed = registrations.find((registration) => registration.status === 'rejected');
+  if (failed?.status === 'rejected') {
+    unlisten.forEach((remove) => remove());
+    throw failed.reason;
+  }
   try {
     await bridge.emit('s5-ready', {});
   } catch (error) {

@@ -31,3 +31,16 @@ test('removes frontend listeners when readiness emit fails', async () => {
   await assert.rejects(listenAndAnnounceReady(bridge, () => {}, () => {}), /bridge unavailable/);
   assert.deepEqual(removed, ['daemon-frames', 'daemon-status']);
 });
+
+test('removes a listener that registered before another listener failed', async () => {
+  const removed: string[] = [];
+  const bridge: TauriEventBridge = {
+    async listen(event) {
+      if (event === 'daemon-status') throw new Error('registration failed');
+      return () => { removed.push(event); };
+    },
+    async emit() { assert.fail('readiness must not be emitted after setup failure'); },
+  };
+  await assert.rejects(listenAndAnnounceReady(bridge, () => {}, () => {}), /registration failed/);
+  assert.deepEqual(removed, ['daemon-frames']);
+});

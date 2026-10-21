@@ -115,7 +115,7 @@ function App() {
       setTransportStatus(status.connected ? 'Connected · local shell relay' : status.error ? `Connection failed: ${status.error}` : 'Disconnected');
     }).then((remove) => { unlisten.push(remove); setTransportStatus('Frontend listeners ready'); }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); console.error('S5 event listener setup failed', error); });
     return () => { unlisten.forEach((remove) => remove()); };
-  }, []);
+  }, [autobench]);
   useLayoutEffect(() => {
     const input = takeCommittedInput(pendingInputs, draft);
     if (!input) return;
