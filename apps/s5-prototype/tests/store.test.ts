@@ -1,6 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyPendingUpdates, eventCount, getRows, markRowsCommitted, mockCreationToMountedRowFollowupLatency, pushToken, reset, subscribe, tokenCount } from '../src/store';
+import { applyDaemonEvent, applyPendingUpdates, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, mockCreationToMountedRowFollowupLatency, pushToken, reset, subscribe, tokenCount } from '../src/store';
+
+test('B4 samples agent chunks and excludes lifecycle rows from its population', () => {
+  const updates: FrameRequestCallback[] = [];
+  const samples: FrameRequestCallback[] = [];
+  const previous = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => { updates.push(callback); return updates.length; };
+  try {
+    reset(0, 1);
+    applyDaemonEvent(1, { session_id: 's1', kind: 'session_created', payload: {} }, 1000);
+    applyDaemonEvent(2, { session_id: 's1', kind: 'agent_message_chunk', payload: { content: { text: 'chunk' } } }, 1001);
+    updates[0]!(performance.now());
+    markDaemonRowsCommitted(getRows().map((row) => row.id), (callback) => { samples.push(callback); return samples.length; }, () => 1_020, () => true);
+    assert.equal(samples.length, 1);
+    samples[0]!(0);
+    samples[1]!(0);
+    assert.equal(daemonReceiptToRafMs.length, 1);
+    reset(0, 1);
+  } finally {
+    globalThis.requestAnimationFrame = previous;
+  }
+});
 
 test('coalesces token deltas into one active message per stream and one store update per frame', () => {
   const callbacks: FrameRequestCallback[] = [];

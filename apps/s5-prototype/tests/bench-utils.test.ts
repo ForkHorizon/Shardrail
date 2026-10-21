@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { benchShouldFail, draftPreview, generatedTokenLoadReached, minimumGeneratedTokens, missingRequiredSamples, playwrightOutputPath, shouldWaitForDaemonStream, withScenarioConfiguration } from '../src/bench-utils';
+import { benchShouldFail, daemonStreamFinished, draftPreview, generatedTokenLoadReached, minimumGeneratedTokens, missingRequiredSamples, playwrightOutputPath, shouldWaitForDaemonStream, withScenarioConfiguration } from '../src/bench-utils';
 
 test('requires enough token deltas without requiring token events to grow the transcript', () => {
   const required = minimumGeneratedTokens(4, 6000);
@@ -13,6 +13,12 @@ test('only B4 waits for daemon stream delivery', () => {
   assert.equal(shouldWaitForDaemonStream(new URLSearchParams('events=50000'), 50_000), false);
   assert.equal(shouldWaitForDaemonStream(new URLSearchParams('events=50000&b4=1'), 50_000), true);
   assert.equal(shouldWaitForDaemonStream(new URLSearchParams('b4=1'), 0), false);
+});
+
+test('accepts stream completion after a clean disconnect and validates chunks separately from frame samples', () => {
+  assert.equal(daemonStreamFinished(true, 5_000, 5_000), true);
+  assert.equal(daemonStreamFinished(false, 5_000, 5_000), false);
+  assert.equal(daemonStreamFinished(true, 4_999, 5_000), false);
 });
 
 test('fails a benchmark when engines yield launch errors and no samples', () => {

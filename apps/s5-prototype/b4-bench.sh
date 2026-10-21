@@ -33,13 +33,14 @@ for events in "${event_sizes[@]}"; do
         temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/shardrail-b4.XXXXXX")
         SHARDRAIL_FAKE_ACP_STREAM_EVENTS="$chunks" "$daemon_bin" --data-dir "$temp_dir" --fake-acp-path "$fake_bin" >"$results_dir/b4-daemon-$name.log" 2>&1 &
         daemon_pid=$!
-        S5_SHARDRAIL_DATA_DIR="$temp_dir" SHARDRAIL_DAEMON="$daemon_bin" S5_BENCH_QUERY="events=$events&streams=$streams&duration=6000&autobench=1&run=$name&temperature=$temperature&b4=1" "$app" >"$results_dir/b4-app-$name.log" 2>&1 &
+        S5_SHARDRAIL_DATA_DIR="$temp_dir" SHARDRAIL_DAEMON="$daemon_bin" S5_BENCH_QUERY="events=$events&streams=$streams&duration=6000&autostart=0&autobench=1&run=$name&temperature=$temperature&b4=1" "$app" >"$results_dir/b4-app-$name.log" 2>&1 &
         app_pid=$!
         done_run=0
         for _ in $(seq 1 "$wait_seconds"); do
           if [ -s "$results_dir/b4-$name.json" ]; then done_run=1; break; fi
           sleep 1
         done
+        pkill -P "$app_pid" 2>/dev/null || true
         kill "$app_pid" 2>/dev/null || true
         pkill -P "$daemon_pid" 2>/dev/null || true
         kill "$daemon_pid" 2>/dev/null || true
@@ -49,7 +50,7 @@ for events in "${event_sizes[@]}"; do
         if [ "$done_run" != 1 ]; then
           printf '{"error":"B4 run timed out","events":%s,"streams":%s,"repetition":%s}\n' "$events" "$streams" "$repetition" >"$results_dir/b4-$name.json"
           failed=1
-        elif ! node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (r.b4?.count !== Number(process.argv[2])) process.exit(1)' "$results_dir/b4-$name.json" "$events"; then
+        elif ! node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (!r.b4?.count || r.daemonAgentChunkCount !== Number(process.argv[2])) process.exit(1)' "$results_dir/b4-$name.json" "$events"; then
           printf 'B4 scenario %s wrote incomplete daemon samples\n' "$name" >&2
           failed=1
         elif grep -q '"error"' "$results_dir/b4-$name.json"; then

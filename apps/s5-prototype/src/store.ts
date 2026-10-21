@@ -62,7 +62,7 @@ export function applyDaemonEvent(cursor: number, event: { session_id: string; ki
   const kind = event.kind === 'approval_requested' ? 'approval' : event.kind.includes('tool') ? 'tool' : 'message';
   const text = payload?.content?.text ?? JSON.stringify(event.payload);
   const row = { id, agent, kind, text, command: payload?.toolCallId ?? '', cwd: '', at: performance.now() } as EventRow;
-  if (receiptWallClockMs !== undefined && receiptWallClockMs !== null) daemonReceipts.set(id, receiptWallClockMs);
+  if (event.kind === 'agent_message_chunk' && receiptWallClockMs !== undefined && receiptWallClockMs !== null) daemonReceipts.set(id, receiptWallClockMs);
   pending.set(id, row);
   if (!raf) raf = requestAnimationFrame(() => {
     rows = applyPendingUpdates(rows, rowIndexById, [...pending.values()]);

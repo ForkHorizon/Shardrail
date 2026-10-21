@@ -6,10 +6,14 @@ import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
-test('B4 harness enables daemon-stream synchronization and rejects incomplete samples', () => {
+test('B4 harness disables mock streams and checks chunk delivery independently of virtualized samples', () => {
   const script = readFileSync('b4-bench.sh', 'utf8');
+  const app = readFileSync('src/main.tsx', 'utf8');
   assert.match(script, /S5_BENCH_QUERY=.*&b4=1/);
-  assert.match(script, /r\.b4\?\.count !== Number\(process\.argv\[2\]\)/);
+  assert.match(script, /&autostart=0/);
+  assert.match(script, /!r\.b4\?\.count \|\| r\.daemonAgentChunkCount !== Number\(process\.argv\[2\]\)/);
+  assert.match(script, /pkill -P "\$app_pid"[\s\S]*kill "\$app_pid"/);
+  assert.match(app, /if \(!query\.has\('b4'\)\) \{[\s\S]*el\.scrollTop =/);
 });
 
 test('Tauri harness exits unsuccessfully when a scenario times out', () => {

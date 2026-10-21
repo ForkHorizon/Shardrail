@@ -9,11 +9,11 @@ import { createPortal } from 'react-dom';
 import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, setDaemonAgentCount, setDaemonClockMapping, sortedLatency, tokenCount, useRows } from './store';
 import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameIntervalMs, percentile, supportsLongTaskEntries, takeCommittedInput } from './metrics-utils';
 import { createFrameSampler } from './frame-sampler';
-import { draftPreview, shouldWaitForDaemonStream } from './bench-utils';
+import { daemonStreamFinished, draftPreview, shouldWaitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 import './style.css';
 
-type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; userAgent: string };
+type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; daemonAgentChunkCount: number; userAgent: string };
 const started = performance.now();
 const observed = { longTasks: 0, maxLongTaskMs: 0, frames: [] as number[], commits: 0, commitMs: 0, inputs: [] as number[], firstFrame: [] as boolean[], firstFrameTimestamps: [] as number[], rafTimestampDeltas: [] as number[] };
 const pendingInputs: { startedAt: number; draft: string }[] = [];
@@ -41,7 +41,7 @@ function metrics(): Metrics {
   const inputs = [...observed.inputs].sort((a, b) => a - b);
   const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize;
   const b4 = [...daemonReceiptToRafMs].sort((a, b) => a - b), clock = daemonClockMapping();
-  return { firstTranscriptRenderOpportunityMs: (window as Window & { __firstTranscriptRenderOpportunityMs?: number }).__firstTranscriptRenderOpportunityMs ?? 0, longTasks: supportsLongTasks ? observed.longTasks : null, maxLongTaskMs: supportsLongTasks ? observed.maxLongTaskMs : null, frameP95: percentile(frames, .95), frameMax: frames.at(-1) ?? null, frameSamples: observed.frames.length, commitCount: observed.commits, commitMs: observed.commitMs, eventStoreCount: eventCount(), generatedTokens: tokenCount(), heapMB: memory ? +(memory / 1048576).toFixed(1) : null, mockCreationToMountedRowFollowupP95: percentile(ls, .95), composerP95: percentile(observed.inputs, .95), composerMin: inputs[0] ?? null, composerMax: inputs.at(-1) ?? null, composerSamples: observed.inputs.length, matchesByFirstFrame: observed.firstFrame.filter(Boolean).length, firstFrameSamples: observed.firstFrame.length, firstFrameDeltasMs: [...observed.firstFrameTimestamps], firstFrameRafTimestampDeltasMs: [...observed.rafTimestampDeltas], b4: { count: b4.length, medianMs: percentile(b4, .5), p95Ms: percentile(b4, .95), maxMs: b4.at(-1) ?? null, samplesMs: b4, clockOffsetMs: clock.offsetMs, clockUncertaintyMs: clock.uncertaintyMs }, userAgent: navigator.userAgent };
+  return { firstTranscriptRenderOpportunityMs: (window as Window & { __firstTranscriptRenderOpportunityMs?: number }).__firstTranscriptRenderOpportunityMs ?? 0, longTasks: supportsLongTasks ? observed.longTasks : null, maxLongTaskMs: supportsLongTasks ? observed.maxLongTaskMs : null, frameP95: percentile(frames, .95), frameMax: frames.at(-1) ?? null, frameSamples: observed.frames.length, commitCount: observed.commits, commitMs: observed.commitMs, eventStoreCount: eventCount(), generatedTokens: tokenCount(), heapMB: memory ? +(memory / 1048576).toFixed(1) : null, mockCreationToMountedRowFollowupP95: percentile(ls, .95), composerP95: percentile(observed.inputs, .95), composerMin: inputs[0] ?? null, composerMax: inputs.at(-1) ?? null, composerSamples: observed.inputs.length, matchesByFirstFrame: observed.firstFrame.filter(Boolean).length, firstFrameSamples: observed.firstFrame.length, firstFrameDeltasMs: [...observed.firstFrameTimestamps], firstFrameRafTimestampDeltasMs: [...observed.rafTimestampDeltas], b4: { count: b4.length, medianMs: percentile(b4, .5), p95Ms: percentile(b4, .95), maxMs: b4.at(-1) ?? null, samplesMs: b4, clockOffsetMs: clock.offsetMs, clockUncertaintyMs: clock.uncertaintyMs }, daemonAgentChunkCount, userAgent: navigator.userAgent };
 }
 Object.assign(window, { __s5Metrics: metrics, __s5ResetInputTrace: () => { observed.inputs.length = 0; observed.firstFrame.length = 0; observed.firstFrameTimestamps.length = 0; observed.rafTimestampDeltas.length = 0; pendingInputs.length = 0; }, __firstTranscriptRenderOpportunityMs: 0 });
 
@@ -112,6 +112,7 @@ function App() {
     }, (event: { payload: { connected: boolean; error?: string } }) => {
       const status = event.payload;
       (window as Window & { __daemonConnected?: boolean }).__daemonConnected = status.connected;
+      if (status.connected) (window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce = true;
       setTransportStatus(status.connected ? 'Connected · local shell relay' : status.error ? `Connection failed: ${status.error}` : 'Disconnected');
     }).then((remove) => { unlisten.push(remove); setTransportStatus('Frontend listeners ready'); }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); console.error('S5 event listener setup failed', error); });
     return () => { unlisten.forEach((remove) => remove()); };
@@ -149,14 +150,21 @@ function App() {
       if (autobench && shouldWaitForDaemonStream(query, count)) {
         setBenchStatus('Waiting for shell relay and daemon fake-agent stream');
         const deadline = performance.now() + 55_000;
-        while ((!(window as Window & { __daemonConnected?: boolean }).__daemonConnected || daemonAgentChunkCount < count) && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-        if (!(window as Window & { __daemonConnected?: boolean }).__daemonConnected || daemonAgentChunkCount < count) throw new Error(`Relay/stream incomplete: connected=${Boolean((window as Window & { __daemonConnected?: boolean }).__daemonConnected)}, chunks=${daemonAgentChunkCount}/${count}`);
+        while (daemonAgentChunkCount < count && performance.now() < deadline) {
+          const relayWindow = window as Window & { __daemonConnected?: boolean; __daemonConnectedOnce?: boolean };
+          if (relayWindow.__daemonConnectedOnce && relayWindow.__daemonConnected === false) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const connectedOnce = Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce);
+        if (!daemonStreamFinished(connectedOnce, daemonAgentChunkCount, count)) throw new Error(`Relay/stream incomplete: connectedOnce=${connectedOnce}, chunks=${daemonAgentChunkCount}/${count}`);
       }
       const el = document.querySelector<HTMLElement>('.transcript')!;
-      startFrameSampling();
-      for (let step = 0; step < 60; step++) {
-        el.scrollTop = (el.scrollTop + 14) % Math.max(1, el.scrollHeight - el.clientHeight);
-        await new Promise((resolve) => setTimeout(resolve, 16));
+      if (!query.has('b4')) {
+        startFrameSampling();
+        for (let step = 0; step < 60; step++) {
+          el.scrollTop = (el.scrollTop + 14) % Math.max(1, el.scrollHeight - el.clientHeight);
+          await new Promise((resolve) => setTimeout(resolve, 16));
+        }
       }
       if (autostart) await new Promise<void>((resolve) => {
         const waitForStreams = () => document.querySelector('footer')?.textContent?.includes('Streams running') ? window.setTimeout(waitForStreams, 50) : resolve();
@@ -173,7 +181,15 @@ function App() {
       const response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: runId, result }) });
       if (!response.ok) throw new Error(`Result receiver returned HTTP ${response.status}`);
       setBenchStatus('Results saved');
-    })().catch((error: unknown) => { setBenchStatus(`Run failed: ${String(error)}`); console.error('S5 automated run failed', error); });
+    })().catch(async (error: unknown) => {
+      setBenchStatus(`Run failed: ${String(error)}`);
+      console.error('S5 automated run failed', error);
+      if (autobench) await fetch('http://127.0.0.1:5174/result', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ filename: runId, result: { error: String(error), daemonAgentChunkCount, b4: { count: daemonReceiptToRafMs.length } } }),
+      }).catch(() => undefined);
+    });
     return () => { cancelled = true; };
   }, [ready, autostart, autobench, durationMs, count, streams, runId, query]);
   function profiler(_: string, __: string, duration: number) { observed.commits++; observed.commitMs += duration; }

@@ -25,6 +25,10 @@ export function shouldWaitForDaemonStream(query: URLSearchParams, events: number
   return query.has('b4') && events > 0;
 }
 
+export function daemonStreamFinished(connectedOnce: boolean, chunks: number, expected: number) {
+  return connectedOnce && chunks >= expected;
+}
+
 export function missingRequiredSamples(sample: { frameP95: number | null; mockCreationToMountedRowFollowupP95: number | null }) {
   return [sample.frameP95 === null && 'frameP95', sample.mockCreationToMountedRowFollowupP95 === null && 'mockCreationToMountedRowFollowupP95'].filter((value): value is string => Boolean(value));
 }
