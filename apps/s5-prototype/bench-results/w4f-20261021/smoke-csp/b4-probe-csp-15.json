@@ -1,0 +1,5 @@
+{
+  "blockedURI": "isolation-b71a19d3-55c7-434c-abd8-33173955016e://localhost",
+  "directive": "frame-src",
+  "disposition": "enforce"
+}

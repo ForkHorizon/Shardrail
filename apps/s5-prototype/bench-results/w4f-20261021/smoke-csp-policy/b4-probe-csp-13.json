@@ -1,0 +1,7 @@
+{
+  "blockedURI": "isolation-752fd2b6-4aad-49c6-919c-f35a6f59cae8://localhost",
+  "directive": "frame-src",
+  "disposition": "enforce",
+  "policy": "default-src 'self'; img-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:5174",
+  "document": "tauri://localhost?events=5000&streams=1&duration=6000&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"
+}
