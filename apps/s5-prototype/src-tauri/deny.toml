@@ -1,0 +1,37 @@
+# cargo-deny config for the S5 prototype ONLY (decision D63, approved by Daliys 2026-10-21).
+# The root workspace deny.toml is unchanged and stays strict.
+# Tauri transitively pulls in the crates below. We do not modify their files, so MPL-2.0
+# (file-level copyleft) puts no obligation on our proprietary code. Exceptions are pinned to
+# exact name + version: any new crate or version bump fails the check again for review.
+
+[advisories]
+version = 2
+ignore = [
+  # proc-macro-error 1.0.4 is unmaintained. Build-time proc-macro only, comes via Tauri
+  # (glib/gtk macros); never ships in the binary. D63.
+  { id = "RUSTSEC-2024-0370", reason = "D63: build-time only, transitive via Tauri" },
+]
+
+[licenses]
+version = 2
+allow = ["Apache-2.0", "BSD-3-Clause", "LicenseRef-Proprietary", "MIT", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.8
+exceptions = [
+  # D63: MPL-2.0 crates brought in by Tauri (wry/kuchikiki CSS parsing, dirs).
+  { crate = "cssparser@0.37.0", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros@0.7.1", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short@0.3.5", allow = ["MPL-2.0"] },
+  { crate = "selectors@0.38.0", allow = ["MPL-2.0"] },
+  { crate = "option-ext@0.2.0", allow = ["MPL-2.0"] },
+  # D63: build-time dependency of Tauri's build chain; permissive Apache-2.0 + LLVM exception.
+  { crate = "target-lexicon@0.12.16", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
