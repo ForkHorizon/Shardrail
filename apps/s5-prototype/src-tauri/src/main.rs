@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Listener, Webview};
 use uuid::Uuid;
@@ -272,13 +272,15 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let process_started = Instant::now();
     let query = std::env::var("S5_BENCH_QUERY").ok();
     eprintln!("S5_BENCH_QUERY={query:?}");
     tauri::Builder::default()
         .on_page_load(move |webview, payload| {
             eprintln!(
-                "S5 page event {:?} url={:?}",
+                "S5 page event {:?} elapsed_ms={} url={:?}",
                 payload.event(),
+                process_started.elapsed().as_secs_f64() * 1_000.0,
                 webview.url()
             );
             eprintln!(
@@ -308,8 +310,12 @@ pub fn run() {
                     let webview = webview.clone();
                     let query = query.clone();
                     let listener_webview = webview.clone();
+                    let ready_started = process_started;
                     let ready = ready_callback(Arc::new(AtomicBool::new(false)), move || {
-                        eprintln!("S5 frontend readiness event received");
+                        eprintln!(
+                            "S5 frontend readiness event received elapsed_ms={:.3}",
+                            ready_started.elapsed().as_secs_f64() * 1_000.0
+                        );
                         let webview = listener_webview.clone();
                         let query = query.clone();
                         std::thread::spawn(move || {
