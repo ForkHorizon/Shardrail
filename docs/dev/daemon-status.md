@@ -78,3 +78,19 @@ Ready-to-run night B4 matrix command (after release binaries and the packaged S5
 ```sh
 S5_B4_EVENTS="5000 50000" S5_B4_STREAMS="1 4 8" S5_B4_TEMPERATURES="cold warm" S5_B4_REPETITIONS=5 nice apps/s5-prototype/b4-bench.sh
 ```
+
+## W4-e review fixes (2026-10-21)
+
+- `b4-bench.sh` now passes `b4=1` and rejects results unless `b4.count` equals the requested event count. The shell relay is only registered for matching `autobench=1`, event-bearing B4 URLs, so B5 does not try to connect to a daemon.
+- The fake Tauri bridge test covers cleanup after one listener registers and the other fails. Rust headless tests exercise the matching `Started` page decision, deliver a fake `s5-ready` callback, and verify one relay start. The real B4 run remains deferred.
+- Protocol properties now round-trip every client frame variant, verify each transcript-bound nonce/key and negotiated version mutation invalidates the signature, and check cursor replay against randomized in-memory journals. Existing daemon tests continue to cover concurrent clients, slow-client isolation, repeated SIGKILL recovery, and the approval race.
+- The Tauri shell is an independent Cargo workspace, so root workspace commands and `cargo deny check` do not cover it. Run its checks separately:
+
+  ```sh
+  cargo fmt --manifest-path apps/s5-prototype/src-tauri/Cargo.toml -- --check
+  nice cargo clippy --manifest-path apps/s5-prototype/src-tauri/Cargo.toml --all-targets -- -D warnings
+  nice cargo test --manifest-path apps/s5-prototype/src-tauri/Cargo.toml
+  ```
+
+  `cargo deny check` from that workspace currently fails on Tauri transitive dependencies (`MPL-2.0` licenses and the unmaintained `proc-macro-error` advisory). Extending the repository's license/advisory policy for this spike is deferred; the root workspace `cargo deny check` passes.
+- Review-fix verification: root workspace 102 Rust tests passed (including 25 daemon integration tests in 5.54 s); standalone Tauri tests 4/4 passed and standalone Tauri Clippy passed. S5 Node tests passed 25/25 (1.66 s), lint passed without warnings, and production build passed (Vite retains the >500 kB chunk advisory). Formatting, contracts/client npm CI, client typecheck (4/4 tests), schema drift, shell syntax, and root `cargo deny check` passed. No GUI, browser, Playwright, B4 measurement, or provider/API was run.

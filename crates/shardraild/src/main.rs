@@ -1568,13 +1568,39 @@ mod tests {
 #[cfg(test)]
 mod protocol_property_tests {
     use super::{parse_client_frame, transcript_hash};
+    use ed25519_dalek::{Signer, SigningKey, Verifier};
     use proptest::prelude::*;
-    use shardrail_protocol::ClientFrame;
+    use shardrail_journal::Journal;
+    use shardrail_protocol::{
+        ApprovalResolutionRequest, ClientFrame, CommandRequest, DurableEvent,
+    };
+    use uuid::Uuid;
 
     proptest! {
         #[test]
-        fn newline_json_resume_frames_round_trip(cursor in any::<i64>()) {
-            let frame = ClientFrame::Resume { resume_after: cursor };
+        fn every_client_frame_variant_round_trips(
+            variant in 0u8..4,
+            bytes in prop::array::uniform16(any::<u8>()),
+            cursor in any::<i64>(),
+            text in ".{0,64}",
+            payload in any::<bool>(),
+        ) {
+            let id = Uuid::from_bytes(bytes);
+            let frame = match variant {
+                0 => ClientFrame::Authenticate { signature: text },
+                1 => ClientFrame::Request { request: CommandRequest {
+                    command_id: id,
+                    kind: text,
+                    expected_state: Some(cursor.to_string()),
+                    expected_turn_id: Some(id),
+                    payload: serde_json::json!({"value": payload}),
+                } },
+                2 => ClientFrame::ApprovalResolution { request: ApprovalResolutionRequest {
+                    approval_id: id,
+                    option_id: text,
+                } },
+                _ => ClientFrame::Resume { resume_after: cursor },
+            };
             let line = serde_json::to_string(&frame).unwrap();
             let decoded = parse_client_frame(&line).unwrap();
             prop_assert_eq!(decoded, frame);
@@ -1586,14 +1612,53 @@ mod protocol_property_tests {
             server_nonce in prop::array::uniform32(any::<u8>()),
             client_key in prop::array::uniform32(any::<u8>()),
             host_key in prop::array::uniform32(any::<u8>()),
+            signing_bytes in prop::array::uniform32(any::<u8>()),
         ) {
             let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
             let fields = [hex(&client_nonce), hex(&server_nonce), hex(&client_key), hex(&host_key)];
             let digest = transcript_hash([1, 1, 1], &fields[0], &fields[1], &fields[2], &fields[3]).unwrap();
-            let changed_nonce = format!("{}{}", if fields[0].starts_with("00") { "01" } else { "00" }, &fields[0][2..]);
-            let changed = transcript_hash([1, 1, 1], &changed_nonce, &fields[1], &fields[2], &fields[3]).unwrap();
-            prop_assert_ne!(digest, changed);
+            for changed_index in 0..fields.len() {
+                let mut changed_fields = fields.clone();
+                let first = if changed_fields[changed_index].starts_with("00") { "01" } else { "00" };
+                changed_fields[changed_index] = format!("{first}{}", &changed_fields[changed_index][2..]);
+                let changed = transcript_hash([1, 1, 1], &changed_fields[0], &changed_fields[1], &changed_fields[2], &changed_fields[3]).unwrap();
+                prop_assert_ne!(digest, changed);
+            }
+            let changed_version = transcript_hash([1, 1, 2], &fields[0], &fields[1], &fields[2], &fields[3]).unwrap();
+            prop_assert_ne!(digest, changed_version);
+            let signing_key = SigningKey::from_bytes(&signing_bytes);
+            let signature = signing_key.sign(&digest);
+            prop_assert!(signing_key.verifying_key().verify(&digest, &signature).is_ok());
+            prop_assert!(signing_key.verifying_key().verify(&changed_version, &signature).is_err());
             prop_assert!(transcript_hash([1, 1, 1], "00", &fields[1], &fields[2], &fields[3]).is_err());
+        }
+
+        #[test]
+        fn journal_resume_returns_each_event_after_the_cursor(
+            event_count in 0usize..32,
+            cursor in -2i64..34,
+        ) {
+            let mut journal = Journal::open(":memory:").unwrap();
+            let epoch = journal.journal_epoch().unwrap();
+            let host = journal.host_id().unwrap();
+            for index in 0..event_count {
+                journal.append_event(&DurableEvent {
+                    event_id: 0,
+                    journal_epoch: epoch,
+                    host_id: host,
+                    session_id: Uuid::nil(),
+                    schema_version: 1,
+                    kind: "test_event".into(),
+                    occurred_at_ms: index as i64,
+                    provider_ref: None,
+                    causation: None,
+                    redaction_flags: Vec::new(),
+                    payload: serde_json::json!({"index": index}),
+                }).unwrap();
+            }
+            let replayed = journal.events_after(cursor).unwrap();
+            let expected = (1..=event_count as i64).filter(|id| *id > cursor).collect::<Vec<_>>();
+            prop_assert_eq!(replayed.iter().map(|event| event.event_id).collect::<Vec<_>>(), expected);
         }
     }
 

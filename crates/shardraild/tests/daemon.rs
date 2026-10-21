@@ -526,11 +526,15 @@ fn real_daemon_creates_streams_recovers_and_rejects_second_instance() {
 }
 
 #[test]
-fn concurrent_authenticated_clients_all_receive_the_durable_sequence() {
-    const CLIENTS: usize = 24;
+fn concurrent_authenticated_clients_keep_up_while_slow_clients_stall() {
+    const CLIENTS: usize = 40;
+    const SLOW_CLIENTS: usize = 4;
     let dir = tempdir().unwrap();
     let client = add_client(dir.path());
     let mut daemon = start_daemon(dir.path());
+    let stalled: Vec<_> = (0..SLOW_CLIENTS)
+        .map(|_| handshake(dir.path(), None, 0, &client).0)
+        .collect();
     let path = dir.path().to_path_buf();
     let workers: Vec<_> = (0..CLIENTS)
         .map(|_| {
@@ -562,6 +566,7 @@ fn concurrent_authenticated_clients_all_receive_the_durable_sequence() {
         let cursors = worker.join().unwrap();
         assert_eq!(cursors, (1..=CLIENTS as i64).collect::<Vec<_>>());
     }
+    drop(stalled);
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
