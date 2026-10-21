@@ -1564,3 +1564,44 @@ mod tests {
         assert!(parse_client_frame(frame).is_err());
     }
 }
+
+#[cfg(test)]
+mod protocol_property_tests {
+    use super::{parse_client_frame, transcript_hash};
+    use proptest::prelude::*;
+    use shardrail_protocol::ClientFrame;
+
+    proptest! {
+        #[test]
+        fn newline_json_resume_frames_round_trip(cursor in any::<i64>()) {
+            let frame = ClientFrame::Resume { resume_after: cursor };
+            let line = serde_json::to_string(&frame).unwrap();
+            let decoded = parse_client_frame(&line).unwrap();
+            prop_assert_eq!(decoded, frame);
+        }
+
+        #[test]
+        fn transcript_binds_all_authentication_fields(
+            client_nonce in prop::array::uniform32(any::<u8>()),
+            server_nonce in prop::array::uniform32(any::<u8>()),
+            client_key in prop::array::uniform32(any::<u8>()),
+            host_key in prop::array::uniform32(any::<u8>()),
+        ) {
+            let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            let fields = [hex(&client_nonce), hex(&server_nonce), hex(&client_key), hex(&host_key)];
+            let digest = transcript_hash([1, 1, 1], &fields[0], &fields[1], &fields[2], &fields[3]).unwrap();
+            let changed_nonce = format!("{}{}", if fields[0].starts_with("00") { "01" } else { "00" }, &fields[0][2..]);
+            let changed = transcript_hash([1, 1, 1], &changed_nonce, &fields[1], &fields[2], &fields[3]).unwrap();
+            prop_assert_ne!(digest, changed);
+            prop_assert!(transcript_hash([1, 1, 1], "00", &fields[1], &fields[2], &fields[3]).is_err());
+        }
+    }
+
+    #[test]
+    fn client_frames_reject_unknown_fields_and_trailing_json_values() {
+        assert!(
+            parse_client_frame(r#"{"kind":"resume","resume_after":0,"scope":"full"}"#).is_err()
+        );
+        assert!(parse_client_frame(r#"{"kind":"resume","resume_after":0} {}"#).is_err());
+    }
+}

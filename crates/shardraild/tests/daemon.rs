@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use shardrail_journal::Journal;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use uuid::Uuid;
 
+#[derive(Clone)]
 struct TestClient {
     id: Uuid,
     public_key: String,
@@ -521,6 +523,99 @@ fn real_daemon_creates_streams_recovers_and_rejects_second_instance() {
     assert_eq!(replayed["kind"], "durable_event");
     daemon.kill().unwrap();
     daemon.wait().unwrap();
+}
+
+#[test]
+fn concurrent_authenticated_clients_all_receive_the_durable_sequence() {
+    const CLIENTS: usize = 24;
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+    let path = dir.path().to_path_buf();
+    let workers: Vec<_> = (0..CLIENTS)
+        .map(|_| {
+            let path = path.clone();
+            let client = client.clone();
+            thread::spawn(move || {
+                let (mut stream, mut reader, _) = handshake(&path, None, 0, &client);
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"kind":"request","request":{
+                        "command_id":Uuid::now_v7(),"kind":"session.create",
+                        "expected_state":null,"expected_turn_id":null,"payload":{}
+                    }})
+                )
+                .unwrap();
+                let mut cursors = Vec::new();
+                while cursors.len() < CLIENTS {
+                    let frame = read_json(&mut reader);
+                    if frame["kind"] == "durable_event" {
+                        cursors.push(frame["cursor"].as_i64().unwrap());
+                    }
+                }
+                cursors
+            })
+        })
+        .collect();
+    for worker in workers {
+        let cursors = worker.join().unwrap();
+        assert_eq!(cursors, (1..=CLIENTS as i64).collect::<Vec<_>>());
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn repeated_sigkill_restarts_replay_an_intact_journal() {
+    const RESTARTS: usize = 8;
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_daemon(dir.path());
+    let mut epoch = None;
+    for created in 0..RESTARTS {
+        let (mut stream, mut reader, hello) = handshake(dir.path(), epoch, 0, &client);
+        epoch = Some(Uuid::parse_str(hello["journal_epoch"].as_str().unwrap()).unwrap());
+        assert_eq!(hello["cursor"], created as i64);
+        writeln!(stream, "{}", json!({"kind":"resume","resume_after":0})).unwrap();
+        for cursor in 1..=created {
+            let event = read_json(&mut reader);
+            assert_eq!(event["kind"], "durable_event");
+            assert_eq!(event["cursor"], cursor as i64);
+        }
+        writeln!(
+            stream,
+            "{}",
+            json!({"kind":"request","request":{
+                "command_id":Uuid::now_v7(),"kind":"session.create",
+                "expected_state":null,"expected_turn_id":null,"payload":{}
+            }})
+        )
+        .unwrap();
+        let mut accepted = false;
+        let mut created_event = false;
+        while !accepted || !created_event {
+            let frame = read_json(&mut reader);
+            accepted |= frame["kind"] == "command_accepted";
+            created_event |=
+                frame["kind"] == "durable_event" && frame["event"]["kind"] == "session_created";
+        }
+        drop(stream);
+        daemon.kill().unwrap();
+        daemon.wait().unwrap();
+        daemon = start_daemon(dir.path());
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    let journal = Journal::open(dir.path().join("journal.sqlite3")).unwrap();
+    let events = journal.events_after(0).unwrap();
+    assert_eq!(events.len(), RESTARTS);
+    assert!(
+        events
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.event_id == index as i64 + 1)
+    );
 }
 
 #[test]
