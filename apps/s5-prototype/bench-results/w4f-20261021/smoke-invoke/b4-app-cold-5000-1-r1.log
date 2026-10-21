@@ -1,0 +1,10 @@
+S5_BENCH_QUERY=Some("events=5000&streams=1&duration=6000&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1")
+S5 page event Started url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Started tauri://localhost
+S5 page event Finished url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Finished tauri://localhost
+S5 page event Started url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=1&duration=6000&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Started tauri://localhost?events=5000&streams=1&duration=6000&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1
+S5 matching B4 page load started
+S5 page event Finished url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=1&duration=6000&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Finished tauri://localhost?events=5000&streams=1&duration=6000&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1

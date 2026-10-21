@@ -1,13 +1,13 @@
 # S5 — UI stack under load
 
 - **Spike:** S5 (10 §2) · **Measurement date:** 2026-10-21 · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
-- **Code:** `spikes/s5-ui/` (not committed) · **Status:** B3 measured; W4-d B5 50k×4 recheck meets target; B4 release rerun remains blocked before measurement
+- **Code:** `apps/s5-prototype/` · **Status:** B3 measured; W4-d B5 50k×4 recheck meets target; W4-f B4 live readiness smoke failed before measurement
 
 ## 1. Goal and scope
 
 Measure the React 19 / TypeScript / Vite prototype in the real Tauri 2 macOS release app (system WKWebView) and in Playwright WebKit and Chromium. The workload includes an empty transcript, 5,000 or 50,000 events, and 1, 4, or 8 mock streams at 75 tokens/s per stream. No provider account, credentials, model, or model API was used; streams are deterministic local fixtures.
 
-This note records B3 and B5 results from the S5 prototype. It does not change D3 or select a stack fallback. The B4 endpoint was corrected to a second rAF callback after React commits a live-tail row; the prior callback-only measurements ended before paint. The local event-creation follow-up metric remains a separate render proxy.
+This note records B3 and B5 results and the failed W4-f B4 readiness attempt from the S5 prototype. It does not change D3 or select a stack fallback. The B4 endpoint was corrected to a second rAF callback after React commits a live-tail row; the prior callback-only measurements ended before paint. The local event-creation follow-up metric remains a separate render proxy.
 
 ## 2. Method
 
@@ -94,9 +94,11 @@ Against the proposed 180 MB idle physical-footprint ceiling, the worst observed 
 
 The intended native method connects the release app to the daemon through a Tauri shell relay over its Unix socket. The relay uses an Ed25519 client key registered in a per-run temporary data directory. Durable fake-agent events carry daemon wall-clock receipt timestamps; five `Date.now()`/`performance.now()` samples map daemon time to the page clock. The corrected endpoint is entry to a second rAF callback after the row commits. That callback is after the frame containing the row had a paint opportunity, so it is a valid conservative paint-opportunity proxy. It does not measure completed paint or display scanout and cannot alone prove the literal painted-frame budget. Clock mapping uncertainty is emitted in the result JSON; with no completed sample result, no run-specific uncertainty is available.
 
-The original cold/warm × 5k/50k events × 1/4/8 streams × five repetitions matrix is withdrawn: automated scrolling mounted old virtualized rows seconds after their daemon receipt, and those scroll-time mounts were counted as B4 latency. Daemon subscribers also polled every 100 ms. The implementation now follows the live tail and wakes subscribers after appends. A follow-up release smoke used a dedicated fake-agent daemon and an explicit `b4=1` gate, but the Rust relay's frontend-ready event was never received; logs show the listener registered but no relay started. No latency samples were written. This is an IPC startup failure, not a measured latency result.
+The original cold/warm × 5k/50k events × 1/4/8 streams × five repetitions matrix is withdrawn: automated scrolling mounted old virtualized rows seconds after their daemon receipt, and those scroll-time mounts were counted as B4 latency. Daemon subscribers also polled every 100 ms. The implementation now follows the live tail and wakes subscribers after appends.
 
-No valid B4 result table is available. The prior raw JSON remains for audit only and must not be used as a performance result. W4-d release attempts, including logs and failed smoke placeholders, are in the worktree's ignored `spikes/s5-ui/results-w4d/` directory.
+W4-f built the packaged macOS release app and launched it through `apps/s5-prototype/b4-bench.sh` for three cold 5k×1 smoke attempts with `b4=1`. Each per-run JSON explicitly reports a timeout. Rust logs confirm the matching B4 URL loaded; two runs also log readiness-listener registration, while an exploratory invoke build logs the matching page start. No run logged frontend readiness receipt, relay startup, socket authentication, daemon frames, or a result. All three failures, app logs, and daemon logs are retained in `apps/s5-prototype/bench-results/w4f-20261021/`. The frontend callback failure remains unexplained; exploratory listener/command changes were not retained.
+
+The 60-cell matrix was not started because the smoke did not prove the live UI-to-daemon path. There are no valid B4 samples, median/p95 values, or ≤50 ms verdict. The second-rAF endpoint remains a paint-opportunity proxy, not proof of completed paint or display scanout. No B5 rerun was attempted. The prior raw JSON and W4-d attempts remain audit-only and must not be used as a B4 result.
 
 B5's 50k×4 recheck completed five repetitions per launch group in the packaged release app, with the original 50k events, four local mock streams, and unchanged 16.67 ms first-frame criterion. Cold repetitions matched 30/30 each (raw input-to-rAF p95: 15, 14, 13, 15, 15 ms; group 150/150, 100%). Warm repetitions matched 30/30, 30/30, 30/30, 30/30, and 29/30 (raw p95: 15, 14, 14, 15, 14 ms; group 149/150, 99.33%). Combined: 299/300 (99.67%), above D58's ≥95% first-frame budget. The five-run median/nearest-rank p95 of per-run raw p95s were 15/15 ms cold and 14/15 ms warm. Raw records are in `spikes/s5-ui/results-w4d/b5-recheck/`.
 
@@ -108,7 +110,7 @@ The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up 
 
 - **B3 idle:** The whole Tauri/WebKit process tree measures below 180 MB physical footprint in all five new samples, with 61.229 MB of worst-sample headroom. Loaded 50k×8 usage is separately reported and exceeds 180 MB.
 - **B5:** The original broad matrix did not meet the ≥95% first-frame budget for every native scenario. Its 50k×4 row is superseded by the focused W4-d rerun, which matched 299/300 (99.67%). This does not replace results for the other scenarios. The original matrix's native aggregate was 2,096/2,100; note `spikes/reviews4/n3-final.md` quotes 2,099/2,100 and WebKit 1,734/1,880, while original result files give 2,096/2,100 and 1,368/1,880. WebKit had 512 first-frame misses across 1,880 inputs; warm 5k×8 and 50k scenarios showed raw run-level p95s around 371–401 ms. Chromium met the first-frame criterion in all 1,880 inputs and stayed below 10 ms raw maxima. Strict `≤16 ms` is near the nominal 60 Hz frame interval of 16.67 ms, so the owner should decide whether to specify a raw-time limit, a first-frame rate, or both. The owner adopted the first-frame-rate wording as D58 (2026-10-20).
-- **B4:** No valid target verdict. The earlier matrix used delayed scroll mounts and included a 100 ms daemon polling delay. The corrected second-rAF endpoint is a paint-opportunity proxy, not proof of completed paint. The packaged release smoke still did not start the native relay because the frontend-ready event did not reach its Rust listener; median/p95 are unavailable against the ≤50 ms budget.
+- **B4:** No valid target verdict. The earlier matrix used delayed scroll mounts and included a 100 ms daemon polling delay. The corrected second-rAF endpoint is a paint-opportunity proxy, not proof of completed paint. Three W4-f packaged-release smokes timed out before frontend readiness reached the relay, so the full matrix did not run and median/p95 are unavailable against the ≤50 ms budget.
 - **Stack decision:** D49's B4 requirement remains open until the corrected measurement matrix is rerun. No stack decision follows from the withdrawn B4 values. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating B5 as final user-perceived latency evidence. No decision register entry was changed.
 
 ## 5. Reproduction
@@ -116,7 +118,7 @@ The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up 
 From the repository root:
 
 ```sh
-cd spikes/s5-ui
+cd apps/s5-prototype
 npm ci
 npx playwright install chromium webkit
 npm test
