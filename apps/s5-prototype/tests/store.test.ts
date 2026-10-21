@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyDaemonEvent, applyPendingUpdates, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, mockCreationToMountedRowFollowupLatency, pushToken, reset, subscribe, tokenCount } from '../src/store';
+import { applyDaemonEvent, applyPendingUpdates, daemonReceiptToRafMs, eventCount, getDaemonAgentChunkCount, getRows, markDaemonRowsCommitted, markRowsCommitted, mockCreationToMountedRowFollowupLatency, pushToken, recordDaemonAgentChunk, reset, subscribe, tokenCount } from '../src/store';
+
+test('B4 completion reads live daemon chunk progress after stream events arrive', () => {
+  reset(0, 1);
+  const readProgress = getDaemonAgentChunkCount;
+  assert.equal(readProgress(), 0);
+  recordDaemonAgentChunk();
+  assert.equal(readProgress(), 1);
+  reset(0, 1);
+});
 
 test('B4 samples agent chunks and excludes lifecycle rows from its population', () => {
   const updates: FrameRequestCallback[] = [];

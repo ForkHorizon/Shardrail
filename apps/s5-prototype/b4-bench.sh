@@ -40,10 +40,8 @@ for events in "${event_sizes[@]}"; do
           if [ -s "$results_dir/b4-$name.json" ]; then done_run=1; break; fi
           sleep 1
         done
-        pkill -P "$app_pid" 2>/dev/null || true
-        kill "$app_pid" 2>/dev/null || true
-        pkill -P "$daemon_pid" 2>/dev/null || true
-        kill "$daemon_pid" 2>/dev/null || true
+        bash cleanup-bench-processes.sh "$app_pid"
+        bash cleanup-bench-processes.sh "$daemon_pid"
         wait "$app_pid" 2>/dev/null || true
         wait "$daemon_pid" 2>/dev/null || true
         rm -rf "$temp_dir"

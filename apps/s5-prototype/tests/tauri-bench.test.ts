@@ -1,19 +1,42 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 
 test('B4 harness disables mock streams and checks chunk delivery independently of virtualized samples', () => {
   const script = readFileSync('b4-bench.sh', 'utf8');
   const app = readFileSync('src/main.tsx', 'utf8');
+  assert.match(app, /while \(getDaemonAgentChunkCount\(\) < count/);
   assert.match(script, /S5_BENCH_QUERY=.*&b4=1/);
   assert.match(script, /&autostart=0/);
   assert.match(script, /!r\.b4\?\.count \|\| r\.daemonAgentChunkCount !== Number\(process\.argv\[2\]\)/);
-  assert.match(script, /pkill -P "\$app_pid"[\s\S]*kill "\$app_pid"/);
+  assert.match(script, /cleanup-bench-processes\.sh "\$app_pid"/);
   assert.match(app, /if \(!query\.has\('b4'\)\) \{[\s\S]*el\.scrollTop =/);
+});
+
+test('benchmark cleanup kills a process tree and confirms the root is gone', async () => {
+  const pidFile = join(tmpdir(), `s5-cleanup-${process.pid}.pid`);
+  const root = spawn('bash', ['-c', `sleep 60 & echo $! > '${pidFile}'; wait`], { stdio: 'ignore' });
+  try {
+    for (let attempt = 0; !existsSync(pidFile) && attempt < 200; attempt++) await delay(10);
+    assert.equal(existsSync(pidFile), true, 'process tree did not start');
+    const childPid = Number(readFileSync(pidFile, 'utf8').trim());
+    const rootExited = new Promise<void>((resolveExit) => root.once('exit', () => resolveExit()));
+    const result = spawnSync('bash', ['cleanup-bench-processes.sh', String(root.pid)], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, 0, result.stderr);
+    await rootExited;
+    for (const pid of [root.pid!, childPid]) {
+      const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+      assert.ok(!state || state.startsWith('Z'), `process ${pid} is still running (${state})`);
+    }
+  } finally {
+    root.kill('SIGKILL');
+    rmSync(pidFile, { force: true });
+  }
 });
 
 test('Tauri harness exits unsuccessfully when a scenario times out', () => {

@@ -47,8 +47,7 @@ for events in "${event_sizes[@]}"; do
         ps -Ao pid,ppid,%cpu,rss,command | grep -E '/s5-ui|com\.apple\.WebKit\.(WebContent|Networking|GPU)' >>"$results_dir/tauri-$name-processes.txt" || true
         sleep 1
       done
-      kill "$pid" 2>/dev/null || true
-      pkill -x s5-ui 2>/dev/null || true
+      bash cleanup-bench-processes.sh "$pid"
       wait "$pid" 2>/dev/null || true
       if [ "$done_run" != 1 ]; then
         printf '{"error":"Tauri run did not write results within %s seconds","events":%s,"streams":%s,"repetition":%s}\n' "$wait_seconds" "$events" "$streams" "$repetition" >"$results_dir/tauri-$name.json"
