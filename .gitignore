@@ -4,3 +4,8 @@
 /.cargo-home/
 /.npm-cache/
 node_modules/
+/apps/s5-prototype/node_modules/
+/apps/s5-prototype/dist/
+/apps/s5-prototype/src-tauri/target/
+/apps/s5-prototype/src-tauri/gen/
+/apps/s5-prototype/results*/

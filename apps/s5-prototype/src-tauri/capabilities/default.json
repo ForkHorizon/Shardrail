@@ -1,0 +1,1 @@
+{"identifier":"default","description":"Minimal S5 window capability","windows":["main"],"permissions":["core:default","core:event:default"]}
