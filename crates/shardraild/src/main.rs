@@ -1617,18 +1617,19 @@ mod protocol_property_tests {
             let hex = |bytes: &[u8]| bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
             let fields = [hex(&client_nonce), hex(&server_nonce), hex(&client_key), hex(&host_key)];
             let digest = transcript_hash([1, 1, 1], &fields[0], &fields[1], &fields[2], &fields[3]).unwrap();
+            let signing_key = SigningKey::from_bytes(&signing_bytes);
+            let signature = signing_key.sign(&digest);
+            prop_assert!(signing_key.verifying_key().verify(&digest, &signature).is_ok());
             for changed_index in 0..fields.len() {
                 let mut changed_fields = fields.clone();
                 let first = if changed_fields[changed_index].starts_with("00") { "01" } else { "00" };
                 changed_fields[changed_index] = format!("{first}{}", &changed_fields[changed_index][2..]);
                 let changed = transcript_hash([1, 1, 1], &changed_fields[0], &changed_fields[1], &changed_fields[2], &changed_fields[3]).unwrap();
                 prop_assert_ne!(digest, changed);
+                prop_assert!(signing_key.verifying_key().verify(&changed, &signature).is_err());
             }
             let changed_version = transcript_hash([1, 1, 2], &fields[0], &fields[1], &fields[2], &fields[3]).unwrap();
             prop_assert_ne!(digest, changed_version);
-            let signing_key = SigningKey::from_bytes(&signing_bytes);
-            let signature = signing_key.sign(&digest);
-            prop_assert!(signing_key.verifying_key().verify(&digest, &signature).is_ok());
             prop_assert!(signing_key.verifying_key().verify(&changed_version, &signature).is_err());
             prop_assert!(transcript_hash([1, 1, 1], "00", &fields[1], &fields[2], &fields[3]).is_err());
         }
