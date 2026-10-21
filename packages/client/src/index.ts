@@ -63,10 +63,13 @@ function frameReader(socket: Socket) {
   const waiting: { resolve: (line: string) => void; reject: (error: Error) => void }[] = [];
   const queued: string[] = [];
   let failure: Error | undefined;
+  const failureListeners = new Set<(error: Error) => void>();
   const fail = (error: Error) => {
+    if (failure) return;
     failure ??= error;
     queued.length = 0;
     waiting.splice(0).forEach(({ reject }) => reject(error));
+    failureListeners.forEach((listener) => listener(error));
   };
   socket.on("data", (data: Buffer) => {
     buffer = Buffer.concat([buffer, data]);
@@ -89,12 +92,19 @@ function frameReader(socket: Socket) {
   });
   socket.on("error", fail);
   socket.on("close", () => fail(failure ?? new Error("daemon socket closed")));
-  return () => new Promise<string>((resolve, reject) => {
-    const line = queued.shift();
-    if (line !== undefined) resolve(line);
-    else if (failure) reject(failure);
-    else waiting.push({ resolve, reject });
-  });
+  return {
+    nextFrame: () => new Promise<string>((resolve, reject) => {
+      const line = queued.shift();
+      if (line !== undefined) resolve(line);
+      else if (failure) reject(failure);
+      else waiting.push({ resolve, reject });
+    }),
+    onFailure(listener: (error: Error) => void) {
+      failureListeners.add(listener);
+      if (failure) listener(failure);
+      return () => failureListeners.delete(listener);
+    },
+  };
 }
 
 function writeFrame(socket: Socket, frame: ClientFrame | import("@shardrail/contracts").ClientHello) {
@@ -105,7 +115,8 @@ function writeFrame(socket: Socket, frame: ClientFrame | import("@shardrail/cont
 export async function connect(options: ClientOptions): Promise<Client> {
   if (options.privateKey.byteLength !== 32) throw new Error("client private key must be a 32-byte Ed25519 seed");
   const socket = openSocket(options.socketPath);
-  const nextFrame = frameReader(socket);
+  const reader = frameReader(socket);
+  const { nextFrame } = reader;
   await new Promise<void>((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
@@ -133,12 +144,15 @@ export async function connect(options: ClientOptions): Promise<Client> {
 
   const listeners = new Set<(frame: DaemonFrame) => void>();
   const errorListeners = new Set<(error: Error) => void>();
-  const listenerWaiters: (() => void)[] = [];
+  const listenerWaiters: { resolve: () => void; reject: (error: Error) => void }[] = [];
   let connectionError: Error | undefined;
-  socket.once("close", () => {
-    connectionError ??= new Error("daemon socket closed");
-    errorListeners.forEach((listener) => listener(connectionError!));
-  });
+  const reportFailure = (error: Error) => {
+    if (connectionError) return;
+    connectionError = error;
+    listenerWaiters.splice(0).forEach(({ reject }) => reject(error));
+    errorListeners.forEach((listener) => listener(error));
+  };
+  reader.onFailure(reportFailure);
   let cursor = options.cursor ?? 0;
   let resumed = false;
   socket.pause();
@@ -146,7 +160,7 @@ export async function connect(options: ClientOptions): Promise<Client> {
     while (true) {
       try {
         const line = await nextFrame();
-        if (!listeners.size) await new Promise<void>((resolve) => listenerWaiters.push(resolve));
+        if (!listeners.size) await new Promise<void>((resolve, reject) => listenerWaiters.push({ resolve, reject }));
         if (line) {
           const frame = JSON.parse(line) as DaemonFrame;
           if (frame.kind === "durable_event" && frame.cursor <= cursor) continue;
@@ -155,8 +169,7 @@ export async function connect(options: ClientOptions): Promise<Client> {
         }
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
-        connectionError = failure;
-        errorListeners.forEach((listener) => listener(failure));
+        reportFailure(failure);
         break;
       }
     }
@@ -166,19 +179,17 @@ export async function connect(options: ClientOptions): Promise<Client> {
     onFrame(listener) {
       const wasPaused = listeners.size === 0;
       listeners.add(listener);
-      listenerWaiters.splice(0).forEach((resume) => resume());
+      listenerWaiters.splice(0).forEach(({ resolve }) => resolve());
       if (wasPaused && resumed) writeFrame(socket, { kind: "resume", resume_after: cursor });
       resumed = true;
       socket.resume();
       return () => {
         listeners.delete(listener);
-        if (listeners.size === 0) socket.pause();
       };
     },
     onError(listener) {
       errorListeners.add(listener);
       if (connectionError) listener(connectionError);
-      socket.resume();
       return () => errorListeners.delete(listener);
     },
     reconnect() { return connect({ ...options, cursor, journalEpoch: host.journal_epoch }); },

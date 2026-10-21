@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -52,7 +53,7 @@ test("surfaces daemon authentication errors", async () => {
   }
 });
 
-test("reports bounded replay overflow with an explicit reconnect error", async () => {
+test("reports bounded replay overflow once with an explicit reconnect error", async () => {
   const data = await mkdtemp(join(tmpdir(), "shardrail-overflow-daemon-"));
   const socketPath = join(data, "overflow.sock");
   const hostSeed = new Uint8Array(32).fill(9);
@@ -79,7 +80,8 @@ test("reports bounded replay overflow with an explicit reconnect error", async (
           })}\n`));
         } else {
           const backlog = Array.from({ length: 4096 }, (_, cursor) => `${JSON.stringify({ kind: "durable_event", cursor: cursor + 1, event: {} })}\n`).join("");
-          socket.write(`${JSON.stringify({ kind: "authenticated" })}\n${backlog}`);
+          socket.write(`${JSON.stringify({ kind: "authenticated" })}\n`);
+          setTimeout(() => socket.write(backlog), 100);
         }
       }
     });
@@ -89,11 +91,21 @@ test("reports bounded replay overflow with an explicit reconnect error", async (
   try {
     await new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject));
     client = await connect({ socketPath, clientId: randomUUID(), privateKey: new Uint8Array(32), hostPublicKey });
+    let prematureError: Error | undefined;
+    client.onError((error) => { prematureError = error; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(prematureError, undefined, "registering an error handler must not resume frame reads");
+    let errorCount = 0;
     const overflow = new Promise<Error>((resolveError, reject) => {
       client!.onError((error) => { clearTimeout(timeout); resolveError(error); });
       timeout = setTimeout(() => reject(new Error("overflow error was not surfaced")), 2_000);
     });
+    let unsubscribe = () => {};
+    unsubscribe = client.onFrame(() => unsubscribe());
     assert.match((await overflow).message, /replay buffer overflow.*reconnect to resync/);
+    client.onError(() => { errorCount++; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(errorCount, 1);
   } finally {
     clearTimeout(timeout);
     client?.close();
@@ -113,11 +125,21 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     assert.ok(clientId);
     const privateKey = new Uint8Array(await readFile(join(data, `client-${clientId}.key`)));
     const daemon = spawn(daemonBin, ["--data-dir", data, "--fake-acp-path", fakeBin], { stdio: ["ignore", "ignore", "pipe"] });
+    const daemonExit = once(daemon, "exit");
     children.push(daemon);
-    await once(daemon.stderr!, "data");
+    await new Promise<void>((resolveSocket, reject) => {
+      const deadline = setTimeout(() => reject(new Error("daemon socket did not become ready")), 10_000);
+      const check = () => {
+        if (existsSync(join(data, "shardraild.sock"))) { clearTimeout(deadline); resolveSocket(); }
+        else if (daemon.exitCode !== null) { clearTimeout(deadline); reject(new Error(`daemon exited before socket was ready: ${daemon.exitCode}`)); }
+        else setTimeout(check, 25);
+      };
+      check();
+    });
 
     const options = { socketPath: join(data, "shardraild.sock"), clientId, privateKey, hostPublicKey: values.host_public_key! };
     await assert.rejects(connect({ ...options, hostPublicKey: "00".repeat(32) }), /does not match the pinned key/);
+    await assert.rejects(connect({ ...options, privateKey: new Uint8Array(32).fill(7) }), /client key is not authorized/);
     client = await connect(options);
     assert.equal(client.host.scope, "full");
     const firstEvent = new Promise<Extract<import("@shardrail/contracts").DaemonFrame, { kind: "durable_event" }>>((resolveEvent) => {
@@ -202,14 +224,43 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
       const off = () => listeners.forEach((unsubscribe) => unsubscribe());
     });
     const [firstListenerCursors, secondListenerCursors] = await replayed;
-    assert.deepEqual(firstListenerCursors, [...firstListenerCursors].sort((a, b) => a - b));
+    assert.deepEqual(firstListenerCursors, Array.from({ length: 41 }, (_, index) => index + 1));
     assert.deepEqual(secondListenerCursors, firstListenerCursors);
+    const allowedApproval = new Promise<{ approvalId: string; optionId: string }>((resolveApproval, reject) => {
+      const deadline = setTimeout(() => { offAllowed(); reject(new Error("fake agent did not request the second approval")); }, 10_000);
+      const offAllowed = client!.onFrame((frame) => {
+        if (frame.kind !== "durable_event" || frame.event.kind !== "approval_requested") return;
+        const payload = frame.event.payload as { approval_id: string; options: { option_id: string; decision: string }[] };
+        const allowOption = payload.options.find((option) => option.decision === "allow");
+        if (!allowOption) { clearTimeout(deadline); offAllowed(); reject(new Error("fake agent approval has no allow option")); return; }
+        clearTimeout(deadline);
+        offAllowed();
+        resolveApproval({ approvalId: payload.approval_id, optionId: allowOption.option_id });
+      });
+    });
+    client.request({ command_id: randomUUID(), kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
+    const { approvalId: allowedId, optionId } = await allowedApproval;
+    const allowed = new Promise<void>((resolveApproval, reject) => {
+      const deadline = setTimeout(() => { offAllowed(); reject(new Error("allow approval resolution was not acknowledged")); }, 10_000);
+      const offAllowed = client!.onFrame((frame) => {
+        if (frame.kind === "approval_resolved" && frame.approval_id === allowedId) {
+          clearTimeout(deadline);
+          offAllowed();
+          resolveApproval();
+        }
+      });
+    });
+    client.resolveApproval({ approval_id: allowedId, option_id: optionId });
+    await allowed;
+    let disconnectCount = 0;
     const connectionError = new Promise<Error>((resolveError) => {
-      const off = client!.onError((error) => { off(); resolveError(error); });
+      client!.onError((error) => { disconnectCount++; resolveError(error); });
     });
     daemon.kill("SIGKILL");
-    await once(daemon, "exit");
+    await daemonExit;
     assert.match((await connectionError).message, /socket closed|ECONNRESET/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(disconnectCount, 1);
     client.close();
   } finally {
     client?.close();
