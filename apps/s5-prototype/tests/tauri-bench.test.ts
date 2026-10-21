@@ -6,6 +6,12 @@ import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
+test('B4 harness enables daemon-stream synchronization and rejects incomplete samples', () => {
+  const script = readFileSync('b4-bench.sh', 'utf8');
+  assert.match(script, /S5_BENCH_QUERY=.*&b4=1/);
+  assert.match(script, /r\.b4\?\.count !== Number\(process\.argv\[2\]\)/);
+});
+
 test('Tauri harness exits unsuccessfully when a scenario times out', () => {
   const resultsDir = mkdtempSync(join(tmpdir(), 's5-tauri-bench-test-'));
   try {

@@ -7,13 +7,15 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tauri::{Emitter, Listener, Webview};
 use uuid::Uuid;
 
-static RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static RELAY_LISTENER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 fn data_dir() -> PathBuf {
@@ -30,7 +32,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("invalid hex".into());
     }
     (0..value.len())
@@ -170,14 +172,40 @@ fn request_sessions(writer: &mut UnixStream, streams: usize) -> Result<(), Strin
     }
     Ok(())
 }
-fn should_register_ready_listener(is_page_load_started: bool, query_matches: bool) -> bool {
-    is_page_load_started && query_matches
+fn should_register_ready_listener(
+    is_page_load_started: bool,
+    query_matches: bool,
+    query: &str,
+) -> bool {
+    is_page_load_started
+        && query_matches
+        && is_b4_query(query)
+        && query.contains("autobench=1")
+        && query.contains("events=")
+}
+
+fn is_b4_query(query: &str) -> bool {
+    query.split('&').any(|part| part == "b4=1")
 }
 
 fn handle_frontend_ready(started: &AtomicBool, start: impl FnOnce()) {
     if !started.swap(true, Ordering::Relaxed) {
         start();
     }
+}
+
+fn ready_callback(
+    started: Arc<AtomicBool>,
+    start: impl Fn() + Send + Sync + 'static,
+) -> impl Fn() + Send + Sync + 'static {
+    move || handle_frontend_ready(&started, &start)
+}
+
+fn register_ready_listener(
+    register: impl FnOnce(&'static str, Box<dyn Fn() + Send + Sync>),
+    ready: impl Fn() + Send + Sync + 'static,
+) {
+    register("s5-ready", Box::new(ready));
 }
 
 fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
@@ -212,7 +240,7 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
                 }
             };
             received += 1;
-            if received % 1_000 == 0 {
+            if received.is_multiple_of(1_000) {
                 eprintln!("S5 relay received {received} frames");
             }
             if frames_tx.send(frame).is_err() {
@@ -265,7 +293,7 @@ pub fn run() {
                 });
                 if !query_matches {
                     if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                        let _ = webview.eval(&format!(
+                        let _ = webview.eval(format!(
                             "if (location.search !== {desired:?}) location.search = {desired:?};"
                         ));
                     }
@@ -274,30 +302,33 @@ pub fn run() {
                 if should_register_ready_listener(
                     payload.event() == tauri::webview::PageLoadEvent::Started,
                     query_matches,
-                ) && query.contains("autobench=1")
-                    && query.contains("events=")
-                    && !RELAY_LISTENER_REGISTERED.swap(true, Ordering::Relaxed)
+                    query,
+                ) && !RELAY_LISTENER_REGISTERED.swap(true, Ordering::Relaxed)
                 {
                     let webview = webview.clone();
                     let query = query.clone();
                     let listener_webview = webview.clone();
-                    webview.listen("s5-ready", move |_| {
+                    let ready = ready_callback(Arc::new(AtomicBool::new(false)), move || {
                         eprintln!("S5 frontend readiness event received");
-                        handle_frontend_ready(&RELAY_STARTED, || {
-                            let webview = listener_webview.clone();
-                            let query = query.clone();
-                            std::thread::spawn(move || {
-                                if let Err(error) = start_b4_relay(&webview, &query) {
-                                    eprintln!("S5 relay failed: {error}");
-                                    dispatch(
-                                        &webview,
-                                        "daemon-status",
-                                        &json!({"connected":false,"error":error}),
-                                    );
-                                }
-                            });
+                        let webview = listener_webview.clone();
+                        let query = query.clone();
+                        std::thread::spawn(move || {
+                            if let Err(error) = start_b4_relay(&webview, &query) {
+                                eprintln!("S5 relay failed: {error}");
+                                dispatch(
+                                    &webview,
+                                    "daemon-status",
+                                    &json!({"connected":false,"error":error}),
+                                );
+                            }
                         });
                     });
+                    register_ready_listener(
+                        move |event, ready| {
+                            webview.listen(event, move |_| ready());
+                        },
+                        ready,
+                    );
                     eprintln!("S5 frontend readiness listener registered");
                 }
             }
@@ -312,14 +343,34 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_frontend_ready, should_register_ready_listener};
+    use super::{
+        handle_frontend_ready, is_b4_query, ready_callback, register_ready_listener,
+        should_register_ready_listener,
+    };
     use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 
     #[test]
     fn readiness_listener_is_registered_before_frontend_effects_run() {
-        assert!(should_register_ready_listener(true, true));
-        assert!(!should_register_ready_listener(false, true));
-        assert!(!should_register_ready_listener(true, false));
+        assert!(should_register_ready_listener(
+            true,
+            true,
+            "autobench=1&events=5&b4=1"
+        ));
+        assert!(!should_register_ready_listener(
+            true,
+            true,
+            "autobench=1&events=5"
+        ));
+        assert!(!should_register_ready_listener(
+            false,
+            true,
+            "autobench=1&events=5&b4=1"
+        ));
+        assert!(!should_register_ready_listener(
+            true,
+            false,
+            "autobench=1&events=5&b4=1"
+        ));
     }
 
     #[test]
@@ -334,5 +385,34 @@ mod tests {
         }
         assert!(started.load(Ordering::SeqCst));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn only_b4_queries_start_the_daemon_relay() {
+        assert!(is_b4_query("autobench=1&events=5000&b4=1"));
+        assert!(!is_b4_query("autobench=1&events=5000"));
+        assert!(!is_b4_query("autobench=1&events=5000&notb4=1"));
+    }
+
+    #[test]
+    fn matching_started_page_registers_a_callback_that_starts_the_relay_on_event() {
+        let query = "autobench=1&events=5000&b4=1";
+        let relay_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback = ready_callback(Arc::new(AtomicBool::new(false)), {
+            let relay_starts = Arc::clone(&relay_starts);
+            move || {
+                relay_starts.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let mut registered = None;
+        if should_register_ready_listener(true, true, query) {
+            register_ready_listener(|event, ready| registered = Some((event, ready)), callback);
+        }
+        assert!(registered.is_some());
+        let (event, on_s5_ready) = registered.unwrap();
+        assert_eq!(event, "s5-ready");
+        on_s5_ready();
+        on_s5_ready();
+        assert_eq!(relay_starts.load(Ordering::SeqCst), 1);
     }
 }
