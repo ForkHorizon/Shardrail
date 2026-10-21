@@ -1,0 +1,15 @@
+S5_BENCH_QUERY=Some("events=10&streams=1&duration=6000&autostart=0&autobench=1&run=cold-10-1-r1&temperature=cold&b4=1")
+S5 page event Started elapsed_ms=181.25012500000003 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Started tauri://localhost
+S5 page event Finished elapsed_ms=229.993375 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Finished tauri://localhost
+S5 page event Started elapsed_ms=282.310833 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=10&streams=1&duration=6000&autostart=0&autobench=1&run=cold-10-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Started tauri://localhost?events=10&streams=1&duration=6000&autostart=0&autobench=1&run=cold-10-1-r1&temperature=cold&b4=1
+S5 frontend readiness listener registered
+S5 page event Finished elapsed_ms=282.53662499999996 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=10&streams=1&duration=6000&autostart=0&autobench=1&run=cold-10-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Finished tauri://localhost?events=10&streams=1&duration=6000&autostart=0&autobench=1&run=cold-10-1-r1&temperature=cold&b4=1
+S5 frontend readiness event received elapsed_ms=359.121
+S5 starting daemon relay
+S5 paired client 01a15f9c-5e93-7478-bfe7-082b89938af4
+S5 authenticated daemon socket
+S5 session requests sent
