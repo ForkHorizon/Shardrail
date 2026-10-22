@@ -16,7 +16,7 @@ Tests run library logic only. They do not create windows, run an `NSApplication`
 
 ## B4 night run
 
-Build the daemon and fake agent first with `cargo build --release -p shardraild -p fake-acp`; build this package with `swift build -c release`. Validate configuration without launching processes:
+Build the daemon and fake agent first with `cargo build --release -p shardraild -p shardrail-fake-acp`; build this package with `swift build -c release`. Validate configuration without launching processes:
 
 ```sh
 bash apps/s5-swift/scripts/b4-bench-swift.sh --check
