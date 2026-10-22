@@ -35,6 +35,13 @@ public struct DurableRow: Codable, Equatable, Identifiable {
     public init(cursor: Int, event: Event, receipt_wall_clock_ms: Int64? = nil) { self.cursor = cursor; self.event = event; self.receipt_wall_clock_ms = receipt_wall_clock_ms }
 }
 
+struct DurableFrame: Decodable {
+    let kind: String?
+    let cursor: Int?
+    let event: DurableRow.Event?
+    let receipt_wall_clock_ms: Int64?
+}
+
 public enum JSONValue: Codable, Equatable {
     case string(String), number(Double), bool(Bool), object([String: JSONValue]), array([JSONValue]), null
     public init(from decoder: Decoder) throws {

@@ -16,7 +16,7 @@ public struct B4Sampler {
     public private(set) var receivedChunks = 0
     public private(set) var visible = false
     public private(set) var samples: [Double] = []
-    private var scheduled: [Int: (frame: Int, receiptMs: Double)] = [:]
+    private var scheduled: [Int: (callbacks: Int, commitMs: Double, receiptMs: Double)] = [:]
     private var seen = Set<Int>()
     public init(expectedChunks: Int) { self.expectedChunks = expectedChunks }
     public var sampleFloor: Int { min(expectedChunks, max(20, Int(ceil(Double(expectedChunks) * 0.01)))) }
@@ -24,15 +24,20 @@ public struct B4Sampler {
     public mutating func received(_ row: DurableRow) {
         if row.event.kind == "agent_message_chunk" { receivedChunks += 1 }
     }
-    public mutating func committedVisible(_ row: DurableRow, frame: Int, receiptMonoMs: Double) {
+    public mutating func committedVisible(_ row: DurableRow, commitMonoMs: Double, receiptMonoMs: Double) {
         guard visible, row.event.kind == "agent_message_chunk", !seen.contains(row.cursor), scheduled[row.cursor] == nil else { return }
-        scheduled[row.cursor] = (frame + 2, receiptMonoMs)
+        scheduled[row.cursor] = (0, commitMonoMs, receiptMonoMs)
     }
-    public mutating func frameEntered(_ frame: Int, monotonicMs: Double) {
-        let ready = scheduled.filter { frame >= $0.value.frame }.map(\.key)
-        for id in ready {
-            if visible, let receipt = scheduled[id]?.receiptMs { samples.append(monotonicMs - receipt); seen.insert(id) }
-            scheduled.removeValue(forKey: id)
+    public mutating func frameEntered(monotonicMs: Double) {
+        for id in Array(scheduled.keys) {
+            guard var sample = scheduled[id], monotonicMs > sample.commitMs else { continue }
+            sample.callbacks += 1
+            if sample.callbacks == 2 {
+                if visible { samples.append(monotonicMs - sample.receiptMs); seen.insert(id) }
+                scheduled.removeValue(forKey: id)
+            } else {
+                scheduled[id] = sample
+            }
         }
     }
     public var gatesPass: Bool { visible && receivedChunks >= expectedChunks && samples.count >= sampleFloor }

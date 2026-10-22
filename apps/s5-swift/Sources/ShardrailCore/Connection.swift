@@ -10,6 +10,7 @@ public final class DaemonConnection {
         guard privateKeySeed.count == 32, let hostData = Data(hex: hostPublicKey), hostData.count == 32 else { throw ProtocolError.invalidHex }
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.EIO) }
+        do { try Self.configureNoSigPipe(fd: fd) } catch { Darwin.close(fd); fd = -1; throw error }
         var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(socketPath.utf8) + [0]
         guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw POSIXError(.ENAMETOOLONG) }
@@ -31,10 +32,17 @@ public final class DaemonConnection {
     public func send(_ value: [String: Any]) throws { try writeJSON(value) }
     public func readRows(_ handler: (DurableRow) -> Void) throws {
         while true {
-            let object = try JSONSerialization.jsonObject(with: readLine()) as? [String: Any] ?? [:]
-            guard object["kind"] as? String == "durable_event", let cursor = object["cursor"] as? Int, let eventData = try? JSONSerialization.data(withJSONObject: object["event"] ?? [:]), let event = try? JSONDecoder().decode(DurableRow.Event.self, from: eventData) else { continue }
-            handler(DurableRow(cursor: cursor, event: event, receipt_wall_clock_ms: object["receipt_wall_clock_ms"] as? Int64))
+            let frame = try Self.decodeFrame(readLine())
+            guard frame.kind == "durable_event", let cursor = frame.cursor, let event = frame.event else { continue }
+            handler(DurableRow(cursor: cursor, event: event, receipt_wall_clock_ms: frame.receipt_wall_clock_ms))
         }
+    }
+    static func decodeFrame(_ data: Data) throws -> DurableFrame {
+        do { return try JSONDecoder().decode(DurableFrame.self, from: data) } catch { throw ProtocolError.malformedFrame }
+    }
+    static func configureNoSigPipe(fd: Int32) throws {
+        var enabled: Int32 = 1
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
     public func close() { if fd >= 0 { Darwin.close(fd); fd = -1 } }
     private func writeJSON(_ value: [String: Any]) throws {

@@ -12,13 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     private var sampler: B4Sampler?
     private var mapping = ClockMapping(samples: [])
     private var link: CVDisplayLink?
-    private var frame = 0
+    private var framePending = false
+    private var pendingFrameMs = 0.0
     private var resultWritten = false
     private var connection: DaemonConnection?
     private var args: [String: String] = [:]
     private let lock = NSLock()
     func applicationDidFinishLaunching(_ notification: Notification) {
-        args = Dictionary(uniqueKeysWithValues: CommandLine.arguments.dropFirst().compactMap { $0.split(separator: "=", maxSplits: 1).count == 2 ? (String($0.split(separator: "=", maxSplits: 1)[0]), String($0.split(separator: "=", maxSplits: 1)[1])) : nil })
+        args = keyValueArguments(Array(CommandLine.arguments.dropFirst()))
         let b4 = args["b4"] == "1", count = Int(args["events"] ?? "0") ?? 0
         sampler = b4 ? B4Sampler(expectedChunks: count) : nil; sampler?.setVisible(true)
         let samples = (0..<5).map { _ -> (wallMs: Double, before: Double, after: Double) in let before = ProcessInfo.processInfo.systemUptime * 1000, wall = Date().timeIntervalSince1970 * 1000, after = ProcessInfo.processInfo.systemUptime * 1000; return (wall, before, after) }
@@ -47,13 +48,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         CVDisplayLinkSetOutputCallback(created, { _, _, _, _, _, context in
             let app = Unmanaged<AppDelegate>.fromOpaque(context!).takeUnretainedValue()
             let callbackMs = ProcessInfo.processInfo.systemUptime * 1000
-            DispatchQueue.main.async { app.onFrame(monotonicMs: callbackMs) }; return kCVReturnSuccess
+            app.queueFrame(monotonicMs: callbackMs); return kCVReturnSuccess
         }, Unmanaged.passUnretained(self).toOpaque()); CVDisplayLinkStart(created)
     }
     @objc @MainActor private func occlusionChanged() { sampler?.setVisible(window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)) }
+    private func queueFrame(monotonicMs: Double) {
+        lock.lock(); pendingFrameMs = monotonicMs
+        guard !framePending else { lock.unlock(); return }
+        framePending = true; lock.unlock()
+        DispatchQueue.main.async {
+            self.lock.lock(); let latestFrameMs = self.pendingFrameMs; self.framePending = false; self.lock.unlock()
+            self.onFrame(monotonicMs: latestFrameMs)
+        }
+    }
     @MainActor private func onFrame(monotonicMs: Double) {
         sampler?.setVisible(window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible))
-        frame += 1
         lock.lock(); let batch = sampler == nil ? pending : Array(pending.prefix(96)); pending.removeFirst(batch.count); lock.unlock()
         if !batch.isEmpty {
             let visibleRows = table.rows(in: table.visibleRect); let wasAtTail = store.rows.isEmpty || visibleRows.location == NSNotFound || NSMaxRange(visibleRows) >= store.rows.count
@@ -65,10 +74,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             let visible = table.rows(in: table.visibleRect)
             for index in visible.location..<NSMaxRange(visible) where index >= 0 && index < store.rows.count {
                 let row = store.rows[index]
-                if let receipt = row.receipt_wall_clock_ms { sampler?.committedVisible(row, frame: frame, receiptMonoMs: mapping.monotonicMs(forWallMs: Double(receipt))) }
+                if let receipt = row.receipt_wall_clock_ms { sampler?.committedVisible(row, commitMonoMs: ProcessInfo.processInfo.systemUptime * 1000, receiptMonoMs: mapping.monotonicMs(forWallMs: Double(receipt))) }
             }
         }
-        sampler?.frameEntered(frame, monotonicMs: monotonicMs)
+        sampler?.frameEntered(monotonicMs: monotonicMs)
         if sampler?.gatesPass == true { saveResult() }
     }
     private func connectAndRead() {
