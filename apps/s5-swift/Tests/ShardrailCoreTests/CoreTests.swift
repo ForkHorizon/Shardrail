@@ -31,6 +31,18 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(enabled, 1)
     }
 
+    func testFailedConnectionClosesSocketDescriptor() {
+        let openDescriptors = { (0..<Int(getdtablesize())).filter { fcntl(Int32($0), F_GETFD) != -1 } }
+        let before = openDescriptors()
+        XCTAssertThrowsError(try DaemonConnection(
+            socketPath: "/tmp/\(String(repeating: "x", count: 256))",
+            clientID: "client",
+            privateKeySeed: Data(repeating: 0, count: 32),
+            hostPublicKey: String(repeating: "00", count: 32)
+        ))
+        XCTAssertEqual(openDescriptors(), before)
+    }
+
     func testPercentileEmptyAndBoundaryFractions() {
         XCTAssertNil(percentile([], 0.5))
         XCTAssertEqual(percentile([1, 2, 3], 0), 1)

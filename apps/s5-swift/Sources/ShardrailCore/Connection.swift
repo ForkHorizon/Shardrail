@@ -10,7 +10,9 @@ public final class DaemonConnection {
         guard privateKeySeed.count == 32, let hostData = Data(hex: hostPublicKey), hostData.count == 32 else { throw ProtocolError.invalidHex }
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.EIO) }
-        do { try Self.configureNoSigPipe(fd: fd) } catch { Darwin.close(fd); fd = -1; throw error }
+        var initialized = false
+        defer { if !initialized { close() } }
+        try Self.configureNoSigPipe(fd: fd)
         var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(socketPath.utf8) + [0]
         guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { throw POSIXError(.ENAMETOOLONG) }
@@ -27,6 +29,7 @@ public final class DaemonConnection {
         try writeJSON(["kind": "authenticate", "signature": privateKey.signature(for: digest).hex])
         let auth = try JSONSerialization.jsonObject(with: readLine()) as? [String: Any]
         guard auth?["kind"] as? String == "authenticated" else { throw ProtocolError.authRejected }
+        initialized = true
     }
     deinit { close() }
     public func send(_ value: [String: Any]) throws { try writeJSON(value) }
