@@ -25,7 +25,8 @@ test('accepts stream completion after a clean disconnect and validates chunks se
 
 test('B4 waits for a useful sample set after chunk delivery finishes', async () => {
   assert.equal(minimumB4Samples(3), 3);
-  assert.equal(minimumB4Samples(5_000), 20);
+  assert.equal(minimumB4Samples(5_000), 50);
+  assert.equal(minimumB4Samples(50_000), 500);
   let elapsed = 0;
   let samples = 0;
   await waitForB4Samples(3, () => samples, async () => { samples++; elapsed += 50; }, () => elapsed);
