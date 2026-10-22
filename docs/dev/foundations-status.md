@@ -21,7 +21,7 @@ Branch: `p1a/coordinator`
 
 ## Stubbed or deferred
 
-- W4-k-3 implements a local-only S5 desktop pairing gate over the existing daemon `client add/remove` registry commands. It pins the daemon public key, displays a SHA-256 fingerprint, expires unconfirmed prompts after 60 seconds, and blocks reconnect after a key change. The plan's one-time-code pairing for remote `limited` clients is still Phase 2; there is no pairing-request/approval API or owner-defined fingerprint confirmation format for that scope. This prototype uses explicit on-screen fingerprint review for its local `full` client and does not claim the Phase 2 flow.
+- W4-k-3 implements a local-only S5 desktop pairing gate with explicit fingerprint review and a public-key-only daemon registration API. Pairing confirmation expires after 60 seconds, stale registrations can be removed, and paired relay disconnects on unpair. The desktop private key currently uses a `0600` file in the S5 client data directory; the plan's keychain requirement remains open because adding a platform keychain dependency requires owner authorization. Remote `limited` pairing and production review remain deferred.
 
 - This is foundations plus the coordinator core: no daemon binary, network/client gateway, provider adapter, process supervisor, real agent, UI, workspace service, or production application wiring.
 - Journal schema migration/versioning beyond additive column upgrades, salvage UI, retention, and purge/VACUUM are not implemented yet. Journal epoch creation and validation are implemented.
@@ -59,7 +59,7 @@ Branch: `p1a/coordinator`
 
 ## Final summary
 
-P1a foundations, the coordinator core, M01 directory/lock guards, the authenticated `shardraild` gateway, fake ACP approvals through the daemon, and the TypeScript socket client are present on `p1a/coordinator`. Production provider adapters and interactive pairing UI remain outside this slice. See [daemon-status.md](daemon-status.md). No real provider executable or model API was used.
+P1a foundations, the coordinator core, M01 directory/lock guards, the authenticated `shardraild` gateway, fake ACP approvals through the daemon, and the TypeScript socket client are present on `p1a/coordinator`. Production provider adapters and production/remote pairing remain outside this slice. See [daemon-status.md](daemon-status.md). No real provider executable or model API was used.
 
 ### W4-k-2 Swift/AppKit fallback spike (2026-10-22)
 

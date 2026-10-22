@@ -3,7 +3,7 @@ mod stream_store;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
@@ -18,6 +18,14 @@ use tauri::{ipc::Channel, State};
 use tauri::{Emitter, Webview};
 use uuid::Uuid;
 
+type RelayControl = Arc<Mutex<Option<UnixStream>>>;
+
+struct RelayContext<'a> {
+    webview: Webview,
+    store: State<'a, SharedStreamStore>,
+    relay: State<'a, RelayControl>,
+}
+
 #[tauri::command]
 fn b4_trace(stage: String, data: Value) {
     if std::env::var("S5_BENCH_QUERY").is_ok_and(|query| b4_trace_enabled(&query)) {
@@ -29,10 +37,39 @@ fn data_dir() -> PathBuf {
     std::env::var_os("S5_SHARDRAIL_DATA_DIR")
         .or_else(|| std::env::var_os("SHARDRAIL_DATA_DIR"))
         .map(PathBuf::from)
+        .unwrap_or_else(default_data_dir)
+}
+
+fn default_data_dir() -> PathBuf {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Shardrail")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("shardrail")
+    }
+}
+
+fn client_key_dir() -> PathBuf {
+    std::env::var_os("S5_CLIENT_DATA_DIR")
+        .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                .join("Library/Application Support/Shardrail")
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/Shardrail S5/client-keys")
+            } else {
+                std::env::var_os("XDG_DATA_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".local/share"))
+                    .join("shardrail-s5/client-keys")
+            }
         })
+}
+
+fn client_key_path(id: &str) -> PathBuf {
+    client_key_dir().join(format!("client-{id}.key"))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -123,14 +160,31 @@ fn read_pairing_record(data: &Path) -> Result<Option<Value>, String> {
 }
 
 fn daemon_identity(data: &Path) -> Result<(String, String), String> {
-    let bytes: [u8; 32] = fs::read(data.join("host.key"))
-        .map_err(|_| "daemon identity unavailable")?
-        .try_into()
-        .map_err(|_| "invalid daemon identity")?;
-    let public_key = encode_hex(&SigningKey::from_bytes(&bytes).verifying_key().to_bytes());
-    let fingerprint = encode_hex(&Sha256::digest(decode_hex(&public_key)?));
-    Ok((public_key, format!("SHA256:{fingerprint}")))
+    let daemon = std::env::var("SHARDRAIL_DAEMON").unwrap_or_else(|_| "shardraild".into());
+    let output = cli(&daemon, data, &["identity"])?;
+    if !output.status.success() {
+        return Err("daemon identity unavailable".into());
+    }
+    let public_key = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("host_public_key="))
+        .ok_or("daemon identity unavailable")?
+        .to_owned();
+    if public_key.len() != 64 || decode_hex(&public_key).map_or(true, |key| key.len() != 32) {
+        return Err("invalid daemon identity".into());
+    }
+    Ok((public_key.clone(), daemon_fingerprint(&public_key)?))
 }
+
+fn daemon_fingerprint(public_key: &str) -> Result<String, String> {
+    let key = decode_hex(public_key)?;
+    if key.len() != 32 {
+        return Err("invalid daemon identity".into());
+    }
+    Ok(format!("SHA256:{}", encode_hex(&Sha256::digest(key))))
+}
+
+static PAIRING_LOCK: Mutex<()> = Mutex::new(());
 
 #[tauri::command]
 fn pairing_info() -> Result<Value, String> {
@@ -161,6 +215,7 @@ fn pairing_info() -> Result<Value, String> {
 }
 
 fn register_pairing(data: &Path, expected_public_key: &str) -> Result<String, String> {
+    let _pairing = PAIRING_LOCK.lock().map_err(|_| "pairing unavailable")?;
     let (daemon_public_key, _) = daemon_identity(data)?;
     if expected_public_key != daemon_public_key {
         return Err("daemon identity changed; review its fingerprint again".into());
@@ -168,10 +223,26 @@ fn register_pairing(data: &Path, expected_public_key: &str) -> Result<String, St
     let previous = read_pairing_record(data)?
         .and_then(|record| record["clientId"].as_str().map(str::to_owned));
     let daemon = std::env::var("SHARDRAIL_DAEMON").unwrap_or_else(|_| "shardraild".into());
+    let mut seed = [0u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut seed))
+        .map_err(|_| "could not create client key")?;
+    let signing = SigningKey::from_bytes(&seed);
+    seed.fill(0);
+    let client_public_key = encode_hex(&signing.verifying_key().to_bytes());
     let output = cli(
         &daemon,
         data,
-        &["client", "add", "--label", "S5 desktop", "--scope", "full"],
+        &[
+            "client",
+            "add",
+            "--label",
+            "S5 desktop",
+            "--scope",
+            "full",
+            "--public-key",
+            &client_public_key,
+        ],
     )
     .map_err(|_| "daemon client registration failed")?;
     if !output.status.success() {
@@ -190,11 +261,30 @@ fn register_pairing(data: &Path, expected_public_key: &str) -> Result<String, St
         let _ = cli(&daemon, data, &["client", "remove", &client_id]);
         return Err("daemon identity changed; review its fingerprint again".into());
     }
+    let key_dir = client_key_dir();
+    fs::create_dir_all(&key_dir).map_err(|_| "could not save client key")?;
+    fs::set_permissions(&key_dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| "could not save client key")?;
+    let key_path = client_key_path(&client_id);
+    let mut key_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&key_path)
+        .map_err(|_| "could not save client key")?;
+    if key_file
+        .write_all(&signing.to_bytes())
+        .and_then(|_| key_file.sync_all())
+        .is_err()
+    {
+        let _ = fs::remove_file(&key_path);
+        let _ = cli(&daemon, data, &["client", "remove", &client_id]);
+        return Err("could not save client key".into());
+    }
     if let Some(previous) = previous.as_ref().filter(|previous| *previous != &client_id) {
-        let removed = cli(&daemon, data, &["client", "remove", previous])
-            .is_ok_and(|output| output.status.success());
-        if !removed {
+        if remove_client(&daemon, data, previous).is_err() {
             let _ = cli(&daemon, data, &["client", "remove", &client_id]);
+            let _ = fs::remove_file(&key_path);
             return Err("could not replace the existing client registration".into());
         }
     }
@@ -212,6 +302,7 @@ fn register_pairing(data: &Path, expected_public_key: &str) -> Result<String, St
         Ok(file) => file,
         Err(_) => {
             let _ = cli(&daemon, data, &["client", "remove", &client_id]);
+            let _ = fs::remove_file(&key_path);
             return Err("could not save pairing".into());
         }
     };
@@ -223,7 +314,11 @@ fn register_pairing(data: &Path, expected_public_key: &str) -> Result<String, St
     {
         let _ = fs::remove_file(temporary);
         let _ = cli(&daemon, data, &["client", "remove", &client_id]);
+        let _ = fs::remove_file(&key_path);
         return Err("could not save pairing".into());
+    }
+    if let Some(previous) = previous.as_deref() {
+        let _ = fs::remove_file(client_key_path(previous));
     }
     Ok(client_id)
 }
@@ -234,27 +329,47 @@ fn pair_desktop(expected_public_key: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn unpair_desktop() -> Result<(), String> {
+fn unpair_desktop(relay: State<'_, RelayControl>) -> Result<(), String> {
+    let _pairing = PAIRING_LOCK.lock().map_err(|_| "pairing unavailable")?;
+    stop_relay(relay.inner())?;
     let data = data_dir();
     let Some(record) = read_pairing_record(&data)? else {
         return Ok(());
     };
     if let Some(client_id) = record["clientId"].as_str() {
         let daemon = std::env::var("SHARDRAIL_DAEMON").unwrap_or_else(|_| "shardraild".into());
-        let output = cli(&daemon, &data, &["client", "remove", client_id])
-            .map_err(|_| "daemon client removal failed")?;
-        if !output.status.success() {
-            return Err("daemon client removal failed".into());
-        }
+        remove_client(&daemon, &data, client_id)?;
+        let _ = fs::remove_file(client_key_path(client_id));
     }
     fs::remove_file(pairing_record(&data)).map_err(|_| "could not clear pairing record".into())
+}
+
+fn stop_relay(relay: &RelayControl) -> Result<(), String> {
+    if let Some(socket) = relay.lock().map_err(|_| "relay unavailable")?.take() {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
+    Ok(())
+}
+
+fn remove_client(daemon: &str, data: &Path, client_id: &str) -> Result<(), String> {
+    let output = cli(daemon, data, &["client", "remove", client_id])
+        .map_err(|_| "daemon client removal failed")?;
+    if client_removal_succeeded(output.status.success(), &output.stderr) {
+        Ok(())
+    } else {
+        Err("daemon client removal failed".into())
+    }
+}
+
+fn client_removal_succeeded(success: bool, stderr: &[u8]) -> bool {
+    success || String::from_utf8_lossy(stderr).contains("client key not found")
 }
 fn connect_socket(
     data: &Path,
     id: &str,
     host_expected: &str,
 ) -> Result<(Value, UnixStream), String> {
-    let seed: [u8; 32] = fs::read(data.join(format!("client-{id}.key")))
+    let seed: [u8; 32] = fs::read(client_key_path(id))
         .map_err(|e| e.to_string())?
         .try_into()
         .map_err(|_| "invalid client key")?;
@@ -333,6 +448,7 @@ fn b4_trace_enabled(query: &str) -> bool {
 fn start_b4_relay(
     webview: Webview,
     store: State<'_, SharedStreamStore>,
+    relay: State<'_, RelayControl>,
     on_frames: Channel<Value>,
     streams: usize,
 ) -> Result<(), String> {
@@ -340,13 +456,25 @@ fn start_b4_relay(
     let data = data_dir();
     let (id, host_key) = pair_client(&data)?;
     eprintln!("S5 paired client {id}");
-    start_relay(webview, store, on_frames, streams, id, host_key, true)
+    start_relay(
+        RelayContext {
+            webview,
+            store,
+            relay,
+        },
+        on_frames,
+        streams,
+        id,
+        host_key,
+        true,
+    )
 }
 
 #[tauri::command]
 fn start_paired_relay(
     webview: Webview,
     store: State<'_, SharedStreamStore>,
+    relay: State<'_, RelayControl>,
     on_frames: Channel<Value>,
     streams: usize,
 ) -> Result<(), String> {
@@ -360,8 +488,11 @@ fn start_paired_relay(
         return Err("daemon identity changed; re-pair to continue".into());
     }
     start_relay(
-        webview,
-        store,
+        RelayContext {
+            webview,
+            store,
+            relay,
+        },
         on_frames,
         streams,
         id.to_owned(),
@@ -371,16 +502,28 @@ fn start_paired_relay(
 }
 
 fn start_relay(
-    webview: Webview,
-    store: State<'_, SharedStreamStore>,
+    context: RelayContext<'_>,
     on_frames: Channel<Value>,
     streams: usize,
     id: String,
     host_key: String,
     create_sessions: bool,
 ) -> Result<(), String> {
+    let RelayContext {
+        webview,
+        store,
+        relay,
+    } = context;
     let data = data_dir();
     let (hello, mut writer) = connect_socket(&data, &id, &host_key)?;
+    let control = writer.try_clone().map_err(|e| e.to_string())?;
+    if let Some(previous) = relay
+        .lock()
+        .map_err(|_| "relay unavailable")?
+        .replace(control)
+    {
+        let _ = previous.shutdown(std::net::Shutdown::Both);
+    }
     eprintln!("S5 authenticated daemon socket");
     store
         .lock()
@@ -467,6 +610,7 @@ pub fn run() {
     eprintln!("S5_BENCH_QUERY={query:?}");
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(StreamStore::default())))
+        .manage(Arc::new(Mutex::new(None)) as RelayControl)
         .invoke_handler(tauri::generate_handler![
             b4_trace,
             pairing_info,
@@ -521,9 +665,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{b4_trace_enabled, daemon_identity, decode_hex, encode_hex};
+    use super::{
+        b4_trace_enabled, client_removal_succeeded, daemon_fingerprint, encode_hex,
+        register_pairing, stop_relay, RelayControl,
+    };
     use ed25519_dalek::SigningKey;
-    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn tracing_is_disabled_outside_b4() {
@@ -533,18 +680,93 @@ mod tests {
 
     #[test]
     fn pairing_fingerprint_is_sha256_of_daemon_public_key() {
-        let path = std::env::temp_dir().join(format!("s5-pairing-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&path).unwrap();
         let seed = [7u8; 32];
-        std::fs::write(path.join("host.key"), seed).unwrap();
-        let (public_key, fingerprint) = daemon_identity(&path).unwrap();
+        let public_key = encode_hex(&SigningKey::from_bytes(&seed).verifying_key().to_bytes());
         let expected_key = encode_hex(&SigningKey::from_bytes(&seed).verifying_key().to_bytes());
-        let expected_fingerprint = format!(
-            "SHA256:{}",
-            encode_hex(&Sha256::digest(decode_hex(&expected_key).unwrap()))
-        );
         assert_eq!(public_key, expected_key);
-        assert_eq!(fingerprint, expected_fingerprint);
-        std::fs::remove_dir_all(path).unwrap();
+        assert_eq!(daemon_fingerprint(&public_key).unwrap().len(), 71);
+    }
+
+    #[test]
+    fn missing_client_registration_is_already_removed() {
+        assert!(client_removal_succeeded(false, b"client key not found"));
+        assert!(!client_removal_succeeded(false, b"permission denied"));
+        assert!(client_removal_succeeded(true, b""));
+    }
+
+    #[test]
+    fn stopping_relay_closes_the_reader_socket() {
+        let (writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let relay: RelayControl = std::sync::Arc::new(std::sync::Mutex::new(Some(writer)));
+        stop_relay(&relay).unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(std::io::Read::read(&mut reader, &mut byte).unwrap(), 0);
+        assert!(relay.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_pair_requests_leave_one_registered_client() {
+        let root = std::env::temp_dir().join(format!("s5-pair-race-{}", uuid::Uuid::new_v4()));
+        let data = root.join("daemon");
+        let keys = root.join("client-keys");
+        std::fs::create_dir_all(&data).unwrap();
+        let script = root.join("fake-daemon");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+shift 2
+if [ "$1" = identity ]; then echo "host_public_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; exit 0; fi
+command="$1"
+if [ "$command" != client ]; then exit 2; fi
+shift
+action="$1"
+shift
+registry="$(dirname "$0")/registry"
+case "$action" in
+  add)
+    id=1
+    [ ! -f "$(dirname "$0")/counter" ] || id=$(( $(cat "$(dirname "$0")/counter") + 1 ))
+    echo "$id" > "$(dirname "$0")/counter"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --public-key ]; then key="$2"; shift 2; else shift; fi
+    done
+    echo "$id $key" >> "$registry"
+    echo "client_id=$id public_key=$key scope=full host_public_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ;;
+  remove)
+    id="$1"
+    grep -q "^$id " "$registry" || { echo "client key not found" >&2; exit 1; }
+    grep -v "^$id " "$registry" > "$registry.tmp"
+    mv "$registry.tmp" "$registry"
+    ;;
+  list)
+    [ ! -f "$registry" ] || while read -r id key; do echo "$id S5-desktop full $key"; done < "$registry"
+    ;;
+  *) exit 2 ;;
+esac
+"##,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        std::env::set_var("SHARDRAIL_DAEMON", &script);
+        std::env::set_var("S5_CLIENT_DATA_DIR", &keys);
+
+        let paths = [data.clone(), data.clone()];
+        let joins = paths.map(|path| {
+            std::thread::spawn(move || register_pairing(&path, &"a".repeat(64)).unwrap())
+        });
+        let ids = joins.map(|join| join.join().unwrap());
+        let registrations = std::fs::read_to_string(root.join("registry")).unwrap();
+        assert_eq!(registrations.lines().count(), 1);
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(data.join("s5-pairing.json")).unwrap()).unwrap();
+        assert!(ids.iter().any(|id| record["clientId"] == *id));
+        assert_eq!(std::fs::read_dir(&keys).unwrap().count(), 1);
+
+        std::env::remove_var("SHARDRAIL_DAEMON");
+        std::env::remove_var("S5_CLIENT_DATA_DIR");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

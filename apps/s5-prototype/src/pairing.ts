@@ -20,16 +20,18 @@ export function stateFromInfo(info: PairingInfo): PairingState {
   return { kind: 'unpaired', info };
 }
 
-export function beginConfirmation(info: PairingInfo, now = Date.now()): PairingState {
+export function beginConfirmation(info: PairingInfo, now = performance.now()): PairingState {
   return { kind: 'confirming', info, expiresAt: now + 60_000 };
 }
 
-export async function confirmPairing(state: PairingState, api: PairingApi, now = Date.now()): Promise<PairingState> {
+export async function confirmPairing(state: PairingState, api: PairingApi, now: number | (() => number) = () => performance.now()): Promise<PairingState> {
   if (state.kind !== 'confirming') return state;
-  if (now >= state.expiresAt) return { kind: 'expired', info: state.info };
+  const currentTime = () => typeof now === 'function' ? now() : now;
+  if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
   try {
     const current = await api.inspect();
     if (current.daemonPublicKey !== state.info.daemonPublicKey) return { kind: 'mismatch', info: current };
+    if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
     const clientId = await api.pair(current.daemonPublicKey);
     return stateFromInfo({ ...current, clientId, pinnedPublicKey: current.daemonPublicKey });
   } catch {

@@ -21,6 +21,21 @@ test('expired confirmation never registers a client', async () => {
   assert.equal(called, false);
 });
 
+test('confirmation that expires while daemon identity is inspected never registers', async () => {
+  let now = 100;
+  let called = false;
+  const state = await confirmPairing(
+    beginConfirmation(info, 100),
+    api({
+      inspect: async () => { now = 60_100; return info; },
+      pair: async () => { called = true; return 'client-id'; },
+    }),
+    () => now,
+  );
+  assert.equal(state.kind, 'expired');
+  assert.equal(called, false);
+});
+
 test('daemon key changes during confirmation produce mismatch without registration', async () => {
   let called = false;
   const changed = { ...info, daemonPublicKey: 'b'.repeat(64), fingerprint: 'SHA256:two' };
