@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { benchShouldFail, daemonStreamFinished, draftPreview, generatedTokenLoadReached, minimumGeneratedTokens, missingRequiredSamples, playwrightOutputPath, shouldWaitForDaemonStream, waitForDaemonStream, withScenarioConfiguration } from '../src/bench-utils';
+import { benchShouldFail, daemonStreamFinished, draftPreview, generatedTokenLoadReached, minimumB4Samples, minimumGeneratedTokens, missingRequiredSamples, playwrightOutputPath, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream, withScenarioConfiguration } from '../src/bench-utils';
 import { createServer } from 'node:http';
-import { applyDaemonEvent, daemonAgentChunkCount, reset } from '../src/store';
+import { applyDaemonEvent, daemonAgentChunkCount, pendingDaemonReceiptCount, reset } from '../src/store';
 
 test('requires enough token deltas without requiring token events to grow the transcript', () => {
   const required = minimumGeneratedTokens(4, 6000);
@@ -21,6 +21,16 @@ test('accepts stream completion after a clean disconnect and validates chunks se
   assert.equal(daemonStreamFinished(true, 5_000, 5_000), true);
   assert.equal(daemonStreamFinished(false, 5_000, 5_000), false);
   assert.equal(daemonStreamFinished(true, 4_999, 5_000), false);
+});
+
+test('B4 waits for a useful sample set after chunk delivery finishes', async () => {
+  assert.equal(minimumB4Samples(3), 3);
+  assert.equal(minimumB4Samples(5_000), 20);
+  let elapsed = 0;
+  let samples = 0;
+  await waitForB4Samples(3, () => samples, async () => { samples++; elapsed += 50; }, () => elapsed);
+  assert.equal(samples, 3);
+  await assert.rejects(waitForB4Samples(2, () => 0, async () => { elapsed += 50; }, () => elapsed), /B4 samples incomplete: 0\/2/);
 });
 
 test('late B4 stream chunks reach completion and are saved headlessly', async () => {
@@ -54,6 +64,21 @@ test('late B4 stream chunks reach completion and are saved headlessly', async ()
     assert.deepEqual(saved, { filename: 'cold-3-1-r1', result: { daemonAgentChunkCount: 3 } });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    globalThis.requestAnimationFrame = previousRaf;
+    reset(0, 1);
+  }
+});
+
+test('B4 receipt retention stays bounded when virtual rows never mount', () => {
+  const previousRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;
+  try {
+    reset(0, 1);
+    for (let cursor = 1; cursor <= 1_000; cursor++) {
+      applyDaemonEvent(cursor, { session_id: 'fake', kind: 'agent_message_chunk', payload: {} }, cursor);
+    }
+    assert.equal(pendingDaemonReceiptCount(), 512);
+  } finally {
     globalThis.requestAnimationFrame = previousRaf;
     reset(0, 1);
   }

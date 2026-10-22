@@ -10,6 +10,8 @@ let raf = 0;
 const receivedAt = new Map<number, number>();
 const scheduledLatency = new Set<number>();
 const daemonReceipts = new Map<number, number>();
+// shortcut: only the newest 512 unmounted receipts are retained, upgrade if B4 must measure delayed historical virtual rows.
+const maxPendingDaemonReceipts = 512;
 const daemonScheduled = new Set<number>();
 const daemonAgents = new Map<string, number>();
 let daemonAgentCount = 1;
@@ -62,7 +64,13 @@ export function applyDaemonEvent(cursor: number, event: { session_id: string; ki
   const kind = event.kind === 'approval_requested' ? 'approval' : event.kind.includes('tool') ? 'tool' : 'message';
   const text = payload?.content?.text ?? JSON.stringify(event.payload);
   const row = { id, agent, kind, text, command: payload?.toolCallId ?? '', cwd: '', at: performance.now() } as EventRow;
-  if (event.kind === 'agent_message_chunk' && receiptWallClockMs !== undefined && receiptWallClockMs !== null) daemonReceipts.set(id, receiptWallClockMs);
+  if (event.kind === 'agent_message_chunk' && receiptWallClockMs !== undefined && receiptWallClockMs !== null) {
+    daemonReceipts.set(id, receiptWallClockMs);
+    if (daemonReceipts.size > maxPendingDaemonReceipts) {
+      const oldest = daemonReceipts.keys().next();
+      if (!oldest.done) daemonReceipts.delete(oldest.value);
+    }
+  }
   pending.set(id, row);
   if (!raf) raf = requestAnimationFrame(() => {
     rows = applyPendingUpdates(rows, rowIndexById, [...pending.values()]);
@@ -131,5 +139,6 @@ export function markRowsCommitted(
   }
 }
 export function eventCount() { return rows.length + [...pending.keys()].filter((id) => !rowIndexById.has(id)).length; }
+export function pendingDaemonReceiptCount() { return daemonReceipts.size; }
 export function tokenCount() { return generatedTokens; }
 export function sortedLatency() { return [...mockCreationToMountedRowFollowupLatency].sort((a, b) => a - b); }

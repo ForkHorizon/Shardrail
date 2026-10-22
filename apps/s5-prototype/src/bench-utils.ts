@@ -37,6 +37,14 @@ export async function waitForDaemonStream(expected: number, chunks: () => number
   if (!daemonStreamFinished(connected, received, expected)) throw new Error(`Relay/stream incomplete: connectedOnce=${connected}, chunks=${received}/${expected}`);
 }
 
+export function minimumB4Samples(events: number) { return Math.min(events, 20); }
+
+export async function waitForB4Samples(expected: number, samples: () => number, pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), now = () => performance.now()) {
+  const deadline = now() + 10_000;
+  while (samples() < expected && now() < deadline) await pause(50);
+  if (samples() < expected) throw new Error(`B4 samples incomplete: ${samples()}/${expected}`);
+}
+
 export function missingRequiredSamples(sample: { frameP95: number | null; mockCreationToMountedRowFollowupP95: number | null }) {
   return [sample.frameP95 === null && 'frameP95', sample.mockCreationToMountedRowFollowupP95 === null && 'mockCreationToMountedRowFollowupP95'].filter((value): value is string => Boolean(value));
 }

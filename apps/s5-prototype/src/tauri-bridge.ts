@@ -3,9 +3,9 @@ export type TauriEventBridge = {
   emit(event: string, payload: Record<string, never>): Promise<void>;
 };
 
-export async function listenAndAnnounceReady<TFrame>(
+export async function listenAndAnnounceReady<TFrames>(
   bridge: TauriEventBridge,
-  onFrames: (event: { payload: TFrame[] }) => void,
+  onFrames: (event: { payload: TFrames }) => void,
   onStatus: (event: { payload: { connected: boolean; error?: string } }) => void,
 ): Promise<() => void> {
   const registrations = await Promise.allSettled([

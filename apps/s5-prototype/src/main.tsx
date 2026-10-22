@@ -10,7 +10,7 @@ import { createPortal } from 'react-dom';
 import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, setDaemonAgentCount, setDaemonClockMapping, sortedLatency, tokenCount, useRows } from './store';
 import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameIntervalMs, percentile, supportsLongTaskEntries, takeCommittedInput } from './metrics-utils';
 import { createFrameSampler } from './frame-sampler';
-import { draftPreview, shouldWaitForDaemonStream, waitForDaemonStream } from './bench-utils';
+import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 import './style.css';
 
@@ -119,26 +119,27 @@ function App() {
     const unlisten: (() => void)[] = [];
     let frontendFrameCount = 0;
     let frontendBatchCount = 0;
-    void listenAndAnnounceReady({ listen, emit }, (event: { payload: DaemonFrame[] }) => {
+    void listenAndAnnounceReady<{ batchId: number; frames: DaemonFrame[] }>({ listen, emit }, (event) => {
+      const { batchId, frames } = event.payload;
       let frontendFrames = 0;
       frontendBatchCount++;
-      frontendFrameCount += event.payload.length;
-      if (frontendFrameCount === event.payload.length) b4Trace('first daemon-frames batch received', { frames: event.payload.length, frameKinds: event.payload.slice(0, 5).map((frame) => frame.kind) });
-      if (frontendFrameCount >= 1000 && frontendFrameCount - event.payload.length < 1000) b4Trace('frontend relay milestone', { frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount });
-      for (const frame of event.payload) {
+      frontendFrameCount += frames.length;
+      if (frontendFrameCount === frames.length) b4Trace('first daemon-frames batch received', { batchId, frames: frames.length, frameKinds: frames.slice(0, 5).map((frame) => frame.kind) });
+      if (frontendFrameCount >= 1000 && frontendFrameCount - frames.length < 1000) b4Trace('frontend relay milestone', { frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount });
+      for (const frame of frames) {
         if (frame.kind === 'durable_event') {
           const before = daemonAgentChunkCount;
           applyDaemonEvent(frame.cursor, frame.event, frame.receipt_wall_clock_ms);
           frontendFrames++;
           if (before === 0 && daemonAgentChunkCount === 1) b4Trace('first chunk received in frontend', { frameCursor: frame.cursor });
-          if (daemonAgentChunkCount > 0 && daemonAgentChunkCount % 1000 === 0 && daemonAgentChunkCount !== before) b4Trace('frontend chunk milestone', { frontendAgentChunks: daemonAgentChunkCount, relayFramesExpected: count, batchFrames: event.payload.length });
+          if (daemonAgentChunkCount > 0 && daemonAgentChunkCount % 1000 === 0 && daemonAgentChunkCount !== before) b4Trace('frontend chunk milestone', { frontendAgentChunks: daemonAgentChunkCount, relayFramesExpected: count, batchFrames: frames.length });
         }
       }
       if (frontendFrames && daemonAgentChunkCount === 0) b4Trace('frontend lifecycle batch', { batchFrames: frontendFrames });
-      void emit('daemon-frames-ack', { frames: event.payload.length }).catch((error: unknown) => {
-        b4Trace('frontend acknowledgement rejected', { frames: event.payload.length, error: String(error) });
+      void emit('daemon-frames-ack', { batchId }).catch((error: unknown) => {
+        b4Trace('frontend acknowledgement rejected', { batchId, error: String(error) });
       });
-      if (frontendBatchCount % 16 === 0 || daemonAgentChunkCount % 1000 < event.payload.length) b4Trace('frontend batch acknowledged', { frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount, batchFrames: event.payload.length });
+      if (frontendBatchCount % 16 === 0 || daemonAgentChunkCount % 1000 < frames.length) b4Trace('frontend batch acknowledged', { batchId, frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount, batchFrames: frames.length });
     }, (event: { payload: { connected: boolean; error?: string } }) => {
       const status = event.payload;
       b4Trace('daemon status received', status);
@@ -190,8 +191,11 @@ function App() {
         setBenchStatus('Waiting for shell relay and daemon fake-agent stream');
         b4Trace('completion wait started', { expectedAgentChunks: count, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce) });
         await waitForDaemonStream(count, () => daemonAgentChunkCount, () => Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce));
+        const minimumSamples = minimumB4Samples(count);
+        b4Trace('sample wait started', { expectedSamples: minimumSamples });
+        await waitForB4Samples(minimumSamples, () => daemonReceiptToRafMs.length);
       }
-      b4Trace('completion condition evaluated', { expectedAgentChunks: count, frontendAgentChunks: daemonAgentChunkCount, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce), rows: eventCount(), committedRows: document.querySelectorAll('[data-daemon-event-id]').length });
+      b4Trace('completion condition evaluated', { expectedAgentChunks: count, frontendAgentChunks: daemonAgentChunkCount, expectedSamples: minimumB4Samples(count), samples: daemonReceiptToRafMs.length, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce), rows: eventCount(), committedRows: document.querySelectorAll('[data-daemon-event-id]').length });
       const el = document.querySelector<HTMLElement>('.transcript')!;
       if (!query.has('b4')) {
         startFrameSampling();

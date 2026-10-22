@@ -9,7 +9,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -20,18 +20,9 @@ static RELAY_LISTENER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 fn b4_trace(stage: String, data: Value) {
-    eprintln!("S5 B4 trace stage={stage} data={data}");
-}
-
-fn wait_for_frame_ack(acknowledged: &AtomicBool, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if acknowledged.swap(false, Ordering::Acquire) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(2));
+    if std::env::var("S5_BENCH_QUERY").is_ok_and(|query| b4_trace_enabled(&query)) {
+        eprintln!("S5 B4 trace stage={stage} data={data}");
     }
-    false
 }
 
 fn data_dir() -> PathBuf {
@@ -204,6 +195,39 @@ fn is_b4_query(query: &str) -> bool {
     query.split('&').any(|part| part == "b4=1")
 }
 
+fn b4_trace_enabled(query: &str) -> bool {
+    is_b4_query(query)
+}
+
+fn acknowledge_batch(ack: &(Mutex<Option<u64>>, Condvar), batch_id: u64) {
+    *ack.0.lock().unwrap() = Some(batch_id);
+    ack.1.notify_one();
+}
+
+fn wait_for_batch_ack(
+    ack: &(Mutex<Option<u64>>, Condvar),
+    batch_id: u64,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut received = ack.0.lock().unwrap();
+    loop {
+        if *received == Some(batch_id) {
+            *received = None;
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let (next, result) = ack.1.wait_timeout(received, remaining).unwrap();
+        received = next;
+        if result.timed_out() && *received != Some(batch_id) {
+            return false;
+        }
+    }
+}
+
 fn handle_frontend_ready(started: &AtomicBool, start: impl FnOnce()) {
     if !started.swap(true, Ordering::Relaxed) {
         start();
@@ -243,10 +267,14 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
         &json!({"connected":true,"host":hello["host_id"],"epoch":hello["journal_epoch"]}),
     );
     let reader_stream = writer.try_clone().map_err(|e| e.to_string())?;
-    let frame_ack = Arc::new(AtomicBool::new(false));
+    let frame_ack = Arc::new((Mutex::new(None), Condvar::new()));
     let ack_listener = Arc::clone(&frame_ack);
-    webview.listen("daemon-frames-ack", move |_| {
-        ack_listener.store(true, Ordering::Release);
+    webview.listen("daemon-frames-ack", move |event| {
+        if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
+            if let Some(batch_id) = payload["batchId"].as_u64() {
+                acknowledge_batch(&ack_listener, batch_id);
+            }
+        }
     });
     let (frames_tx, frames_rx) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
@@ -290,8 +318,12 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
             }
             dispatched += frames.len();
             batches += 1;
-            dispatch(&webview, "daemon-frames", &json!(frames));
-            if !wait_for_frame_ack(&frame_ack, Duration::from_secs(10)) {
+            dispatch(
+                &webview,
+                "daemon-frames",
+                &json!({"batchId": batches, "frames": frames}),
+            );
+            if !wait_for_batch_ack(&frame_ack, batches as u64, Duration::from_secs(10)) {
                 eprintln!("S5 relay stopped: frontend did not acknowledge batch={batches} frames={dispatched}");
                 break;
             }
@@ -337,6 +369,12 @@ pub fn run() {
                         ));
                     }
                     return;
+                }
+                if is_b4_query(query) && payload.event() == tauri::webview::PageLoadEvent::Started {
+                    let window = webview.window();
+                    let shown = window.show();
+                    let focused = window.set_focus();
+                    eprintln!("S5 B4 window activation show={shown:?} focus={focused:?}");
                 }
                 if should_register_ready_listener(
                     payload.event() == tauri::webview::PageLoadEvent::Started,
@@ -387,11 +425,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_frontend_ready, is_b4_query, ready_callback, register_ready_listener,
-        should_register_ready_listener, wait_for_frame_ack,
+        acknowledge_batch, b4_trace_enabled, handle_frontend_ready, is_b4_query, ready_callback,
+        register_ready_listener, should_register_ready_listener, wait_for_batch_ack,
     };
     use std::{
-        sync::{atomic::AtomicBool, atomic::Ordering, Arc},
+        sync::{atomic::AtomicBool, atomic::Ordering, Arc, Condvar, Mutex},
         time::Duration,
     };
 
@@ -441,6 +479,12 @@ mod tests {
     }
 
     #[test]
+    fn tracing_is_disabled_outside_b4() {
+        assert!(b4_trace_enabled("events=5000&b4=1"));
+        assert!(!b4_trace_enabled("events=5000"));
+    }
+
+    #[test]
     fn matching_started_page_registers_a_callback_that_starts_the_relay_on_event() {
         let query = "autobench=1&events=5000&b4=1";
         let relay_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -464,13 +508,16 @@ mod tests {
 
     #[test]
     fn relay_waits_for_each_frontend_batch_acknowledgement() {
-        let acked = Arc::new(AtomicBool::new(false));
+        let acked = Arc::new((Mutex::new(None), Condvar::new()));
         let ack_thread = Arc::clone(&acked);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(10));
-            ack_thread.store(true, Ordering::Release);
+            acknowledge_batch(&ack_thread, 7);
         });
-        assert!(wait_for_frame_ack(&acked, Duration::from_millis(100)));
-        assert!(!wait_for_frame_ack(&acked, Duration::from_millis(10)));
+        assert!(wait_for_batch_ack(&acked, 7, Duration::from_millis(100)));
+        assert!(!wait_for_batch_ack(&acked, 8, Duration::from_millis(10)));
+        acknowledge_batch(&acked, 9);
+        assert!(!wait_for_batch_ack(&acked, 8, Duration::from_millis(10)));
+        assert!(wait_for_batch_ack(&acked, 9, Duration::from_millis(10)));
     }
 }

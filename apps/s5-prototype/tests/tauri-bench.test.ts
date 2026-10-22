@@ -12,10 +12,10 @@ test('B4 harness configures daemon delivery without synthetic scrolling', () => 
   const app = readFileSync('src/main.tsx', 'utf8');
   assert.match(script, /S5_BENCH_QUERY=.*&b4=1/);
   assert.match(script, /&autostart=0/);
-  assert.match(script, /!r\.b4\?\.count \|\| r\.daemonAgentChunkCount !== Number\(process\.argv\[2\]\) \|\| r\.pageVisibility !== "visible" \|\| r\.pageFocused !== true/);
+  assert.doesNotMatch(script, /open -a/);
   assert.match(script, /check-bench-app-freshness\.sh/);
   assert.match(script, /cleanup-bench-processes\.sh "\$app_pid" "\$temp_dir\/webkit-before\.txt"/);
-  assert.match(script, /open -a "\$app_bundle"/);
+  assert.match(app, /waitForB4Samples\(minimumSamples/);
   assert.match(app, /if \(!query\.has\('b4'\)\) \{[\s\S]*el\.scrollTop =/);
 });
 
@@ -25,23 +25,35 @@ test('B4 shell harness accepts visible results and rejects hidden-window samples
   const app = join(directory, 'stub-app.mjs');
   const daemon = join(directory, 'stub-daemon');
   const fakeAgent = join(directory, 'stub-fake-agent');
+  const fakeOpen = join(directory, 'fake-bin');
+  const openMarker = join(directory, 'open-called');
+  const fakeBundle = join(directory, 'fake.app');
   try {
+    mkdirSync(fakeOpen);
+    mkdirSync(fakeBundle);
+    writeFileSync(join(fakeOpen, 'open'), `#!/bin/bash\nprintf called > '${openMarker}'\n`);
     writeFileSync(app, `#!/usr/bin/env node
 const query = new URLSearchParams(process.env.S5_BENCH_QUERY);
 const events = Number(query.get('events'));
-const response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: query.get('run'), result: { b4: { count: events }, daemonAgentChunkCount: events, pageVisibility: process.env.S5_TEST_VISIBILITY ?? 'visible', pageFocused: process.env.S5_TEST_FOCUSED !== 'false' } }) });
+const response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: query.get('run'), result: { ...(process.env.S5_TEST_ERROR ? { error: process.env.S5_TEST_ERROR } : {}), b4: { count: Number(process.env.S5_TEST_SAMPLES ?? events) }, daemonAgentChunkCount: events, pageVisibility: process.env.S5_TEST_VISIBILITY ?? 'visible', pageFocused: process.env.S5_TEST_FOCUSED !== 'false' } }) });
 if (!response.ok) process.exit(1);
 `);
     writeFileSync(daemon, '#!/bin/bash\nsleep 60\n');
     writeFileSync(fakeAgent, '#!/bin/bash\nexit 0\n');
     for (const file of [app, daemon, fakeAgent]) chmodSync(file, 0o755);
-    const env = { ...process.env, S5_BENCH_APP: app, SHARDRAILD_BIN: daemon, SHARDRAIL_FAKE_ACP_BIN: fakeAgent, S5_BENCH_WAIT_SECONDS: '3', S5_BENCH_RESULTS_DIR: resultsDir, S5_B4_EVENTS: '3', S5_B4_STREAMS: '1', S5_B4_TEMPERATURES: 'cold', S5_B4_REPETITIONS: '1' };
+    const env = { ...process.env, PATH: `${fakeOpen}:${process.env.PATH}`, S5_BENCH_APP: app, S5_BENCH_APP_BUNDLE: fakeBundle, SHARDRAILD_BIN: daemon, SHARDRAIL_FAKE_ACP_BIN: fakeAgent, S5_BENCH_WAIT_SECONDS: '3', S5_BENCH_RESULTS_DIR: resultsDir, S5_B4_EVENTS: '3', S5_B4_STREAMS: '1', S5_B4_TEMPERATURES: 'cold', S5_B4_REPETITIONS: '1' };
     const run = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env });
     assert.equal(run.error, undefined, run.error?.message);
     assert.equal(run.status, 0, run.stderr);
     const result = JSON.parse(readFileSync(join(resultsDir, 'b4-cold-3-1-r1.json'), 'utf8')) as { b4: { count: number }; daemonAgentChunkCount: number };
     assert.equal(result.b4.count, 3);
     assert.equal(result.daemonAgentChunkCount, 3);
+    assert.equal(existsSync(openMarker), false, 'benchmark must not invoke LaunchServices and spawn an unmanaged app');
+    const unfocusedVisible = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env: { ...env, S5_TEST_FOCUSED: 'false' } });
+    assert.equal(unfocusedVisible.status, 0, unfocusedVisible.stderr);
+    const undersampled = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env: { ...env, S5_TEST_SAMPLES: '1' } });
+    assert.equal(undersampled.status, 1);
+    assert.match(undersampled.stderr, /wrote incomplete daemon samples/);
     const hidden = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env: { ...env, S5_TEST_VISIBILITY: 'hidden', S5_TEST_FOCUSED: 'false' } });
     assert.equal(hidden.error, undefined, hidden.error?.message);
     assert.equal(hidden.status, 1);
@@ -49,6 +61,9 @@ if (!response.ok) process.exit(1);
     const rejected = JSON.parse(readFileSync(join(resultsDir, 'b4-cold-3-1-r1.json'), 'utf8')) as { pageVisibility: string; pageFocused: boolean };
     assert.equal(rejected.pageVisibility, 'hidden');
     assert.equal(rejected.pageFocused, false);
+    const error = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env: { ...env, S5_TEST_ERROR: 'fixture failure' } });
+    assert.equal(error.status, 1);
+    assert.match(error.stderr, /B4 scenario failed: fixture failure/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
