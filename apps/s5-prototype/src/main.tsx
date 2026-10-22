@@ -1,6 +1,7 @@
 import React, { Profiler, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { emit, listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { listenAndAnnounceReady } from './tauri-bridge';
 import type { DaemonFrame } from '@shardrail/contracts';
 import { Button, Input, Label, ListBox, ListBoxItem, Popover, Select, SelectValue, TextField } from 'react-aria-components';
@@ -15,6 +16,14 @@ import './style.css';
 
 type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; daemonAgentChunkCount: number; userAgent: string };
 const started = performance.now();
+const b4Enabled = new URLSearchParams(location.search).has('b4');
+function b4Trace(stage: string, data: Record<string, unknown> = {}) {
+  if (b4Enabled) void invoke('b4_trace', { stage, data }).catch((error: unknown) => console.error('B4 trace command failed', error));
+}
+if (b4Enabled) {
+  window.addEventListener('error', (event) => b4Trace('window.onerror', { message: event.message, source: event.filename, line: event.lineno, column: event.colno }));
+  window.addEventListener('unhandledrejection', (event) => b4Trace('unhandledrejection', { reason: String(event.reason) }));
+}
 const observed = { longTasks: 0, maxLongTaskMs: 0, frames: [] as number[], commits: 0, commitMs: 0, inputs: [] as number[], firstFrame: [] as boolean[], firstFrameTimestamps: [] as number[], rafTimestampDeltas: [] as number[] };
 const pendingInputs: { startedAt: number; draft: string }[] = [];
 const supportsLongTasks = typeof PerformanceObserver !== 'undefined' && supportsLongTaskEntries(PerformanceObserver.supportedEntryTypes);
@@ -108,18 +117,37 @@ function App() {
     for (let i = 0; i < 5; i++) { const before = performance.now(), wall = Date.now(), after = performance.now(); offsets.push(wall - (before + after) / 2); }
     setDaemonClockMapping(offsets.reduce((a, b) => a + b, 0) / offsets.length, (Math.max(...offsets) - Math.min(...offsets)) / 2 + 1);
     const unlisten: (() => void)[] = [];
+    let frontendFrameCount = 0;
+    let frontendBatchCount = 0;
     void listenAndAnnounceReady({ listen, emit }, (event: { payload: DaemonFrame[] }) => {
+      let frontendFrames = 0;
+      frontendBatchCount++;
+      frontendFrameCount += event.payload.length;
+      if (frontendFrameCount === event.payload.length) b4Trace('first daemon-frames batch received', { frames: event.payload.length, frameKinds: event.payload.slice(0, 5).map((frame) => frame.kind) });
+      if (frontendFrameCount >= 1000 && frontendFrameCount - event.payload.length < 1000) b4Trace('frontend relay milestone', { frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount });
       for (const frame of event.payload) {
-        if (frame.kind === 'durable_event') applyDaemonEvent(frame.cursor, frame.event, frame.receipt_wall_clock_ms);
+        if (frame.kind === 'durable_event') {
+          const before = daemonAgentChunkCount;
+          applyDaemonEvent(frame.cursor, frame.event, frame.receipt_wall_clock_ms);
+          frontendFrames++;
+          if (before === 0 && daemonAgentChunkCount === 1) b4Trace('first chunk received in frontend', { frameCursor: frame.cursor });
+          if (daemonAgentChunkCount > 0 && daemonAgentChunkCount % 1000 === 0 && daemonAgentChunkCount !== before) b4Trace('frontend chunk milestone', { frontendAgentChunks: daemonAgentChunkCount, relayFramesExpected: count, batchFrames: event.payload.length });
+        }
       }
+      if (frontendFrames && daemonAgentChunkCount === 0) b4Trace('frontend lifecycle batch', { batchFrames: frontendFrames });
+      void emit('daemon-frames-ack', { frames: event.payload.length }).catch((error: unknown) => {
+        b4Trace('frontend acknowledgement rejected', { frames: event.payload.length, error: String(error) });
+      });
+      if (frontendBatchCount % 16 === 0 || daemonAgentChunkCount % 1000 < event.payload.length) b4Trace('frontend batch acknowledged', { frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount, batchFrames: event.payload.length });
     }, (event: { payload: { connected: boolean; error?: string } }) => {
       const status = event.payload;
+      b4Trace('daemon status received', status);
       (window as Window & { __daemonConnected?: boolean }).__daemonConnected = status.connected;
       if (status.connected) (window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce = true;
       setTransportStatus(status.connected ? 'Connected · local shell relay' : status.error ? `Connection failed: ${status.error}` : 'Disconnected');
-    }).then((remove) => { unlisten.push(remove); setTransportStatus('Frontend listeners ready'); }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); console.error('S5 event listener setup failed', error); });
+    }).then((remove) => { unlisten.push(remove); setTransportStatus('Frontend listeners ready'); b4Trace('ready', { listeners: 'daemon-frames,daemon-status', events: count }); }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); b4Trace('listener setup rejected', { error: String(error) }); console.error('S5 event listener setup failed', error); });
     return () => { unlisten.forEach((remove) => remove()); };
-  }, [autobench]);
+  }, [autobench, count]);
   useLayoutEffect(() => {
     const input = takeCommittedInput(pendingInputs, draft);
     if (!input) return;
@@ -135,25 +163,35 @@ function App() {
   }, [draft]);
   useEffect(() => { if (!autostart || !ready) return; const id = setTimeout(() => startStreams(streams, durationMs, runningRef, setRunning), 1000); return () => clearTimeout(id); }, [ready, autostart, streams, durationMs]);
   useEffect(() => {
+    b4Trace('automation effect evaluated', { ready, autobench, visibility: document.visibilityState, focused: document.hasFocus() });
     if (!ready || !autobench) return;
     let cancelled = false;
     void (async () => {
       setBenchStatus('Automated run started');
-      await new Promise((resolve) => setTimeout(resolve, autostart ? 2200 : 600));
-      const field = document.querySelector<HTMLInputElement>('input[aria-label="Message composer"]');
-      if (!field) throw new Error('Composer was not rendered');
-      field.focus();
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-      for (const char of '/s5-paint-responsiveness-trace') {
-        setter?.call(field, field.value + char);
-        field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
-        await new Promise((resolve) => setTimeout(resolve, 40));
+      b4Trace('automation started', { visibility: document.visibilityState, focused: document.hasFocus() });
+      if (!query.has('b4')) {
+        await new Promise((resolve) => setTimeout(resolve, autostart ? 2200 : 600));
+        b4Trace('automation delay complete', { visibility: document.visibilityState, focused: document.hasFocus() });
+        const field = document.querySelector<HTMLInputElement>('input[aria-label="Message composer"]');
+        if (!field) throw new Error('Composer was not rendered');
+        field.focus();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        for (const char of '/s5-paint-responsiveness-trace') {
+          setter?.call(field, field.value + char);
+          field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        b4Trace('automation input complete');
+      } else {
+        b4Trace('B4 automation input skipped', { reason: 'synthetic composer input is outside the daemon-to-row measurement' });
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
       if (autobench && shouldWaitForDaemonStream(query, count)) {
         setBenchStatus('Waiting for shell relay and daemon fake-agent stream');
+        b4Trace('completion wait started', { expectedAgentChunks: count, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce) });
         await waitForDaemonStream(count, () => daemonAgentChunkCount, () => Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce));
       }
+      b4Trace('completion condition evaluated', { expectedAgentChunks: count, frontendAgentChunks: daemonAgentChunkCount, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce), rows: eventCount(), committedRows: document.querySelectorAll('[data-daemon-event-id]').length });
       const el = document.querySelector<HTMLElement>('.transcript')!;
       if (!query.has('b4')) {
         startFrameSampling();
@@ -168,17 +206,28 @@ function App() {
       });
       stopFrameSampling();
       if (cancelled) return;
+      b4Trace('rows committed', { rows: eventCount(), committedRows: document.querySelectorAll('[data-daemon-event-id]').length });
       const samples = metrics();
+      b4Trace('samples collected', { count: samples.b4.count, daemonAgentChunkCount: samples.daemonAgentChunkCount });
       const requiredTokens = Math.ceil(streams * 75 * durationMs / 1000 * 0.5);
       if (autostart && samples.generatedTokens < requiredTokens) throw new Error(`Generated stream load ${samples.generatedTokens} < required ${requiredTokens}`);
       const scrollFrames = [...observed.frames];
-      const result = { date: new Date().toISOString(), temperature: query.get('temperature') ?? 'unspecified', streams, inputMethod: 'Synthetic InputEvent dispatched to the focused composer', ...samples, scrollSmoothness: { frameP95Ms: percentile(scrollFrames, .95), frameMaxMs: Math.max(...scrollFrames), frames: scrollFrames.length } };
+      const result = { date: new Date().toISOString(), temperature: query.get('temperature') ?? 'unspecified', streams, pageVisibility: document.visibilityState, pageFocused: document.hasFocus(), inputMethod: query.has('b4') ? 'not used for B4 daemon stream measurement' : 'Synthetic InputEvent dispatched to the focused composer', ...samples, scrollSmoothness: { frameP95Ms: percentile(scrollFrames, .95), frameMaxMs: Math.max(...scrollFrames), frames: scrollFrames.length } };
       setBenchStatus('Saving results');
-      const response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: runId, result }) });
+      b4Trace('report fetch started', { url: 'http://127.0.0.1:5174/result', bodyBytes: JSON.stringify({ filename: runId, result }).length });
+      let response: Response;
+      try {
+        response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: runId, result }) });
+        b4Trace('report fetch resolved', { status: response.status, ok: response.ok });
+      } catch (error) {
+        b4Trace('report fetch rejected', { error: String(error) });
+        throw error;
+      }
       if (!response.ok) throw new Error(`Result receiver returned HTTP ${response.status}`);
       setBenchStatus('Results saved');
     })().catch(async (error: unknown) => {
       setBenchStatus(`Run failed: ${String(error)}`);
+      b4Trace('bench rejected', { error: String(error), frontendAgentChunks: daemonAgentChunkCount, samples: daemonReceiptToRafMs.length });
       console.error('S5 automated run failed', error);
       if (autobench) await fetch('http://127.0.0.1:5174/result', {
         method: 'POST',

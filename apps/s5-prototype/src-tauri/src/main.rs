@@ -18,6 +18,22 @@ use uuid::Uuid;
 
 static RELAY_LISTENER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
+#[tauri::command]
+fn b4_trace(stage: String, data: Value) {
+    eprintln!("S5 B4 trace stage={stage} data={data}");
+}
+
+fn wait_for_frame_ack(acknowledged: &AtomicBool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if acknowledged.swap(false, Ordering::Acquire) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    false
+}
+
 fn data_dir() -> PathBuf {
     std::env::var_os("S5_SHARDRAIL_DATA_DIR")
         .or_else(|| std::env::var_os("SHARDRAIL_DATA_DIR"))
@@ -227,10 +243,16 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
         &json!({"connected":true,"host":hello["host_id"],"epoch":hello["journal_epoch"]}),
     );
     let reader_stream = writer.try_clone().map_err(|e| e.to_string())?;
-    let (frames_tx, frames_rx) = std::sync::mpsc::channel();
+    let frame_ack = Arc::new(AtomicBool::new(false));
+    let ack_listener = Arc::clone(&frame_ack);
+    webview.listen("daemon-frames-ack", move |_| {
+        ack_listener.store(true, Ordering::Release);
+    });
+    let (frames_tx, frames_rx) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(reader_stream);
         let mut received = 0usize;
+        let mut agent_chunks = 0usize;
         loop {
             let frame = match read_json(&mut reader) {
                 Ok(frame) => frame,
@@ -240,8 +262,11 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
                 }
             };
             received += 1;
+            if frame["kind"] == "durable_event" && frame["event"]["kind"] == "agent_message_chunk" {
+                agent_chunks += 1;
+            }
             if received.is_multiple_of(1_000) {
-                eprintln!("S5 relay received {received} frames");
+                eprintln!("S5 relay received frames={received} agent_chunks={agent_chunks}");
             }
             if frames_tx.send(frame).is_err() {
                 break;
@@ -250,6 +275,8 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
     });
     let webview = webview.clone();
     std::thread::spawn(move || {
+        let mut dispatched = 0usize;
+        let mut batches = 0usize;
         while let Ok(first) = frames_rx.recv() {
             let mut frames = vec![first];
             while frames.len() < 64 {
@@ -261,7 +288,16 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
                     ) => break,
                 }
             }
+            dispatched += frames.len();
+            batches += 1;
             dispatch(&webview, "daemon-frames", &json!(frames));
+            if !wait_for_frame_ack(&frame_ack, Duration::from_secs(10)) {
+                eprintln!("S5 relay stopped: frontend did not acknowledge batch={batches} frames={dispatched}");
+                break;
+            }
+            if batches.is_multiple_of(16) || dispatched >= 5_000 {
+                eprintln!("S5 relay dispatched frames={dispatched} acknowledged_batches={batches}");
+            }
         }
         dispatch(&webview, "daemon-status", &json!({"connected":false}));
     });
@@ -276,6 +312,7 @@ pub fn run() {
     let query = std::env::var("S5_BENCH_QUERY").ok();
     eprintln!("S5_BENCH_QUERY={query:?}");
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![b4_trace])
         .on_page_load(move |webview, payload| {
             eprintln!(
                 "S5 page event {:?} elapsed_ms={} url={:?}",
@@ -351,9 +388,12 @@ fn main() {
 mod tests {
     use super::{
         handle_frontend_ready, is_b4_query, ready_callback, register_ready_listener,
-        should_register_ready_listener,
+        should_register_ready_listener, wait_for_frame_ack,
     };
-    use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+    use std::{
+        sync::{atomic::AtomicBool, atomic::Ordering, Arc},
+        time::Duration,
+    };
 
     #[test]
     fn readiness_listener_is_registered_before_frontend_effects_run() {
@@ -420,5 +460,17 @@ mod tests {
         on_s5_ready();
         on_s5_ready();
         assert_eq!(relay_starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn relay_waits_for_each_frontend_batch_acknowledgement() {
+        let acked = Arc::new(AtomicBool::new(false));
+        let ack_thread = Arc::clone(&acked);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            ack_thread.store(true, Ordering::Release);
+        });
+        assert!(wait_for_frame_ack(&acked, Duration::from_millis(100)));
+        assert!(!wait_for_frame_ack(&acked, Duration::from_millis(10)));
     }
 }
