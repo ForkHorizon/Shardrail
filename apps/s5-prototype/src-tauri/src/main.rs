@@ -1,23 +1,21 @@
+mod stream_store;
+
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, VecDeque};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Condvar, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tauri::{Emitter, Listener, Webview};
+use stream_store::{SharedStreamStore, StreamStore};
+use tauri::{ipc::Channel, State};
+use tauri::{Emitter, Webview};
 use uuid::Uuid;
-
-static RELAY_LISTENER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 fn b4_trace(stage: String, data: Value) {
@@ -180,18 +178,6 @@ fn request_sessions(writer: &mut UnixStream, streams: usize) -> Result<(), Strin
     }
     Ok(())
 }
-fn should_register_ready_listener(
-    is_page_load_started: bool,
-    query_matches: bool,
-    query: &str,
-) -> bool {
-    is_page_load_started
-        && query_matches
-        && is_b4_query(query)
-        && query.contains("autobench=1")
-        && query.contains("events=")
-}
-
 fn is_b4_query(query: &str) -> bool {
     query.split('&').any(|part| part == "b4=1")
 }
@@ -200,99 +186,30 @@ fn b4_trace_enabled(query: &str) -> bool {
     is_b4_query(query)
 }
 
-#[derive(Default)]
-struct BatchAckState {
-    outstanding: BTreeSet<u64>,
-    acknowledged: BTreeSet<u64>,
-}
-
-fn expect_batch_ack(ack: &(Mutex<BatchAckState>, Condvar), batch_id: u64) {
-    ack.0.lock().unwrap().outstanding.insert(batch_id);
-}
-
-fn acknowledge_batch(ack: &(Mutex<BatchAckState>, Condvar), batch_id: u64) {
-    let mut state = ack.0.lock().unwrap();
-    if state.outstanding.contains(&batch_id) {
-        state.acknowledged.insert(batch_id);
-        ack.1.notify_one();
-    }
-}
-
-fn wait_for_batch_ack(
-    ack: &(Mutex<BatchAckState>, Condvar),
-    batch_id: u64,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-    let mut state = ack.0.lock().unwrap();
-    loop {
-        if state.acknowledged.remove(&batch_id) {
-            state.outstanding.remove(&batch_id);
-            return true;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            state.outstanding.remove(&batch_id);
-            return false;
-        }
-        let (next, result) = ack.1.wait_timeout(state, remaining).unwrap();
-        state = next;
-        if result.timed_out() && !state.acknowledged.contains(&batch_id) {
-            state.outstanding.remove(&batch_id);
-            return false;
-        }
-    }
-}
-
-fn handle_frontend_ready(started: &AtomicBool, start: impl FnOnce()) {
-    if !started.swap(true, Ordering::Relaxed) {
-        start();
-    }
-}
-
-fn ready_callback(
-    started: Arc<AtomicBool>,
-    start: impl Fn() + Send + Sync + 'static,
-) -> impl Fn() + Send + Sync + 'static {
-    move || handle_frontend_ready(&started, &start)
-}
-
-fn register_ready_listener(
-    register: impl FnOnce(&'static str, Box<dyn Fn() + Send + Sync>),
-    ready: impl Fn() + Send + Sync + 'static,
-) {
-    register("s5-ready", Box::new(ready));
-}
-
-fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
+#[tauri::command]
+fn start_b4_relay(
+    webview: Webview,
+    store: State<'_, SharedStreamStore>,
+    on_frames: Channel<Value>,
+    streams: usize,
+) -> Result<(), String> {
     eprintln!("S5 starting daemon relay");
     let data = data_dir();
     let (id, host_key) = pair_client(&data)?;
     eprintln!("S5 paired client {id}");
     let (hello, mut writer) = connect_socket(&data, &id, &host_key)?;
     eprintln!("S5 authenticated daemon socket");
-    let streams = query
-        .split('&')
-        .find_map(|part| part.strip_prefix("streams="))
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1)
-        .clamp(1, 8);
+    store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .set_channel(on_frames);
     dispatch(
-        webview,
+        &webview,
         "daemon-status",
         &json!({"connected":true,"host":hello["host_id"],"epoch":hello["journal_epoch"]}),
     );
     let reader_stream = writer.try_clone().map_err(|e| e.to_string())?;
-    let frame_ack = Arc::new((Mutex::new(BatchAckState::default()), Condvar::new()));
-    let ack_listener = Arc::clone(&frame_ack);
-    webview.listen("daemon-frames-ack", move |event| {
-        if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
-            if let Some(batch_id) = payload["batchId"].as_u64() {
-                acknowledge_batch(&ack_listener, batch_id);
-            }
-        }
-    });
-    let (frames_tx, frames_rx) = std::sync::mpsc::sync_channel(64);
+    let store = Arc::clone(store.inner());
     std::thread::spawn(move || {
         let mut reader = BufReader::new(reader_stream);
         let mut received = 0usize;
@@ -312,68 +229,46 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
             if received.is_multiple_of(1_000) {
                 eprintln!("S5 relay received frames={received} agent_chunks={agent_chunks}");
             }
-            if frames_tx.send(frame).is_err() {
-                break;
-            }
-        }
-    });
-    let webview = webview.clone();
-    std::thread::spawn(move || {
-        let mut dispatched = 0usize;
-        let mut batches = 0usize;
-        let mut in_flight = VecDeque::new();
-        let mut timed_out = None;
-        while let Ok(first) = frames_rx.recv() {
-            if in_flight.len() == 4 {
-                let oldest = in_flight.pop_front().unwrap();
-                if !wait_for_batch_ack(&frame_ack, oldest, Duration::from_secs(10)) {
-                    timed_out = Some(oldest);
+            if frame["kind"] == "durable_event" {
+                let mut store = match store.lock() {
+                    Ok(store) => store,
+                    Err(_) => break,
+                };
+                store.append(frame);
+                if let Err(error) = store.notify() {
+                    eprintln!("S5 channel delivery failed after {received} frames: {error}");
                     break;
                 }
             }
-            let mut frames = vec![first];
-            while frames.len() < 64 {
-                match frames_rx.try_recv() {
-                    Ok(frame) => frames.push(frame),
-                    Err(
-                        std::sync::mpsc::TryRecvError::Empty
-                        | std::sync::mpsc::TryRecvError::Disconnected,
-                    ) => break,
-                }
-            }
-            dispatched += frames.len();
-            batches += 1;
-            let batch_id = batches as u64;
-            expect_batch_ack(&frame_ack, batch_id);
-            dispatch(
-                &webview,
-                "daemon-frames",
-                &json!({"batchId": batch_id, "frames": frames}),
-            );
-            in_flight.push_back(batch_id);
-            if batches.is_multiple_of(16) || dispatched >= 5_000 {
-                eprintln!(
-                    "S5 relay dispatched frames={dispatched} batches={batches} in_flight={}",
-                    in_flight.len()
-                );
-            }
-        }
-        if timed_out.is_none() {
-            while let Some(batch_id) = in_flight.pop_front() {
-                if !wait_for_batch_ack(&frame_ack, batch_id, Duration::from_secs(10)) {
-                    timed_out = Some(batch_id);
-                    break;
-                }
-            }
-        }
-        if let Some(batch_id) = timed_out {
-            eprintln!("S5 relay stopped: frontend did not acknowledge batch={batch_id} frames={dispatched}");
         }
         dispatch(&webview, "daemon-status", &json!({"connected":false}));
     });
-    request_sessions(&mut writer, streams)?;
+    request_sessions(&mut writer, streams.clamp(1, 8))?;
     eprintln!("S5 session requests sent");
     Ok(())
+}
+
+#[tauri::command]
+fn get_stream_window(
+    store: State<'_, SharedStreamStore>,
+    start: usize,
+    limit: usize,
+) -> Result<Value, String> {
+    store
+        .lock()
+        .map(|store| store.window(start, limit))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn acknowledge_stream_view(
+    store: State<'_, SharedStreamStore>,
+    version: u64,
+) -> Result<(), String> {
+    store
+        .lock()
+        .map_err(|e| e.to_string())?
+        .acknowledge(version)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -382,7 +277,13 @@ pub fn run() {
     let query = std::env::var("S5_BENCH_QUERY").ok();
     eprintln!("S5_BENCH_QUERY={query:?}");
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![b4_trace])
+        .manage(Arc::new(Mutex::new(StreamStore::default())))
+        .invoke_handler(tauri::generate_handler![
+            b4_trace,
+            start_b4_relay,
+            get_stream_window,
+            acknowledge_stream_view
+        ])
         .on_page_load(move |webview, payload| {
             eprintln!(
                 "S5 page event {:?} elapsed_ms={} url={:?}",
@@ -414,42 +315,7 @@ pub fn run() {
                     let focused = window.set_focus();
                     eprintln!("S5 B4 window activation show={shown:?} focus={focused:?}");
                 }
-                if should_register_ready_listener(
-                    payload.event() == tauri::webview::PageLoadEvent::Started,
-                    query_matches,
-                    query,
-                ) && !RELAY_LISTENER_REGISTERED.swap(true, Ordering::Relaxed)
-                {
-                    let webview = webview.clone();
-                    let query = query.clone();
-                    let listener_webview = webview.clone();
-                    let ready_started = process_started;
-                    let ready = ready_callback(Arc::new(AtomicBool::new(false)), move || {
-                        eprintln!(
-                            "S5 frontend readiness event received elapsed_ms={:.3}",
-                            ready_started.elapsed().as_secs_f64() * 1_000.0
-                        );
-                        let webview = listener_webview.clone();
-                        let query = query.clone();
-                        std::thread::spawn(move || {
-                            if let Err(error) = start_b4_relay(&webview, &query) {
-                                eprintln!("S5 relay failed: {error}");
-                                dispatch(
-                                    &webview,
-                                    "daemon-status",
-                                    &json!({"connected":false,"error":error}),
-                                );
-                            }
-                        });
-                    });
-                    register_ready_listener(
-                        move |event, ready| {
-                            webview.listen(event, move |_| ready());
-                        },
-                        ready,
-                    );
-                    eprintln!("S5 frontend readiness listener registered");
-                }
+                let _ = process_started;
             }
         })
         .run(tauri::generate_context!())
@@ -462,104 +328,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        acknowledge_batch, b4_trace_enabled, expect_batch_ack, handle_frontend_ready, is_b4_query,
-        ready_callback, register_ready_listener, should_register_ready_listener,
-        wait_for_batch_ack, BatchAckState,
-    };
-    use std::{
-        sync::{atomic::AtomicBool, atomic::Ordering, Arc, Condvar, Mutex},
-        time::Duration,
-    };
-
-    #[test]
-    fn readiness_listener_is_registered_before_frontend_effects_run() {
-        assert!(should_register_ready_listener(
-            true,
-            true,
-            "autobench=1&events=5&b4=1"
-        ));
-        assert!(!should_register_ready_listener(
-            true,
-            true,
-            "autobench=1&events=5"
-        ));
-        assert!(!should_register_ready_listener(
-            false,
-            true,
-            "autobench=1&events=5&b4=1"
-        ));
-        assert!(!should_register_ready_listener(
-            true,
-            false,
-            "autobench=1&events=5&b4=1"
-        ));
-    }
-
-    #[test]
-    fn readiness_handler_starts_relay_once() {
-        let started = AtomicBool::new(false);
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        for _ in 0..2 {
-            let calls = Arc::clone(&calls);
-            handle_frontend_ready(&started, || {
-                calls.fetch_add(1, Ordering::SeqCst);
-            });
-        }
-        assert!(started.load(Ordering::SeqCst));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn only_b4_queries_start_the_daemon_relay() {
-        assert!(is_b4_query("autobench=1&events=5000&b4=1"));
-        assert!(!is_b4_query("autobench=1&events=5000"));
-        assert!(!is_b4_query("autobench=1&events=5000&notb4=1"));
-    }
+    use super::b4_trace_enabled;
 
     #[test]
     fn tracing_is_disabled_outside_b4() {
         assert!(b4_trace_enabled("events=5000&b4=1"));
         assert!(!b4_trace_enabled("events=5000"));
-    }
-
-    #[test]
-    fn matching_started_page_registers_a_callback_that_starts_the_relay_on_event() {
-        let query = "autobench=1&events=5000&b4=1";
-        let relay_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let callback = ready_callback(Arc::new(AtomicBool::new(false)), {
-            let relay_starts = Arc::clone(&relay_starts);
-            move || {
-                relay_starts.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-        let mut registered = None;
-        if should_register_ready_listener(true, true, query) {
-            register_ready_listener(|event, ready| registered = Some((event, ready)), callback);
-        }
-        assert!(registered.is_some());
-        let (event, on_s5_ready) = registered.unwrap();
-        assert_eq!(event, "s5-ready");
-        on_s5_ready();
-        on_s5_ready();
-        assert_eq!(relay_starts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn relay_matches_out_of_order_acknowledgements_and_times_out_missing_batches() {
-        let acked = Arc::new((Mutex::new(BatchAckState::default()), Condvar::new()));
-        expect_batch_ack(&acked, 7);
-        expect_batch_ack(&acked, 8);
-        let ack_thread = Arc::clone(&acked);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(10));
-            acknowledge_batch(&ack_thread, 8);
-            acknowledge_batch(&ack_thread, 7);
-            acknowledge_batch(&ack_thread, 999);
-        });
-        assert!(wait_for_batch_ack(&acked, 7, Duration::from_millis(100)));
-        assert!(wait_for_batch_ack(&acked, 8, Duration::from_millis(10)));
-        expect_batch_ack(&acked, 9);
-        assert!(!wait_for_batch_ack(&acked, 9, Duration::from_millis(10)));
     }
 }

@@ -1,17 +1,16 @@
-import React, { Profiler, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { Profiler, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { emit, listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
-import { listenAndAnnounceReady } from './tauri-bridge';
-import type { DaemonFrame } from '@shardrail/contracts';
+import { listen } from '@tauri-apps/api/event';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { Button, Input, Label, ListBox, ListBoxItem, Popover, Select, SelectValue, TextField } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { createPortal } from 'react-dom';
-import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, setDaemonAgentCount, setDaemonClockMapping, sortedLatency, tokenCount, useRows } from './store';
+import { daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRowStart, getRows, isLiveTail, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, rowCount, setDaemonAgentChunkCount, setDaemonAgentCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, setLiveTail, sortedLatency, tokenCount, useRows } from './store';
 import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameIntervalMs, percentile, supportsLongTaskEntries, takeCommittedInput } from './metrics-utils';
 import { createFrameSampler } from './frame-sampler';
 import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
+import { coalesceChannelFrame, rangeForWindow, sameMarkdownVersion } from './streaming-view';
 import './style.css';
 
 type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; daemonAgentChunkCount: number; userAgent: string };
@@ -54,7 +53,7 @@ function metrics(): Metrics {
 }
 Object.assign(window, { __s5Metrics: metrics, __s5ResetInputTrace: () => { observed.inputs.length = 0; observed.firstFrame.length = 0; observed.firstFrameTimestamps.length = 0; observed.rafTimestampDeltas.length = 0; pendingInputs.length = 0; }, __firstTranscriptRenderOpportunityMs: 0 });
 
-const Markdown = memo(({ source }: { source: string }) => {
+const Markdown = memo(({ source }: { rowId: number; source: string; contentHash: string; contentVersion: number }) => {
   const [target, setTarget] = useState<HTMLElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
   useEffect(() => {
@@ -72,29 +71,28 @@ const Markdown = memo(({ source }: { source: string }) => {
   }, []);
   const content = <UntrustedMarkdown source={source}/>;
   return <iframe ref={frameRef} title="Agent-authored Markdown" sandbox="allow-same-origin" className="markdown-frame">{target ? createPortal(content, target) : null}</iframe>;
-});
-function Row({ row }: { row: ReturnType<typeof getRows>[number] }) {
-  useLayoutEffect(() => {
-    if (row.id >= 1_000_000_000) markDaemonRowsCommitted([row.id]);
-  }, [row.id]);
-  return <article data-daemon-event-id={row.id >= 1_000_000_000 ? row.id : undefined} className={`event ${row.kind}`}><div className="meta"><b>Agent {row.agent + 1}</b><span>{row.kind === 'approval' ? 'approval requested' : row.kind === 'tool' ? 'tool call' : 'message'} · #{row.id}</span><time>{new Date().toLocaleTimeString()}</time></div>{row.kind === 'approval' ? <><pre>{row.command}</pre><div className="untrusted"><b>Agent’s description · untrusted</b><Markdown source={row.text}/></div><small>Checklist: sandbox not verified · approval routing not verified · containment not verified</small></> : row.kind === 'tool' ? <><pre>{row.command}</pre><small>{row.cwd}</small></> : <div className="body"><Markdown source={row.text}/></div>}</article>;
+}, sameMarkdownVersion);
+function Row({ row, onMount, onUnmount }: { row: ReturnType<typeof getRows>[number]; onMount: (id: number) => void; onUnmount: (id: number) => void }) {
+  return <article ref={(node) => { if (row.id >= 1_000_000_000) { if (node) onMount(row.id); else onUnmount(row.id); } }} className={`event ${row.kind}`}><div className="meta"><b>Agent {row.agent + 1}</b><span>{row.kind === 'approval' ? 'approval requested' : row.kind === 'tool' ? 'tool call' : 'message'} · #{row.id}</span><time>{new Date().toLocaleTimeString()}</time></div>{row.kind === 'approval' ? <><pre>{row.command}</pre><div className="untrusted"><b>Agent’s description · untrusted</b><Markdown rowId={row.id} source={row.text} contentHash={row.contentHash} contentVersion={row.contentVersion}/></div><small>Checklist: sandbox not verified · approval routing not verified · containment not verified</small></> : row.kind === 'tool' ? <><pre>{row.command}</pre><small>{row.cwd}</small></> : <div className="body"><Markdown rowId={row.id} source={row.text} contentHash={row.contentHash} contentVersion={row.contentVersion}/></div>}</article>;
 }
-function Transcript({ onInput, ready }: { onInput: () => void; ready: boolean }) {
+function Transcript({ onInput, ready, requestRange }: { onInput: () => void; ready: boolean; requestRange: (start: number, limit: number) => void }) {
   const rows = useRows();
   const parent = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
   const firstPaintMeasured = useRef(false);
+  const mountedDaemonRows = useRef(new Set<number>());
   // TanStack Virtual returns imperative methods that React Compiler cannot safely memoize.
   // eslint-disable-next-line react-hooks/incompatible-library
-  const virtualizer = useVirtualizer({ count: rows.length, getScrollElement: () => parent.current, estimateSize: () => 112, overscan: 8 });
+  const virtualizer = useVirtualizer({ count: rowCount(), getScrollElement: () => parent.current, estimateSize: () => 112, overscan: 8 });
   const virtualItems = virtualizer.getVirtualItems();
   useLayoutEffect(() => {
-    markRowsCommitted(virtualItems.map((item) => rows[item.index]!.id));
+    const visibleRows = virtualItems.flatMap((item) => rows[item.index - getRowStart()] ? [rows[item.index - getRowStart()]!] : []);
+    markRowsCommitted(visibleRows.map((row) => row.id));
     markDaemonRowsCommitted(
-      virtualItems.map((item) => rows[item.index]!.id),
+      visibleRows.map((row) => row.id),
       requestAnimationFrame,
       () => performance.now(),
-      (id) => followTail.current && Boolean(document.querySelector(`[data-daemon-event-id="${id}"]`)),
+      (id) => mountedDaemonRows.current.has(id),
     );
     if (followTail.current && parent.current) parent.current.scrollTop = parent.current.scrollHeight;
     if (ready && !firstPaintMeasured.current) {
@@ -102,53 +100,71 @@ function Transcript({ onInput, ready }: { onInput: () => void; ready: boolean })
       measureReadyCommitAfterFrame(true, started, () => performance.now(), requestAnimationFrame, (callback) => window.setTimeout(callback, 0), (elapsed) => { (window as Window & { __firstTranscriptRenderOpportunityMs?: number }).__firstTranscriptRenderOpportunityMs = elapsed; });
     }
   }, [rows, virtualItems, ready]);
+  useEffect(() => {
+    const first = virtualItems[0]?.index;
+    if (first !== undefined) requestRange(first, Math.max(1, (virtualItems.at(-1)?.index ?? first) - first + 1));
+  }, [virtualItems, requestRange]);
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable transcript needs keyboard focus
-  return <><div ref={parent} className="transcript" role="region" aria-label="Event transcript" tabIndex={0} onScroll={() => { followTail.current = parent.current !== null && parent.current.scrollHeight - parent.current.scrollTop - parent.current.clientHeight < 24; onInput(); }}><div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((v) => <div key={rows[v.index]!.id} ref={virtualizer.measureElement} data-index={v.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${v.start}px)` }}><Row row={rows[v.index]!}/></div>)}</div></div></>;
+  return <><div ref={parent} className="transcript" role="region" aria-label="Event transcript" tabIndex={0} onScroll={() => { followTail.current = parent.current !== null && parent.current.scrollHeight - parent.current.scrollTop - parent.current.clientHeight < 24; setLiveTail(followTail.current); onInput(); }}><div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((v) => { const row = rows[v.index - getRowStart()]; return row ? <div key={row.id} data-index={v.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 112, transform: `translateY(${v.start}px)` }}><Row row={row} onMount={(id) => mountedDaemonRows.current.add(id)} onUnmount={(id) => mountedDaemonRows.current.delete(id)}/></div> : null; })}</div></div></>;
 }
 function App() {
   const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected');
   // Readiness gates the generator until the external store has been initialized.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { reset(count, streams); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
+  useEffect(() => { reset(count, streams, !b4Enabled); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
   const runningRef = useRef(false);
-  useEffect(() => {
+  const rangeRequest = useRef<{ key: string; id: number; inFlight: boolean; pending?: { start: number; limit: number } }>({ key: '', id: 0, inFlight: false });
+  const requestRange = useCallback((start: number, limit: number) => {
     if (!autobench) return;
+    const state = rangeRequest.current;
+    if (state.inFlight) { state.pending = { start, limit }; return; }
+    const issue = (requestedStart: number, requestedLimit: number) => {
+      const total = rowCount();
+      const { start: from, limit: size } = rangeForWindow(total, requestedStart, isLiveTail() ? 32 : requestedLimit, isLiveTail());
+      const key = `${from}:${size}:${total}`;
+      if (state.key === key) return;
+      state.key = key;
+      state.inFlight = true;
+      const id = ++state.id;
+      void invoke<{ start: number; total: number; version: number; agentChunkCount: number; rows: { cursor: number; event: { session_id: string; kind: string; payload: unknown }; receipt_wall_clock_ms?: number | null }[] }>('get_stream_window', { start: from, limit: size }).then((view) => {
+        setDaemonAgentChunkCount(view.agentChunkCount);
+        if (id === state.id && !state.pending) setDaemonWindow(view.start, view.total, view.rows, view.version);
+        else setDaemonTotal(view.total, false);
+        return invoke('acknowledge_stream_view', { version: view.version });
+      }).catch((error: unknown) => { setTransportStatus(`Stream view failed: ${String(error)}`); b4Trace('window request failed', { error: String(error), start: from, limit: size }); }).finally(() => {
+        state.inFlight = false;
+        const next = state.pending;
+        delete state.pending;
+        if (next) { state.key = ''; issue(next.start, next.limit); }
+      });
+    };
+    issue(start, limit);
+  }, [autobench]);
+  useEffect(() => {
+    if (!autobench || !query.has('b4') || !ready) return;
     const offsets: number[] = [];
     for (let i = 0; i < 5; i++) { const before = performance.now(), wall = Date.now(), after = performance.now(); offsets.push(wall - (before + after) / 2); }
     setDaemonClockMapping(offsets.reduce((a, b) => a + b, 0) / offsets.length, (Math.max(...offsets) - Math.min(...offsets)) / 2 + 1);
-    const unlisten: (() => void)[] = [];
-    let frontendFrameCount = 0;
-    let frontendBatchCount = 0;
-    void listenAndAnnounceReady<{ batchId: number; frames: DaemonFrame[] }>({ listen, emit }, (event) => {
-      const { batchId, frames } = event.payload;
-      let frontendFrames = 0;
-      frontendBatchCount++;
-      frontendFrameCount += frames.length;
-      if (frontendFrameCount === frames.length) b4Trace('first daemon-frames batch received', { batchId, frames: frames.length, frameKinds: frames.slice(0, 5).map((frame) => frame.kind) });
-      if (frontendFrameCount >= 1000 && frontendFrameCount - frames.length < 1000) b4Trace('frontend relay milestone', { frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount });
-      for (const frame of frames) {
-        if (frame.kind === 'durable_event') {
-          const before = daemonAgentChunkCount;
-          applyDaemonEvent(frame.cursor, frame.event, frame.receipt_wall_clock_ms);
-          frontendFrames++;
-          if (before === 0 && daemonAgentChunkCount === 1) b4Trace('first chunk received in frontend', { frameCursor: frame.cursor });
-          if (daemonAgentChunkCount > 0 && daemonAgentChunkCount % 1000 === 0 && daemonAgentChunkCount !== before) b4Trace('frontend chunk milestone', { frontendAgentChunks: daemonAgentChunkCount, relayFramesExpected: count, batchFrames: frames.length });
-        }
-      }
-      if (frontendFrames && daemonAgentChunkCount === 0) b4Trace('frontend lifecycle batch', { batchFrames: frontendFrames });
-      void emit('daemon-frames-ack', { batchId }).catch((error: unknown) => {
-        b4Trace('frontend acknowledgement rejected', { batchId, error: String(error) });
-      });
-      if (frontendBatchCount % 16 === 0 || daemonAgentChunkCount % 1000 < frames.length) b4Trace('frontend batch acknowledged', { batchId, frontendFrames: frontendFrameCount, agentChunks: daemonAgentChunkCount, batchFrames: frames.length });
-    }, (event: { payload: { connected: boolean; error?: string } }) => {
+    let unlistenStatus: (() => void) | undefined;
+    const channel = new Channel<{ version: number; total: number; agentChunkCount: number }>();
+    const removeChannel = coalesceChannelFrame(channel, (notice) => {
+      const { total, agentChunkCount } = notice;
+      setDaemonTotal(total, false);
+      setDaemonAgentChunkCount(agentChunkCount);
+      rangeRequest.current.key = '';
+      requestRange(Math.max(0, total - 32), 32);
+    });
+    void listen<{ connected: boolean; error?: string }>('daemon-status', (event) => {
       const status = event.payload;
       b4Trace('daemon status received', status);
       (window as Window & { __daemonConnected?: boolean }).__daemonConnected = status.connected;
       if (status.connected) (window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce = true;
       setTransportStatus(status.connected ? 'Connected · local shell relay' : status.error ? `Connection failed: ${status.error}` : 'Disconnected');
-    }).then((remove) => { unlisten.push(remove); setTransportStatus('Frontend listeners ready'); b4Trace('ready', { listeners: 'daemon-frames,daemon-status', events: count }); }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); b4Trace('listener setup rejected', { error: String(error) }); console.error('S5 event listener setup failed', error); });
-    return () => { unlisten.forEach((remove) => remove()); };
-  }, [autobench, count]);
+    }).then((remove) => { unlistenStatus = remove; setTransportStatus('Frontend channel ready'); b4Trace('ready', { channel: 'daemon-frames', events: count });
+      return invoke('start_b4_relay', { onFrames: channel, streams: Math.max(1, Math.min(8, streams)) });
+    }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); b4Trace('relay setup rejected', { error: String(error) }); console.error('S5 channel setup failed', error); });
+    return () => { unlistenStatus?.(); removeChannel(); };
+  }, [autobench, count, query, ready, requestRange, streams]);
   useLayoutEffect(() => {
     const input = takeCommittedInput(pendingInputs, draft);
     if (!input) return;
@@ -249,6 +265,6 @@ function App() {
   }
   function updateQuery(key: string, value: string) { const u = new URL(location.href); u.searchParams.set(key, value); window.location.assign(u.toString()); }
   const select = (label: string, value: string, options: string[], onChange: (value: string) => void) => <Select aria-label={label} selectedKey={value} onSelectionChange={(key) => onChange(String(key))}><Label>{label}</Label><Button><SelectValue/><span aria-hidden="true">⌄</span></Button><Popover><ListBox>{options.map((option) => <ListBoxItem key={option} id={option}>{option}</ListBoxItem>)}</ListBox></Popover></Select>;
-  return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header><section className="status"><span>{ready ? `${getRows().length.toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
+  return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header><section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);
