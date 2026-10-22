@@ -1,4 +1,5 @@
 export function intersectingVirtualItems<T extends { start: number; size: number }>(items: T[], scrollTop: number, clientHeight: number) {
+  if (clientHeight <= 0) return [];
   return items.filter((item) => item.start < scrollTop + clientHeight && item.start + item.size > scrollTop);
 }
 

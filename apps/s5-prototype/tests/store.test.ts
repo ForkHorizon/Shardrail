@@ -6,6 +6,7 @@ import { intersectingVirtualItems } from '../src/frame-sampler';
 test('B4 excludes overscan, accepts partial intersections, and samples when a row later enters the viewport once', () => {
   const updates: FrameRequestCallback[] = [];
   const samples: FrameRequestCallback[] = [];
+  let committed = true;
   const previous = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = (callback) => { updates.push(callback); return updates.length; };
   try {
@@ -15,11 +16,12 @@ test('B4 excludes overscan, accepts partial intersections, and samples when a ro
     applyDaemonEvent(3, { session_id: 's1', kind: 'agent_message_chunk', payload: { content: { text: 'chunk' } } }, 1002);
     updates[0]!(performance.now());
     const items = [{ index: 1, start: 80, size: 20 }, { index: 2, start: 95, size: 20 }];
+    assert.deepEqual(intersectingVirtualItems(items, 100, 0), [], 'a collapsed viewport has no visible rows');
     assert.deepEqual(intersectingVirtualItems(items, 100, 100).map(({ index }) => index), [2], 'a row touching only the viewport edge is excluded while a partial overlap is included');
     assert.deepEqual(intersectingVirtualItems([...items, { index: 3, start: 190, size: 20 }], 100, 100).map(({ index }) => index), [2, 3], 'partial overlap at the far edge is included');
     const markVisible = (virtualItems: typeof items, scrollTop: number) => {
       const visible = intersectingVirtualItems(virtualItems, scrollTop, 100);
-      markDaemonRowsCommitted(visible.map(({ index }) => getRows()[index]!.id), (callback) => { samples.push(callback); return samples.length; }, () => 1_020, () => true);
+      markDaemonRowsCommitted(visible.map(({ index }) => getRows()[index]!.id), (callback) => { samples.push(callback); return samples.length; }, () => 1_020, () => committed);
     };
     markVisible(items, 100);
     assert.equal(samples.length, 1, 'the partially visible row schedules; the overscan row does not');
@@ -27,7 +29,13 @@ test('B4 excludes overscan, accepts partial intersections, and samples when a ro
     assert.equal(samples.length, 2, 'the formerly overscan row schedules when it enters the viewport');
     markVisible([{ index: 1, start: 99, size: 20 }, { index: 2, start: 95, size: 20 }], 100);
     assert.equal(samples.length, 2, 'scheduled rows are deduplicated');
-    for (let index = 0; index < samples.length; index++) samples[index]!(0);
+    samples[0]!(0);
+    committed = false;
+    samples[2]!(0);
+    assert.equal(daemonReceiptToRafMs.length, 1, 'an in-flight sample completes if virtualization unmounts the row before the second frame');
+    committed = true;
+    samples[1]!(0);
+    samples[3]!(0);
     assert.equal(daemonReceiptToRafMs.length, 2, 'both intersecting rows contribute exactly one sample');
     reset(0, 1);
   } finally {
