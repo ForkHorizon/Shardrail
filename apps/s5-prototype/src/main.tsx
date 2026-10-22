@@ -65,6 +65,9 @@ const Markdown = memo(({ source }: { source: string }) => {
   return <iframe ref={frameRef} title="Agent-authored Markdown" sandbox="allow-same-origin" className="markdown-frame">{target ? createPortal(content, target) : null}</iframe>;
 });
 function Row({ row }: { row: ReturnType<typeof getRows>[number] }) {
+  useLayoutEffect(() => {
+    if (row.id >= 1_000_000_000) markDaemonRowsCommitted([row.id]);
+  }, [row.id]);
   return <article data-daemon-event-id={row.id >= 1_000_000_000 ? row.id : undefined} className={`event ${row.kind}`}><div className="meta"><b>Agent {row.agent + 1}</b><span>{row.kind === 'approval' ? 'approval requested' : row.kind === 'tool' ? 'tool call' : 'message'} · #{row.id}</span><time>{new Date().toLocaleTimeString()}</time></div>{row.kind === 'approval' ? <><pre>{row.command}</pre><div className="untrusted"><b>Agent’s description · untrusted</b><Markdown source={row.text}/></div><small>Checklist: sandbox not verified · approval routing not verified · containment not verified</small></> : row.kind === 'tool' ? <><pre>{row.command}</pre><small>{row.cwd}</small></> : <div className="body"><Markdown source={row.text}/></div>}</article>;
 }
 function Transcript({ onInput, ready }: { onInput: () => void; ready: boolean }) {
