@@ -1,10 +1,14 @@
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tauri::ipc::Channel;
 
 #[derive(Default)]
 pub struct StreamStore {
     rows: Vec<Value>,
+    session_rows: HashMap<String, Vec<usize>>,
     version: u64,
     last_notified: u64,
     notification_outstanding: bool,
@@ -18,6 +22,12 @@ impl StreamStore {
     }
 
     pub fn append(&mut self, frame: Value) {
+        if let Some(session_id) = frame["event"]["session_id"].as_str() {
+            self.session_rows
+                .entry(session_id.to_owned())
+                .or_default()
+                .push(self.rows.len());
+        }
         if frame["event"]["kind"] == "agent_message_chunk" {
             self.agent_chunk_count += 1;
         }
@@ -30,6 +40,22 @@ impl StreamStore {
         let start = start.min(total);
         let end = start.saturating_add(limit.min(256)).min(total);
         json!({ "start": start, "total": total, "version": self.version, "agentChunkCount": self.agent_chunk_count, "rows": self.rows[start..end] })
+    }
+
+    pub fn session_window(&self, session_id: &str, start: usize, limit: usize) -> Value {
+        let indices = self
+            .session_rows
+            .get(session_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let total = indices.len();
+        let start = start.min(total);
+        let end = start.saturating_add(limit.min(256)).min(total);
+        let rows: Vec<_> = indices[start..end]
+            .iter()
+            .map(|&index| &self.rows[index])
+            .collect();
+        json!({ "sessionId": session_id, "start": start, "total": total, "version": self.version, "agentChunkCount": self.agent_chunk_count, "rows": rows })
     }
 
     pub fn notify(&mut self) -> Result<(), String> {
@@ -88,6 +114,37 @@ mod tests {
         let next = store.begin_notification().unwrap();
         assert_eq!(next["version"], 50_000);
         assert_eq!(next["total"], 50_000);
+    }
+
+    #[test]
+    fn session_windows_partition_rows_and_keep_ranges_bounded() {
+        let mut store = StreamStore::default();
+        for (session, cursor) in [("one", 1), ("two", 2), ("one", 3)] {
+            store.append(json!({ "cursor": cursor, "event": { "session_id": session, "kind": "agent_message_chunk" } }));
+        }
+        let first = store.session_window("one", 0, 1);
+        assert_eq!(first["total"], 2);
+        assert_eq!(first["rows"][0]["cursor"], 1);
+        assert_eq!(store.session_window("two", 0, 256)["rows"][0]["cursor"], 2);
+        assert_eq!(
+            store.session_window("one", 0, usize::MAX)["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn stale_range_ack_does_not_release_a_notice_but_notice_ack_resumes_delivery() {
+        let mut store = StreamStore::default();
+        store.append(json!({ "cursor": 1 }));
+        assert_eq!(store.begin_notification().unwrap()["version"], 1);
+        store.append(json!({ "cursor": 2 }));
+        store.acknowledge(0).unwrap();
+        assert!(store.begin_notification().is_none());
+        store.acknowledge(1).unwrap();
+        assert_eq!(store.begin_notification().unwrap()["version"], 2);
     }
 
     #[test]

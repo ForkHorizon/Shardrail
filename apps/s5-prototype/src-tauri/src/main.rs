@@ -253,10 +253,14 @@ fn get_stream_window(
     store: State<'_, SharedStreamStore>,
     start: usize,
     limit: usize,
+    session_id: Option<String>,
 ) -> Result<Value, String> {
     store
         .lock()
-        .map(|store| store.window(start, limit))
+        .map(|store| match session_id {
+            Some(session_id) => store.session_window(&session_id, start, limit),
+            None => store.window(start, limit),
+        })
         .map_err(|e| e.to_string())
 }
 

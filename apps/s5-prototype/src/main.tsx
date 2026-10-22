@@ -10,7 +10,7 @@ import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameInterval
 import { createFrameSampler } from './frame-sampler';
 import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
-import { coalesceChannelFrame, rangeForWindow, sameMarkdownVersion } from './streaming-view';
+import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from './streaming-view';
 import './style.css';
 
 type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; daemonAgentChunkCount: number; userAgent: string };
@@ -83,7 +83,7 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
   const mountedDaemonRows = useRef(new Set<number>());
   // TanStack Virtual returns imperative methods that React Compiler cannot safely memoize.
   // eslint-disable-next-line react-hooks/incompatible-library
-  const virtualizer = useVirtualizer({ count: rowCount(), getScrollElement: () => parent.current, estimateSize: () => 112, overscan: 8 });
+  const virtualizer = useVirtualizer({ count: rowCount(), getScrollElement: () => parent.current, estimateSize: () => 112, overscan: transcriptOverscan(b4Enabled) });
   const virtualItems = virtualizer.getVirtualItems();
   useLayoutEffect(() => {
     const visibleRows = virtualItems.flatMap((item) => rows[item.index - getRowStart()] ? [rows[item.index - getRowStart()]!] : []);
@@ -113,14 +113,18 @@ function App() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { reset(count, streams, !b4Enabled); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
   const runningRef = useRef(false);
-  const rangeRequest = useRef<{ key: string; id: number; inFlight: boolean; pending?: { start: number; limit: number } }>({ key: '', id: 0, inFlight: false });
-  const requestRange = useCallback((start: number, limit: number) => {
+  const rangeRequest = useRef<{ key: string; id: number; inFlight: boolean; pending?: { start: number; limit: number; noticeVersion?: number } }>({ key: '', id: 0, inFlight: false });
+  const requestRange = useCallback((start: number, limit: number, noticeVersion?: number) => {
     if (!autobench) return;
     const state = rangeRequest.current;
-    if (state.inFlight) { state.pending = { start, limit }; return; }
-    const issue = (requestedStart: number, requestedLimit: number) => {
+    if (state.inFlight) {
+      const pendingNoticeVersion = noticeVersion ?? state.pending?.noticeVersion;
+      state.pending = pendingNoticeVersion === undefined ? { start, limit } : { start, limit, noticeVersion: pendingNoticeVersion };
+      return;
+    }
+    const issue = (requestedStart: number, requestedLimit: number, requestedNoticeVersion?: number) => {
       const total = rowCount();
-      const { start: from, limit: size } = rangeForWindow(total, requestedStart, isLiveTail() ? 32 : requestedLimit, isLiveTail());
+      const { start: from, limit: size } = rangeForWindow(total, requestedStart, Math.max(32, requestedLimit), isLiveTail());
       const key = `${from}:${size}:${total}`;
       if (state.key === key) return;
       state.key = key;
@@ -130,15 +134,15 @@ function App() {
         setDaemonAgentChunkCount(view.agentChunkCount);
         if (id === state.id && !state.pending) setDaemonWindow(view.start, view.total, view.rows, view.version);
         else setDaemonTotal(view.total, false);
-        return invoke('acknowledge_stream_view', { version: view.version });
+        return requestedNoticeVersion === undefined ? undefined : invoke('acknowledge_stream_view', { version: requestedNoticeVersion });
       }).catch((error: unknown) => { setTransportStatus(`Stream view failed: ${String(error)}`); b4Trace('window request failed', { error: String(error), start: from, limit: size }); }).finally(() => {
         state.inFlight = false;
         const next = state.pending;
         delete state.pending;
-        if (next) { state.key = ''; issue(next.start, next.limit); }
+        if (next) { state.key = ''; issue(next.start, next.limit, next.noticeVersion); }
       });
     };
-    issue(start, limit);
+    issue(start, limit, noticeVersion);
   }, [autobench]);
   useEffect(() => {
     if (!autobench || !query.has('b4') || !ready) return;
@@ -151,8 +155,14 @@ function App() {
       const { total, agentChunkCount } = notice;
       setDaemonTotal(total, false);
       setDaemonAgentChunkCount(agentChunkCount);
-      rangeRequest.current.key = '';
-      requestRange(Math.max(0, total - 32), 32);
+      if (isLiveTail()) {
+        rangeRequest.current.key = '';
+        const tailSize = liveTailWindowSize(b4Enabled);
+        requestRange(Math.max(0, total - tailSize), tailSize, notice.version);
+      } else {
+        setDaemonTotal(total);
+        void invoke('acknowledge_stream_view', { version: notice.version }).catch((error: unknown) => setTransportStatus(`Stream acknowledgement failed: ${String(error)}`));
+      }
     });
     void listen<{ connected: boolean; error?: string }>('daemon-status', (event) => {
       const status = event.payload;
@@ -211,7 +221,7 @@ function App() {
         b4Trace('sample wait started', { expectedSamples: minimumSamples });
         await waitForB4Samples(minimumSamples, () => daemonReceiptToRafMs.length);
       }
-      b4Trace('completion condition evaluated', { expectedAgentChunks: count, frontendAgentChunks: daemonAgentChunkCount, expectedSamples: minimumB4Samples(count), samples: daemonReceiptToRafMs.length, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce), rows: eventCount(), committedRows: document.querySelectorAll('[data-daemon-event-id]').length });
+      b4Trace('completion condition evaluated', { expectedAgentChunks: count, frontendAgentChunks: daemonAgentChunkCount, expectedSamples: minimumB4Samples(count), samples: daemonReceiptToRafMs.length, connectedOnce: Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce), rows: eventCount() });
       const el = document.querySelector<HTMLElement>('.transcript')!;
       if (!query.has('b4')) {
         startFrameSampling();
@@ -226,7 +236,7 @@ function App() {
       });
       stopFrameSampling();
       if (cancelled) return;
-      b4Trace('rows committed', { rows: eventCount(), committedRows: document.querySelectorAll('[data-daemon-event-id]').length });
+      b4Trace('rows committed', { rows: eventCount() });
       const samples = metrics();
       b4Trace('samples collected', { count: samples.b4.count, daemonAgentChunkCount: samples.daemonAgentChunkCount });
       const requiredTokens = Math.ceil(streams * 75 * durationMs / 1000 * 0.5);

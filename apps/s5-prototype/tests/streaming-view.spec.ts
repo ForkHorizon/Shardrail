@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { daemonReceiptToRafMs, getRows, getRowStart, markDaemonRowsCommitted, reset, rowCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, subscribe } from '../src/store';
-import { coalesceChannelFrame, hashContent, markdownCacheKey, rangeForWindow, sameMarkdownVersion } from '../src/streaming-view';
+import { coalesceChannelFrame, hashContent, liveTailWindowSize, markdownCacheKey, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from '../src/streaming-view';
 import { UntrustedMarkdown } from '../src/UntrustedMarkdown';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -26,24 +26,32 @@ describe('S5 streaming view', () => {
     expect(channel.onmessage).toBeNull();
   });
 
-  it('coalesces N windows in one animation frame into one store commit', () => {
+  it('coalesces N channel notices in one animation frame before one window commit', () => {
     const callbacks: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callbacks.push(callback); return callbacks.length; });
     let commits = 0;
     const remove = subscribe(() => commits++);
-    for (let version = 1; version <= 20; version++) setDaemonWindow(version, 100, [frame(version)], version);
+    const channel: { onmessage: ((message: number) => void) | null } = { onmessage: null };
+    const removeChannel = coalesceChannelFrame(channel, (version) => setDaemonWindow(version, 100, [frame(version)], version), (callback) => { callbacks.push(callback); return callbacks.length; }, () => {});
+    for (let version = 1; version <= 20; version++) channel.onmessage!(version);
     expect(callbacks).toHaveLength(1);
     callbacks[0]!(0);
     expect(commits).toBe(1);
     expect(getRowStart()).toBe(20);
     expect(getRows()[0]?.id).toBe(1_000_000_020);
+    removeChannel();
     remove();
   });
 
   it('selects bounded ranges and follows the live tail', () => {
     expect(rangeForWindow(50_000, 120, 40, false)).toEqual({ start: 120, limit: 40 });
+    expect(rangeForWindow(50_000, 120, 14, false)).toEqual({ start: 120, limit: 32 });
     expect(rangeForWindow(50_000, 0, 40, true)).toEqual({ start: 49_960, limit: 40 });
     expect(rangeForWindow(50_000, 0, 1000, true)).toEqual({ start: 49_872, limit: 128 });
+    expect(liveTailWindowSize(true)).toBe(128);
+    expect(transcriptOverscan(true)).toBe(32);
+    expect(liveTailWindowSize(false)).toBe(32);
+    expect(transcriptOverscan(false)).toBe(8);
   });
 
   it('uses row ID plus content hash as the markdown cache key', () => {
@@ -65,15 +73,15 @@ describe('S5 streaming view', () => {
     const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
     const rowPath = source.slice(source.indexOf('function Row'), source.indexOf('function App'));
     expect(rowPath).not.toMatch(/querySelector|ResizeObserver|measureElement/);
+    expect(source).not.toContain("querySelectorAll('[data-daemon-event-id]')");
+    const channelNoticePath = source.slice(source.indexOf('coalesceChannelFrame(channel'), source.indexOf("'daemon-status'"));
+    expect(channelNoticePath).toMatch(/if \(isLiveTail\(\)\)/);
   });
 
-  it('preserves D64 receipt mapping and samples at entry to the second rAF', () => {
-    const scheduled: FrameRequestCallback[] = [];
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { scheduled.push(callback); return scheduled.length; });
+  it('preserves D64 receipt mapping and samples an overlapping row only once', () => {
     reset(0, 1, false);
     setDaemonClockMapping(1_000, 2);
     setDaemonWindow(0, 1, [frame(1)], 1);
-    scheduled.shift()!(0);
     const rafs: FrameRequestCallback[] = [];
     markDaemonRowsCommitted([1_000_000_001], (callback) => { rafs.push(callback); return rafs.length; }, () => 9_025, () => true);
     expect(rafs).toHaveLength(1);
@@ -81,11 +89,13 @@ describe('S5 streaming view', () => {
     expect(rafs).toHaveLength(2);
     rafs[1]!(0);
     expect(daemonReceiptToRafMs.at(-1)).toBe(24);
+    setDaemonWindow(0, 1, [frame(1)], 2);
+    markDaemonRowsCommitted([1_000_000_001], (callback) => { rafs.push(callback); return rafs.length; }, () => 9_030, () => true);
+    expect(rafs).toHaveLength(2);
+    expect(daemonReceiptToRafMs).toHaveLength(1);
   });
 
   it('updates a 50k-row projection in bounded work per frame', () => {
-    const callbacks: FrameRequestCallback[] = [];
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callbacks.push(callback); return callbacks.length; });
     const view = Array.from({ length: 64 }, (_, index) => frame(49_936 + index));
     const samples: number[] = [];
     for (const total of [5_000, 50_000]) {
@@ -93,11 +103,10 @@ describe('S5 streaming view', () => {
       for (let count = 0; count < 200; count++) {
         setDaemonTotal(total);
         setDaemonWindow(total - 64, total, view, count + 1);
-        callbacks.pop()!(0);
       }
       samples.push((performance.now() - started) / 200);
     }
-    console.info(`S5 frame cost with 5k/50k total rows: ${samples[0]?.toFixed(4)}/${samples[1]?.toFixed(4)} ms per 64-row view update`);
+    console.info(`S5 projection microbenchmark with 5k/50k total rows: ${samples[0]?.toFixed(4)}/${samples[1]?.toFixed(4)} ms per 64-row view update`);
     expect(rowCount()).toBe(50_000);
     expect(getRows()).toHaveLength(64);
     expect(getRowStart()).toBe(49_936);

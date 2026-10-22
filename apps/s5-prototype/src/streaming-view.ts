@@ -1,7 +1,10 @@
 export function rangeForWindow(total: number, start: number, limit: number, followTail: boolean) {
-  const size = Math.max(1, Math.min(128, limit));
+  const size = Math.max(1, Math.min(128, Math.max(32, limit)));
   return { start: followTail ? Math.max(0, total - size) : Math.max(0, Math.min(start, total)), limit: size };
 }
+
+export function liveTailWindowSize(isB4: boolean) { return isB4 ? 128 : 32; }
+export function transcriptOverscan(isB4: boolean) { return isB4 ? 32 : 8; }
 
 export function markdownCacheKey(rowId: number, contentHash: string, contentVersion = 0) {
   return `${rowId}:${contentHash}:${contentVersion}`;

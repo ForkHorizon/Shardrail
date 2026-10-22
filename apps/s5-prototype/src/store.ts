@@ -18,6 +18,7 @@ const daemonReceipts = new Map<number, number>();
 // shortcut: only the newest 512 unmounted receipts are retained, upgrade if B4 must measure delayed historical virtual rows.
 const maxPendingDaemonReceipts = 512;
 const daemonScheduled = new Set<number>();
+const daemonSampled = new Set<number>();
 const daemonAgents = new Map<string, number>();
 const daemonSessionAgents = new Map<string, number>();
 let daemonAgentCount = 1;
@@ -44,7 +45,7 @@ export function setDaemonWindow(start: number, total: number, values: { cursor: 
     const id = 1_000_000_000 + cursor;
     const payload = event.payload as { content?: { text?: string }; toolCallId?: string };
     const text = payload?.content?.text ?? JSON.stringify(event.payload);
-    if (event.kind === 'agent_message_chunk' && receipt_wall_clock_ms != null) {
+    if (event.kind === 'agent_message_chunk' && receipt_wall_clock_ms != null && !daemonSampled.has(id)) {
       daemonReceipts.set(id, receipt_wall_clock_ms);
       while (daemonReceipts.size > maxPendingDaemonReceipts) daemonReceipts.delete(daemonReceipts.keys().next().value!);
     }
@@ -52,22 +53,13 @@ export function setDaemonWindow(start: number, total: number, values: { cursor: 
     daemonSessionAgents.set(event.session_id, agent);
     return { id, agent, kind: event.kind === 'approval_requested' ? 'approval' : event.kind.includes('tool') ? 'tool' : 'message', text, contentHash: hashContent(text), contentVersion: 0, command: payload?.toolCallId ?? '', cwd: '', at: 0 } as EventRow;
   });
-  pendingDaemonWindow = { start, total, rows: nextRows, version };
-  if (!daemonWindowRaf) daemonWindowRaf = requestAnimationFrame(() => {
-    const next = pendingDaemonWindow;
-    pendingDaemonWindow = undefined;
-    daemonWindowRaf = 0;
-    if (!next) return;
-    rows = next.rows;
-    rowStart = next.start;
-    rowTotal = next.total;
-    windowVersion = next.version;
-    notify();
-  });
+  rows = nextRows;
+  rowStart = start;
+  rowTotal = total;
+  windowVersion = version;
+  notify();
 }
 let windowVersion = 0;
-let daemonWindowRaf = 0;
-let pendingDaemonWindow: { start: number; total: number; rows: EventRow[]; version: number } | undefined;
 export function applyPendingUpdates(current: EventRow[], indexById: Map<number, number>, updates: EventRow[]) {
   if (!updates.length) return current;
   const next = [...current];
@@ -88,15 +80,12 @@ export function reset(count: number, streams: number, seedRows = true) {
   rowTotal = rows.length;
   windowVersion = 0;
   liveTail = true;
-  pendingDaemonWindow = undefined;
-  if (daemonWindowRaf) cancelAnimationFrame(daemonWindowRaf);
-  daemonWindowRaf = 0;
   rowIndexById = new Map(rows.map((row, index) => [row.id, index]));
   pending = new Map();
   receivedAt.clear();
   scheduledLatency.clear();
   activeMessageByAgent.clear();
-  daemonReceipts.clear(); daemonScheduled.clear(); daemonAgents.clear(); daemonSessionAgents.clear(); daemonAgentNext = 0;
+  daemonReceipts.clear(); daemonScheduled.clear(); daemonSampled.clear(); daemonAgents.clear(); daemonSessionAgents.clear(); daemonAgentNext = 0;
   daemonReceiptToRafMs.length = 0;
   daemonAgentChunkCount = 0;
   mockCreationToMountedRowFollowupLatency.length = 0;
@@ -137,6 +126,7 @@ export function markDaemonRowsCommitted(ids: number[], requestFrame: (callback: 
     daemonScheduled.add(id);
     requestFrame(() => requestFrame(() => {
       daemonReceiptToRafMs.push(now() - (receipt - pageClockOffsetMs));
+      daemonSampled.add(id);
       daemonReceipts.delete(id); daemonScheduled.delete(id);
     }));
   }
