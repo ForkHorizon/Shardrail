@@ -602,6 +602,7 @@ enum DaemonCommand {
         #[command(subcommand)]
         command: ClientCommand,
     },
+    Identity,
 }
 
 #[derive(Debug, Subcommand)]
@@ -611,6 +612,8 @@ enum ClientCommand {
         label: String,
         #[arg(long, value_enum)]
         scope: ScopeArg,
+        #[arg(long)]
+        public_key: Option<String>,
     },
     List,
     Remove {
@@ -671,18 +674,33 @@ struct ProviderOption {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let path = args.data_dir.unwrap_or_else(default_data_dir);
-    if let Some(DaemonCommand::Client { command }) = args.command {
-        manage_clients(&path, command)?;
-    } else {
-        run(
-            path,
-            args.fake_acp_path,
-            args.fake_acp_no_reject,
-            args.fake_acp_disconnect_after_permission,
-            args.approval_timeout_secs,
-            args.test_write_ahead_delay_ms,
-        )
-        .await?;
+    match args.command {
+        Some(DaemonCommand::Client { command }) => manage_clients(&path, command)?,
+        Some(DaemonCommand::Identity) => {
+            let (directory, anchored_path) = open_private_data_directory(&path)?;
+            pin_data_directory(&directory)?;
+            let path = if cfg!(target_os = "macos") {
+                Path::new(".")
+            } else {
+                anchored_path.as_path()
+            };
+            let key = load_or_create_signing_key(&path.join("host.key"))?;
+            println!(
+                "host_public_key={}",
+                encode_hex(&key.verifying_key().to_bytes())
+            );
+        }
+        None => {
+            run(
+                path,
+                args.fake_acp_path,
+                args.fake_acp_no_reject,
+                args.fake_acp_disconnect_after_permission,
+                args.approval_timeout_secs,
+                args.test_write_ahead_delay_ms,
+            )
+            .await?
+        }
     }
     Ok(())
 }
@@ -773,15 +791,31 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
     let mut entries = load_authorized_clients(path)
         .map_err(|error| io::Error::new(error.kind(), format!("load client registry: {error}")))?;
     match command {
-        ClientCommand::Add { label, scope } => {
+        ClientCommand::Add {
+            label,
+            scope,
+            public_key,
+        } => {
             let id = Uuid::now_v7();
-            let key = generate_signing_key()?;
-            let public_key = encode_hex(&key.verifying_key().to_bytes());
             let host_key = load_or_create_signing_key(&path.join("host.key"))
                 .map_err(|error| io::Error::new(error.kind(), format!("load host key: {error}")))?;
-            write_private_bytes(&path.join(format!("client-{id}.key")), &key.to_bytes()).map_err(
-                |error| io::Error::new(error.kind(), format!("write client key: {error}")),
-            )?;
+            let public_key = match public_key {
+                Some(key) => {
+                    let bytes = decode_hex(&key)?;
+                    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "public key must be 32 bytes")
+                    })?;
+                    VerifyingKey::from_bytes(&bytes).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid public key")
+                    })?;
+                    key
+                }
+                None => {
+                    let key = generate_signing_key()?;
+                    write_private_bytes(&path.join(format!("client-{id}.key")), &key.to_bytes())?;
+                    encode_hex(&key.verifying_key().to_bytes())
+                }
+            };
             entries.clients.push(AuthorizedClient {
                 client_id: id,
                 public_key: public_key.clone(),
@@ -799,7 +833,7 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
                 ScopeArg::Limited => ClientScope::Limited,
             };
             println!(
-                "client_id={id} public_key={public_key} scope={} key_file=client-{id}.key host_public_key={}",
+                "client_id={id} public_key={public_key} scope={} host_public_key={}",
                 scope_name(client_scope),
                 encode_hex(&host_key.verifying_key().to_bytes())
             );

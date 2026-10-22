@@ -506,6 +506,89 @@ fn client_key_commands_register_list_and_remove_private_keys() {
 }
 
 #[test]
+fn public_key_registration_keeps_the_private_key_with_the_client() {
+    let dir = tempdir().unwrap();
+    let client_key = SigningKey::from_bytes(&[29; 32]);
+    let public_key = client_key
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let added = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args([
+            "client",
+            "add",
+            "--label",
+            "S5 desktop",
+            "--scope",
+            "full",
+            "--public-key",
+            &public_key,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let added_stdout = String::from_utf8_lossy(&added.stdout);
+    let client_id = added_stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("client_id="))
+        .unwrap();
+    assert!(!dir.path().join(format!("client-{client_id}.key")).exists());
+    let registrations: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("authorized-clients.json")).unwrap())
+            .unwrap();
+    assert_eq!(registrations["clients"][0]["public_key"], public_key);
+
+    let identity = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("identity")
+        .output()
+        .unwrap();
+    assert!(identity.status.success());
+    let host_key: [u8; 32] = std::fs::read(dir.path().join("host.key"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let host_public_key = SigningKey::from_bytes(&host_key).verifying_key().to_bytes();
+    let host_public_key = host_public_key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(
+        String::from_utf8_lossy(&identity.stdout)
+            .contains(&format!("host_public_key={host_public_key}"))
+    );
+}
+
+#[test]
+fn identity_query_works_while_daemon_holds_its_process_lock() {
+    let dir = tempdir().unwrap();
+    let mut daemon = start_daemon(dir.path());
+    let identity = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("identity")
+        .output()
+        .unwrap();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    assert!(
+        identity.status.success(),
+        "{}",
+        String::from_utf8_lossy(&identity.stderr)
+    );
+    assert!(String::from_utf8_lossy(&identity.stdout).contains("host_public_key="));
+}
+
+#[test]
 fn real_daemon_creates_streams_recovers_and_rejects_second_instance() {
     let dir = tempdir().unwrap();
     let client_key = add_client(dir.path());
