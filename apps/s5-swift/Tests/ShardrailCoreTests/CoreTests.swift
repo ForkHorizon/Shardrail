@@ -17,6 +17,8 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(message.hex, vector["transcript_sha256"])
         try Handshake.verify(signatureHex: vector["client_signature"]!, message: message, publicKeyHex: vector["client_public_key"]!)
         XCTAssertThrowsError(try Handshake.verify(signatureHex: vector["client_signature"]!, message: Data("tampered".utf8), publicKeyHex: vector["client_public_key"]!))
+        XCTAssertThrowsError(try Handshake.verify(signatureHex: "not-hex", message: message, publicKeyHex: vector["client_public_key"]!))
+        XCTAssertThrowsError(try Handshake.verify(signatureHex: vector["client_signature"]!, message: message, publicKeyHex: "00"))
         XCTAssertThrowsError(try Handshake.transcript(fieldsHex: ["not-hex", "00", "00", "00"]))
     }
 
