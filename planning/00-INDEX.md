@@ -26,7 +26,7 @@ A workspace for supervising several AI coding agents (Codex, Claude Code, Grok B
 | 10 | [Roadmap and backlog](10-roadmap-and-backlog.md) | phases P0–P4 (P1a slim slice, P1e hardening), spikes S1–S9, epics, candidate tasks, dependencies |
 | 11 | [Modules](11-modules.md) | module table M01–M18, outlines of the foundational modules, engineering rules for AI agents |
 | 12 | [Decisions](12-decisions.md) | D1–D64 with rationale and what earlier versions got wrong |
-| 13 | [Risks and open questions](13-risks-and-open-questions.md) | owner decisions U1–U26 (all answered except U5/U7, deferred until other users), risks R1–R47, tensions, unverified assumptions |
+| 13 | [Risks and open questions](13-risks-and-open-questions.md) | initial owner questions U1–U26 (U5/U7 deferred until other users); open S5 event-store retention and B4 sample-floor decisions; risks R1–R47, tensions, unverified assumptions |
 | 14 | [Evidence](14-evidence.md) | sources with access dates and confidence labels (EV-01–EV-31) |
 | 15 | [Independent review](15-independent-review.md) | 2026-10-18 review by a different model family (in Russian) with a resolution-status table showing where each finding was applied |
 | 16 | [UI technology research](16-ui-technology-research.md) | 2026-10-18 research for U8 (in Russian): frameworks compared for AI-codegen reliability, sources, rules for AI agents |
