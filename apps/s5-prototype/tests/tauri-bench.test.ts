@@ -151,11 +151,13 @@ test('Tauri result server honors the configured results directory', async () => 
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     }
     assert.equal(ready, true, 'result server did not become ready');
-    const samplesMs = Array.from({ length: 50_000 }, (_, index) => index / 7);
+    const samplesMs = Array.from({ length: 50_000 }, (_, index) => Math.sin(index) * 10_000 + 10_000.123456789);
+    const body = JSON.stringify({ filename: 'cold-0-1-r1', result: { b4: { count: samplesMs.length, samplesMs }, extraMetric: 'x'.repeat(150_000) } });
+    assert.ok(body.length > 1_000_000);
     const response = await fetch('http://127.0.0.1:5174/result', {
       method: 'POST',
       headers: { origin: 'tauri://localhost', 'content-type': 'application/json' },
-      body: JSON.stringify({ filename: 'cold-0-1-r1', result: { b4: { count: samplesMs.length, samplesMs } } }),
+      body,
     });
     assert.equal(response.status, 200);
     const saved = JSON.parse(readFileSync(join(resultsDir, 'tauri-cold-0-1-r1.json'), 'utf8')) as { b4: { count: number; samplesMs: number[] } };

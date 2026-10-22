@@ -19,7 +19,7 @@ const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) {
       body += chunk;
-      if (body.length > 1_000_000) throw new Error('result payload too large');
+      if (body.length > 5_000_000) throw new Error('result payload too large');
     }
     const { filename, result } = JSON.parse(body);
     if (typeof filename !== 'string' || !/^[a-zA-Z0-9-]+$/.test(filename) || typeof result !== 'object' || result === null) throw new Error('invalid result payload');
