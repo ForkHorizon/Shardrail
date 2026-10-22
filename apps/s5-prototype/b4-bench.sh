@@ -12,6 +12,7 @@ if [ ! -x "$app" ] || [ ! -x "$daemon_bin" ] || [ ! -x "$fake_bin" ]; then
   printf 'Missing release app or daemon/fake-agent binaries\n' >&2
   exit 1
 fi
+bash check-bench-app-freshness.sh "$app" src dist src-tauri/src src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/build.rs
 S5_BENCH_PREFIX=b4 S5_BENCH_RESULTS_DIR="$results_dir" node tauri-results-server.mjs >"$results_dir/b4-results-server.log" 2>&1 &
 receiver_pid=$!
 trap 'kill "$receiver_pid" 2>/dev/null || true' EXIT
@@ -33,6 +34,7 @@ for events in "${event_sizes[@]}"; do
         temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/shardrail-b4.XXXXXX")
         SHARDRAIL_FAKE_ACP_STREAM_EVENTS="$chunks" "$daemon_bin" --data-dir "$temp_dir" --fake-acp-path "$fake_bin" >"$results_dir/b4-daemon-$name.log" 2>&1 &
         daemon_pid=$!
+        ps -Ao pid=,command= | awk '/com\.apple\.WebKit\.(WebContent|Networking|GPU)( |$)/ { print $1 }' >"$temp_dir/webkit-before.txt"
         S5_SHARDRAIL_DATA_DIR="$temp_dir" SHARDRAIL_DAEMON="$daemon_bin" S5_BENCH_QUERY="events=$events&streams=$streams&duration=6000&autostart=0&autobench=1&run=$name&temperature=$temperature&b4=1" "$app" >"$results_dir/b4-app-$name.log" 2>&1 &
         app_pid=$!
         done_run=0
@@ -40,8 +42,8 @@ for events in "${event_sizes[@]}"; do
           if [ -s "$results_dir/b4-$name.json" ]; then done_run=1; break; fi
           sleep 1
         done
-        bash cleanup-bench-processes.sh "$app_pid"
-        bash cleanup-bench-processes.sh "$daemon_pid"
+        bash cleanup-bench-processes.sh "$app_pid" "$temp_dir/webkit-before.txt"
+        bash cleanup-bench-processes.sh "$daemon_pid" "$temp_dir/webkit-before.txt"
         wait "$app_pid" 2>/dev/null || true
         wait "$daemon_pid" 2>/dev/null || true
         rm -rf "$temp_dir"

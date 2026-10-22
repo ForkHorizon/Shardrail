@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { benchShouldFail, daemonStreamFinished, draftPreview, generatedTokenLoadReached, minimumGeneratedTokens, missingRequiredSamples, playwrightOutputPath, shouldWaitForDaemonStream, withScenarioConfiguration } from '../src/bench-utils';
+import { benchShouldFail, daemonStreamFinished, draftPreview, generatedTokenLoadReached, minimumGeneratedTokens, missingRequiredSamples, playwrightOutputPath, shouldWaitForDaemonStream, waitForDaemonStream, withScenarioConfiguration } from '../src/bench-utils';
+import { createServer } from 'node:http';
+import { applyDaemonEvent, daemonAgentChunkCount, reset } from '../src/store';
 
 test('requires enough token deltas without requiring token events to grow the transcript', () => {
   const required = minimumGeneratedTokens(4, 6000);
@@ -19,6 +21,42 @@ test('accepts stream completion after a clean disconnect and validates chunks se
   assert.equal(daemonStreamFinished(true, 5_000, 5_000), true);
   assert.equal(daemonStreamFinished(false, 5_000, 5_000), false);
   assert.equal(daemonStreamFinished(true, 4_999, 5_000), false);
+});
+
+test('late B4 stream chunks reach completion and are saved headlessly', async () => {
+  const previousRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => { callback(performance.now()); return 1; };
+  reset(0, 1);
+  let polls = 0;
+  let saved: { filename: string; result: { daemonAgentChunkCount: number } } | undefined;
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const part of request) body += part;
+    saved = JSON.parse(body) as typeof saved;
+    response.writeHead(200).end();
+  });
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    let elapsed = 0;
+    await waitForDaemonStream(3, () => daemonAgentChunkCount, () => true, async () => {
+      applyDaemonEvent(polls + 1, { session_id: 'fake', kind: 'agent_message_chunk', payload: { content: { text: 'fixture' } } }, polls);
+      polls++;
+      elapsed += 50;
+    }, () => elapsed);
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const response = await fetch(`http://127.0.0.1:${address.port}/result`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: 'cold-3-1-r1', result: { daemonAgentChunkCount } }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(saved, { filename: 'cold-3-1-r1', result: { daemonAgentChunkCount: 3 } });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    globalThis.requestAnimationFrame = previousRaf;
+    reset(0, 1);
+  }
 });
 
 test('fails a benchmark when engines yield launch errors and no samples', () => {

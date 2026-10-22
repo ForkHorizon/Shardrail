@@ -18,8 +18,6 @@ let pageClockOffsetMs = 0;
 let pageClockUncertaintyMs = 0;
 export const daemonReceiptToRafMs: number[] = [];
 export let daemonAgentChunkCount = 0;
-export const getDaemonAgentChunkCount = () => daemonAgentChunkCount;
-export function recordDaemonAgentChunk() { daemonAgentChunkCount++; }
 const activeMessageByAgent = new Map<number, number>();
 export const mockCreationToMountedRowFollowupLatency: number[] = [];
 let generatedTokens = 0;
@@ -56,7 +54,7 @@ export function setDaemonClockMapping(offsetMs: number, uncertaintyMs: number) {
 export function setDaemonAgentCount(count: number) { daemonAgentCount = Math.max(1, count); }
 export function daemonClockMapping() { return { offsetMs: pageClockOffsetMs, uncertaintyMs: pageClockUncertaintyMs }; }
 export function applyDaemonEvent(cursor: number, event: { session_id: string; kind: string; payload: unknown }, receiptWallClockMs: number | null | undefined) {
-  if (event.kind === 'agent_message_chunk') recordDaemonAgentChunk();
+  if (event.kind === 'agent_message_chunk') daemonAgentChunkCount++;
   const agent = daemonAgents.get(event.session_id) ?? daemonAgentNext++ % Math.max(1, daemonAgentCount);
   daemonAgents.set(event.session_id, agent);
   const payload = event.payload as { content?: { text?: string }; toolCallId?: string };

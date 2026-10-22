@@ -10,6 +10,7 @@ if [ ! -x "$app" ]; then
   printf 'Tauri benchmark executable is missing or not executable: %s\n' "$app" >&2
   exit 1
 fi
+bash check-bench-app-freshness.sh "$app" src dist src-tauri/src src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/build.rs
 node tauri-results-server.mjs >"$results_dir/tauri-results-server.log" 2>&1 &
 receiver_pid=$!
 trap 'kill "$receiver_pid" 2>/dev/null || true' EXIT
@@ -38,6 +39,8 @@ for events in "${event_sizes[@]}"; do
       query="events=$events&streams=$streams&duration=6000&autobench=1&run=$name&temperature=$temperature"
       if [ "${S5_BENCH_B4:-0}" = 1 ] && [ "$events" != 0 ]; then query="$query&b4=1"; fi
       if [ "$events" = 0 ]; then query="$query&autostart=0"; fi
+      webkit_before="$(mktemp "${TMPDIR:-/tmp}/s5-webkit-before.XXXXXX")"
+      ps -Ao pid=,command= | awk '/com\.apple\.WebKit\.(WebContent|Networking|GPU)( |$)/ { print $1 }' >"$webkit_before"
       S5_BENCH_QUERY="$query" "$app" >"$results_dir/tauri-$name.log" 2>&1 &
       pid=$!
       done_run=0
@@ -47,7 +50,8 @@ for events in "${event_sizes[@]}"; do
         ps -Ao pid,ppid,%cpu,rss,command | grep -E '/s5-ui|com\.apple\.WebKit\.(WebContent|Networking|GPU)' >>"$results_dir/tauri-$name-processes.txt" || true
         sleep 1
       done
-      bash cleanup-bench-processes.sh "$pid"
+      bash cleanup-bench-processes.sh "$pid" "$webkit_before"
+      rm -f "$webkit_before"
       wait "$pid" 2>/dev/null || true
       if [ "$done_run" != 1 ]; then
         printf '{"error":"Tauri run did not write results within %s seconds","events":%s,"streams":%s,"repetition":%s}\n' "$wait_seconds" "$events" "$streams" "$repetition" >"$results_dir/tauri-$name.json"

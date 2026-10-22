@@ -6,10 +6,10 @@ import type { DaemonFrame } from '@shardrail/contracts';
 import { Button, Input, Label, ListBox, ListBoxItem, Popover, Select, SelectValue, TextField } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { createPortal } from 'react-dom';
-import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getDaemonAgentChunkCount, getRows, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, setDaemonAgentCount, setDaemonClockMapping, sortedLatency, tokenCount, useRows } from './store';
+import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, setDaemonAgentCount, setDaemonClockMapping, sortedLatency, tokenCount, useRows } from './store';
 import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameIntervalMs, percentile, supportsLongTaskEntries, takeCommittedInput } from './metrics-utils';
 import { createFrameSampler } from './frame-sampler';
-import { daemonStreamFinished, draftPreview, shouldWaitForDaemonStream } from './bench-utils';
+import { draftPreview, shouldWaitForDaemonStream, waitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 import './style.css';
 
@@ -149,14 +149,7 @@ function App() {
       await new Promise((resolve) => setTimeout(resolve, 100));
       if (autobench && shouldWaitForDaemonStream(query, count)) {
         setBenchStatus('Waiting for shell relay and daemon fake-agent stream');
-        const deadline = performance.now() + 55_000;
-        while (getDaemonAgentChunkCount() < count && performance.now() < deadline) {
-          const relayWindow = window as Window & { __daemonConnected?: boolean; __daemonConnectedOnce?: boolean };
-          if (relayWindow.__daemonConnectedOnce && relayWindow.__daemonConnected === false) break;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        const connectedOnce = Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce);
-        if (!daemonStreamFinished(connectedOnce, getDaemonAgentChunkCount(), count)) throw new Error(`Relay/stream incomplete: connectedOnce=${connectedOnce}, chunks=${getDaemonAgentChunkCount()}/${count}`);
+        await waitForDaemonStream(count, () => daemonAgentChunkCount, () => Boolean((window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce));
       }
       const el = document.querySelector<HTMLElement>('.transcript')!;
       if (!query.has('b4')) {
