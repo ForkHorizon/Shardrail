@@ -271,7 +271,7 @@ function App() {
       const requiredTokens = Math.ceil(streams * 75 * durationMs / 1000 * 0.5);
       if (autostart && samples.generatedTokens < requiredTokens) throw new Error(`Generated stream load ${samples.generatedTokens} < required ${requiredTokens}`);
       const scrollFrames = [...observed.frames];
-      const result = { date: new Date().toISOString(), temperature: query.get('temperature') ?? 'unspecified', streams, pageVisibility: document.visibilityState, pageFocused: document.hasFocus(), inputMethod: query.has('b4') ? 'not used for B4 daemon stream measurement' : 'Synthetic InputEvent dispatched to the focused composer', ...samples, scrollSmoothness: { frameP95Ms: percentile(scrollFrames, .95), frameMaxMs: Math.max(...scrollFrames), frames: scrollFrames.length } };
+      const result = { date: new Date().toISOString(), events: count, temperature: query.get('temperature') ?? 'unspecified', streams, pageVisibility: document.visibilityState, pageFocused: document.hasFocus(), inputMethod: query.has('b4') ? 'not used for B4 daemon stream measurement' : 'Synthetic InputEvent dispatched to the focused composer', ...samples, scrollSmoothness: { frameP95Ms: percentile(scrollFrames, .95), frameMaxMs: Math.max(...scrollFrames), frames: scrollFrames.length } };
       setBenchStatus('Saving results');
       b4Trace('report fetch started', { url: 'http://127.0.0.1:5174/result', bodyBytes: JSON.stringify({ filename: runId, result }).length });
       let response: Response;
@@ -291,7 +291,7 @@ function App() {
       if (autobench) await fetch('http://127.0.0.1:5174/result', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ filename: runId, result: { error: String(error), daemonAgentChunkCount, b4: { count: daemonReceiptToRafMs.length } } }),
+        body: JSON.stringify({ filename: runId, result: { error: String(error), events: count, streams, daemonAgentChunkCount, b4: { count: daemonReceiptToRafMs.length } } }),
       }).catch(() => undefined);
     });
     return () => { cancelled = true; };

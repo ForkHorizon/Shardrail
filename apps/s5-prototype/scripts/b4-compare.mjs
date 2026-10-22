@@ -5,7 +5,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 export function sampleFloor(events) { return Math.min(events, Math.max(20, Math.ceil(events / 100))); }
-const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.ceil(values.length * fraction) - 1)] : null;
+const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * fraction))] : null;
 const median = (values) => percentile(values, 0.5);
 
 export function compareRuns(runs) {
@@ -14,9 +14,9 @@ export function compareRuns(runs) {
     const { stack, events, streams, temperature } = run;
     const key = [events, streams, temperature].join(':');
     const group = groups.get(key) ?? { events, streams, temperature, stacks: {} };
-    const samples = run.b4?.samplesMs ?? [];
-    const count = Number.isInteger(run.b4?.count) ? run.b4.count : samples.length;
-    const valid = !run.error && run.pageVisibility === 'visible' && run.daemonAgentChunkCount === events && count >= sampleFloor(events);
+    const samples = Array.isArray(run.b4?.samplesMs) ? run.b4.samplesMs.filter(Number.isFinite) : [];
+    const count = run.b4?.count;
+    const valid = !run.error && run.pageVisibility === 'visible' && run.daemonAgentChunkCount === events && Number.isInteger(count) && count === samples.length && count >= sampleFloor(events);
     const stackRuns = group.stacks[stack] ??= [];
     stackRuns.push({ valid, count, samples, medianMs: median(samples) });
     groups.set(key, group);
@@ -28,7 +28,7 @@ export function compareRuns(runs) {
       const runMedians = valid.map((run) => run.medianMs).filter(Number.isFinite);
       return [stack, {
         validRuns: valid.length, totalRuns: values.length,
-        measuredRows: valid.reduce((sum, run) => sum + run.count, 0), sampleFloor: sampleFloor(group.events) * valid.length,
+        measuredRows: valid.reduce((sum, run) => sum + run.count, 0), sampleFloor: sampleFloor(group.events) * values.length,
         pooledSamples: pooled.length, pooledMedianMs: median(pooled), pooledP95Ms: percentile(pooled, 0.95),
         perRunMedianMedianMs: median(runMedians), perRunMedianP95Ms: percentile(runMedians, 0.95),
       }];
@@ -46,7 +46,13 @@ export function renderMarkdown(groups) {
 
 async function jsonFiles(directory) {
   const found = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
+  let entries;
+  try { entries = await readdir(directory, { withFileTypes: true }); }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new Error(`input directory does not exist: ${directory}`);
+    throw error;
+  }
+  for (const entry of entries) {
     const file = path.join(directory, entry.name);
     if (entry.isDirectory()) found.push(...await jsonFiles(file));
     else if (entry.isFile() && entry.name.endsWith('.json')) found.push(file);
@@ -59,9 +65,16 @@ export async function readRuns(inputs) {
   for (const { stack, directory } of inputs) {
     const files = await jsonFiles(directory);
     for (const file of files) {
-      const value = JSON.parse(await readFile(file, 'utf8'));
-      if (!Number.isInteger(value.events) || !Number.isInteger(value.streams) || !value.b4) continue;
-      runs.push({ ...value, stack, temperature: value.temperature ?? 'unspecified' });
+      let value;
+      try { value = JSON.parse(await readFile(file, 'utf8')); }
+      catch (error) {
+        process.stderr.write(`Skipping invalid result ${file}: ${error instanceof Error ? error.message : error}\n`);
+        continue;
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const events = Number.isInteger(value.events) ? value.events : (!value.error ? value.daemonAgentChunkCount : undefined);
+      if (!Number.isInteger(events) || !Number.isInteger(value.streams) || (!value.b4 && !value.error)) continue;
+      runs.push({ ...value, events, stack, temperature: value.temperature ?? 'unspecified' });
     }
   }
   return runs;

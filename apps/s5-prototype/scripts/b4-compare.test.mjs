@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -15,10 +15,31 @@ test('groups fixture runs, excludes incomplete samples, and reports pooled and p
   const runs = await readRuns([{ stack: 'tauri', directory: path.join(root, 'tauri') }, { stack: 'swift', directory: path.join(root, 'swift') }]);
   const [group] = compareRuns(runs);
   assert.deepEqual([group.events, group.streams, group.temperature], [1000, 2, 'cold']);
-  assert.deepEqual(group.stacks.tauri, { validRuns: 1, totalRuns: 2, measuredRows: 20, sampleFloor: 20, pooledSamples: 3, pooledMedianMs: 20, pooledP95Ms: 30, perRunMedianMedianMs: 20, perRunMedianP95Ms: 20 });
-  assert.deepEqual(group.stacks.swift, { validRuns: 1, totalRuns: 1, measuredRows: 25, sampleFloor: 20, pooledSamples: 4, pooledMedianMs: 15, pooledP95Ms: 35, perRunMedianMedianMs: 15, perRunMedianP95Ms: 15 });
-  assert.match(renderMarkdown([group]), /1\/2 · 20\/20 · 20\/30 ms/);
-  assert.match(renderMarkdown([group]), /1\/1 · 25\/20 · 15\/35 ms/);
+  assert.deepEqual(group.stacks.tauri, { validRuns: 1, totalRuns: 2, measuredRows: 20, sampleFloor: 40, pooledSamples: 20, pooledMedianMs: 11, pooledP95Ms: 20, perRunMedianMedianMs: 11, perRunMedianP95Ms: 11 });
+  assert.deepEqual(group.stacks.swift, { validRuns: 1, totalRuns: 1, measuredRows: 25, sampleFloor: 20, pooledSamples: 25, pooledMedianMs: 13, pooledP95Ms: 24, perRunMedianMedianMs: 13, perRunMedianP95Ms: 13 });
+  assert.match(renderMarkdown([group]), /1\/2 · 20\/40 · 11\/20 ms/);
+  assert.match(renderMarkdown([group]), /1\/1 · 25\/20 · 13\/24 ms/);
+});
+
+test('keeps timeout attempts, rejects count/sample mismatches, and skips corrupt artifacts', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'b4-compare-input-'));
+  const tauri = path.join(directory, 'tauri'), swift = path.join(directory, 'swift');
+  mkdirSync(tauri); mkdirSync(swift);
+  try {
+    writeFileSync(path.join(tauri, 'timeout.json'), JSON.stringify({ error: 'timed out', events: 1000, streams: 2 }));
+    writeFileSync(path.join(tauri, 'short.json'), JSON.stringify({ events: 1000, streams: 2, pageVisibility: 'visible', daemonAgentChunkCount: 1000, b4: { count: 20, samplesMs: [5] } }));
+    writeFileSync(path.join(tauri, 'corrupt.json'), '{');
+    writeFileSync(path.join(swift, 'legacy.json'), JSON.stringify({ streams: 2, pageVisibility: 'visible', daemonAgentChunkCount: 1000, b4: { count: 20, samplesMs: Array.from({ length: 20 }, (_, i) => i + 1) } }));
+    const runs = await readRuns([{ stack: 'tauri', directory: tauri }, { stack: 'swift', directory: swift }]);
+    const group = compareRuns(runs)[0];
+    assert.deepEqual(group.stacks.tauri, { validRuns: 0, totalRuns: 2, measuredRows: 0, sampleFloor: 40, pooledSamples: 0, pooledMedianMs: null, pooledP95Ms: null, perRunMedianMedianMs: null, perRunMedianP95Ms: null });
+    assert.equal(group.stacks.swift.validRuns, 1);
+    assert.equal(group.stacks.swift.pooledP95Ms, 20, 'p95 uses the same floor index as the runtime metrics');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('missing input directories fail with a clear path', async () => {
+  await assert.rejects(readRuns([{ stack: 'tauri', directory: '/definitely/missing/b4-results' }]), /input directory does not exist/);
 });
 
 test('CLI writes paired Markdown and JSON reports', () => {
