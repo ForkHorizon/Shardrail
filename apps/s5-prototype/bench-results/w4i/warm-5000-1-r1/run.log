@@ -1,0 +1,4 @@
+2026-10-22 03:03:20 CEST START warm-5000-1-r1
+curl: (7) Failed to connect to 127.0.0.1 port 5174 after 0 ms: Couldn't connect to server
+B4 samples: 453/5000 (9.06%)
+2026-10-22 03:03:22 CEST END warm-5000-1-r1 exit=0

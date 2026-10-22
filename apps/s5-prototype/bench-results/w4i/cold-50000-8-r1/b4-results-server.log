@@ -1,0 +1,4 @@
+S5 result request method=GET path=/health origin=none contentLength=unknown
+S5 result request method=OPTIONS path=/result origin=tauri://localhost contentLength=0
+S5 result request method=POST path=/result origin=tauri://localhost contentLength=26415
+S5 result request complete method=POST path=/result bytes=26415 status=200

@@ -1,0 +1,232 @@
+{
+  "date": "2026-10-22",
+  "method": "D64 second requestAnimationFrame callback after daemon-row layout commit",
+  "validRuns": 60,
+  "totalRuns": 60,
+  "overall": {
+    "count": 200036,
+    "median": 900,
+    "p95": 3014
+  },
+  "sampled": 200036,
+  "requested": 1650000,
+  "focusFalse": 0,
+  "groups": [
+    {
+      "temperature": "cold",
+      "events": 5000,
+      "streams": 1,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 2385,
+        "median": 179,
+        "p95": 321
+      },
+      "requested": 25000,
+      "sampled": 2385,
+      "coverageMinPct": 8.7,
+      "coverageMaxPct": 10.26,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "cold",
+      "events": 5000,
+      "streams": 4,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 2216,
+        "median": 177,
+        "p95": 276
+      },
+      "requested": 25000,
+      "sampled": 2216,
+      "coverageMinPct": 8.58,
+      "coverageMaxPct": 9.62,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "cold",
+      "events": 5000,
+      "streams": 8,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 2476,
+        "median": 102,
+        "p95": 188
+      },
+      "requested": 25000,
+      "sampled": 2476,
+      "coverageMinPct": 8.38,
+      "coverageMaxPct": 13.04,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "cold",
+      "events": 50000,
+      "streams": 1,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 31919,
+        "median": 2133,
+        "p95": 3186
+      },
+      "requested": 250000,
+      "sampled": 31919,
+      "coverageMinPct": 11.332,
+      "coverageMaxPct": 13.61,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "cold",
+      "events": 50000,
+      "streams": 4,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 31907,
+        "median": 1402,
+        "p95": 2364
+      },
+      "requested": 250000,
+      "sampled": 31907,
+      "coverageMinPct": 12.112,
+      "coverageMaxPct": 13.674,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "cold",
+      "events": 50000,
+      "streams": 8,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 29405,
+        "median": 585,
+        "p95": 1099
+      },
+      "requested": 250000,
+      "sampled": 29405,
+      "coverageMinPct": 11.182,
+      "coverageMaxPct": 12.704,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "warm",
+      "events": 5000,
+      "streams": 1,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 2417,
+        "median": 233.300048828125,
+        "p95": 354
+      },
+      "requested": 25000,
+      "sampled": 2417,
+      "coverageMinPct": 8.68,
+      "coverageMaxPct": 10.28,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "warm",
+      "events": 5000,
+      "streams": 4,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 2552,
+        "median": 148,
+        "p95": 274
+      },
+      "requested": 25000,
+      "sampled": 2552,
+      "coverageMinPct": 8.02,
+      "coverageMaxPct": 12.12,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "warm",
+      "events": 5000,
+      "streams": 8,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 2405,
+        "median": 93,
+        "p95": 223
+      },
+      "requested": 25000,
+      "sampled": 2405,
+      "coverageMinPct": 8.5,
+      "coverageMaxPct": 11.18,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "warm",
+      "events": 50000,
+      "streams": 1,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 33820,
+        "median": 2367,
+        "p95": 3424
+      },
+      "requested": 250000,
+      "sampled": 33820,
+      "coverageMinPct": 12.878,
+      "coverageMaxPct": 14.198,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "warm",
+      "events": 50000,
+      "streams": 4,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 29831,
+        "median": 1023,
+        "p95": 2263
+      },
+      "requested": 250000,
+      "sampled": 29831,
+      "coverageMinPct": 10.2,
+      "coverageMaxPct": 14.942,
+      "focusFalse": 0,
+      "failures": []
+    },
+    {
+      "temperature": "warm",
+      "events": 50000,
+      "streams": 8,
+      "valid": 5,
+      "planned": 5,
+      "metrics": {
+        "count": 28703,
+        "median": 521,
+        "p95": 1052
+      },
+      "requested": 250000,
+      "sampled": 28703,
+      "coverageMinPct": 10.484,
+      "coverageMaxPct": 13.006,
+      "focusFalse": 0,
+      "failures": []
+    }
+  ]
+}

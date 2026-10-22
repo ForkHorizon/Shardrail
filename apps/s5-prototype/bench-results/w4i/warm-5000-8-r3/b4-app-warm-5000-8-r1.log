@@ -1,0 +1,115 @@
+S5_BENCH_QUERY=Some("events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1")
+S5 page event Started elapsed_ms=204.152083 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Started tauri://localhost
+S5 page event Finished elapsed_ms=256.219333 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Finished tauri://localhost
+S5 page event Started elapsed_ms=317.18654200000003 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"), fragment: None })
+page load Started tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1
+S5 B4 window activation show=Ok(()) focus=Ok(())
+S5 frontend readiness listener registered
+S5 page event Finished elapsed_ms=320.73175 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"), fragment: None })
+page load Finished tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1
+S5 B4 trace stage=automation effect evaluated data={"autobench":true,"focused":true,"ready":false,"visibility":"visible"}
+S5 B4 trace stage=automation effect evaluated data={"autobench":true,"focused":true,"ready":true,"visibility":"visible"}
+S5 B4 trace stage=automation started data={"focused":true,"visibility":"visible"}
+S5 B4 trace stage=B4 automation input skipped data={"reason":"synthetic composer input is outside the daemon-to-row measurement"}
+S5 B4 trace stage=completion wait started data={"connectedOnce":false,"expectedAgentChunks":5000}
+S5 frontend readiness event received elapsed_ms=415.316
+S5 starting daemon relay
+S5 B4 trace stage=ready data={"events":5000,"listeners":"daemon-frames,daemon-status"}
+S5 paired client 01a16122-ad61-774d-8147-5ac69d873b7b
+S5 authenticated daemon socket
+S5 session requests sent
+S5 B4 trace stage=daemon status received data={"connected":true,"epoch":"01a16122-ab99-708c-864d-18a986c7c2e1","host":"01a16122-ab99-708c-864d-18aa99f7783e"}
+S5 B4 trace stage=first daemon-frames batch received data={"batchId":1,"frameKinds":["command_accepted","durable_event"],"frames":2}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":1}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":2,"batchId":1,"frontendFrames":2}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":1,"batchId":2,"frontendFrames":3}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":1}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":1,"batchId":3,"frontendFrames":4}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":1,"batchId":4,"frontendFrames":5}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":5}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":6,"batchId":5,"frontendFrames":11}
+S5 B4 trace stage=first chunk received in frontend data={"frameCursor":9}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":1,"batchFrames":2,"batchId":6,"frontendFrames":13}
+S5 relay dispatched frames=40 batches=16 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":27,"batchFrames":5,"batchId":16,"frontendFrames":40}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=178 batches=32 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":163,"batchFrames":15,"batchId":32,"frontendFrames":178}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=338 batches=48 in_flight=4
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":323,"batchFrames":1,"batchId":48,"frontendFrames":338}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=594 batches=64 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":576,"batchFrames":32,"batchId":64,"frontendFrames":594}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay received frames=1000 agent_chunks=982
+S5 B4 trace stage=frontend relay milestone data={"agentChunks":968,"frontendFrames":1018}
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":32,"frontendAgentChunks":1000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":1000,"batchFrames":32,"batchId":76,"frontendFrames":1018}
+S5 relay dispatched frames=1217 batches=80 in_flight=4
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":1199,"batchFrames":32,"batchId":80,"frontendFrames":1217}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=1905 batches=96 in_flight=4
+S5 relay received frames=2000 agent_chunks=1982
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":1887,"batchFrames":62,"batchId":96,"frontendFrames":1905}
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":39,"frontendAgentChunks":2000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":2020,"batchFrames":39,"batchId":101,"frontendFrames":2038}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=2485 batches=112 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":2461,"batchFrames":4,"batchId":112,"frontendFrames":2485}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=2601 batches=128 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":2561,"batchFrames":10,"batchId":128,"frontendFrames":2601}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=2895 batches=144 in_flight=4
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":2855,"batchFrames":6,"batchId":144,"frontendFrames":2895}
+S5 relay received frames=3000 agent_chunks=2960
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":62,"frontendAgentChunks":3000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3041,"batchFrames":62,"batchId":150,"frontendFrames":3081}
+S5 relay dispatched frames=3130 batches=160 in_flight=4
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3090,"batchFrames":1,"batchId":160,"frontendFrames":3130}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=3353 batches=176 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3313,"batchFrames":12,"batchId":176,"frontendFrames":3353}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=3481 batches=192 in_flight=4
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3441,"batchFrames":15,"batchId":192,"frontendFrames":3481}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=3649 batches=208 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3609,"batchFrames":7,"batchId":208,"frontendFrames":3649}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay received frames=4000 agent_chunks=3960
+S5 relay dispatched frames=4026 batches=224 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3986,"batchFrames":5,"batchId":224,"frontendFrames":4026}
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":64,"frontendAgentChunks":4000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":4050,"batchFrames":64,"batchId":225,"frontendFrames":4090}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 relay dispatched frames=4802 batches=240 in_flight=4
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":4762,"batchFrames":64,"batchId":240,"frontendFrames":4802}
+S5 relay received frames=5000 agent_chunks=4960
+S5 relay dispatched frames=5012 batches=245 in_flight=4
+S5 relay dispatched frames=5033 batches=246 in_flight=4
+S5 relay dispatched frames=5048 batches=247 in_flight=4
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":15,"frontendAgentChunks":5000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":5000,"batchFrames":15,"batchId":247,"frontendFrames":5048}
+S5 B4 trace stage=window.onerror data={"column":0,"line":0,"message":"ResizeObserver loop completed with undelivered notifications.","source":"tauri://localhost?events=5000&streams=8&duration=6000&autostart=0&autobench=1&run=warm-5000-8-r1&temperature=warm&b4=1"}
+S5 B4 trace stage=sample wait started data={"expectedSamples":50}
+S5 B4 trace stage=completion condition evaluated data={"committedRows":21,"connectedOnce":true,"expectedAgentChunks":5000,"expectedSamples":50,"frontendAgentChunks":5000,"rows":10040,"samples":488}
+S5 B4 trace stage=rows committed data={"committedRows":21,"rows":10040}
+S5 B4 trace stage=samples collected data={"count":488,"daemonAgentChunkCount":5000}
+S5 B4 trace stage=report fetch started data={"bodyBytes":2720,"url":"http://127.0.0.1:5174/result"}
+S5 B4 trace stage=report fetch resolved data={"ok":true,"status":200}

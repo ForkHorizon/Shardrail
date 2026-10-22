@@ -1,0 +1,4 @@
+2026-10-22 03:01:14 CEST START cold-5000-4-r2
+curl: (7) Failed to connect to 127.0.0.1 port 5174 after 0 ms: Couldn't connect to server
+B4 samples: 429/5000 (8.58%)
+2026-10-22 03:01:15 CEST END cold-5000-4-r2 exit=0
