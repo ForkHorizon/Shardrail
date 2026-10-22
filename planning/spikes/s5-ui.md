@@ -1,13 +1,13 @@
 # S5 — UI stack under load
 
-- **Spike:** S5 (10 §2) · **Measurement date:** 2026-10-20 · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
-- **Code:** `spikes/s5-ui/` (not committed) · **Status:** B3 and B5 measured; B4 remains unmeasured
+- **Spike:** S5 (10 §2) · **Measurement date:** 2026-10-22 · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
+- **Code:** `spikes/s5-ui/` (not committed) · **Status:** B3 and B5 measured; W4-i B4 fails the target, W4-j live remeasurement is pending
 
 ## 1. Goal and scope
 
 Measure the React 19 / TypeScript / Vite prototype in the real Tauri 2 macOS release app (system WKWebView) and in Playwright WebKit and Chromium. The workload includes an empty transcript, 5,000 or 50,000 events, and 1, 4, or 8 mock streams at 75 tokens/s per stream. No provider account, credentials, model, or model API was used; streams are deterministic local fixtures.
 
-This note updates B3 and B5 methodology and results. It does not change D3 or select a stack fallback. B4 needs daemon receipt timestamps and a calibrated mapping to the page clock; the local event-creation follow-up metric is not a B4 measurement.
+This note records B3, B5, and B4 results from the S5 prototype. It does not change D3 or select a stack. B4 uses durable daemon receipt timestamps mapped to the page clock (D64); the local event-creation follow-up metric remains a separate render proxy.
 
 ## 2. Method
 
@@ -90,16 +90,32 @@ Across 1,880 WebKit input samples, 1,368 met the first-frame criterion; WebKit's
 
 Against the proposed 180 MB idle physical-footprint ceiling, the worst observed idle sample leaves **65.014 MB headroom**. Loaded physical footprint rises substantially; the idle ceiling should not be described as a loaded-memory pass. The loaded physical-footprint range was 198.807–460.198 MB; the RSS range was 398.623–481.149 MB. Repetition 4 had the lowest loaded physical-footprint value (198.807 MB) despite 398.623 MB RSS; the discrepancy is unexplained and needs review before treating the loaded range as stable. The largest loaded sample occurred in repetition 3. RSS and physical footprint are different measures and must not be compared as if interchangeable.
 
+### B4 — Tauri release app / WKWebView
+
+The native app connected to the daemon through a Tauri shell relay over its Unix socket. The relay used an Ed25519 client key registered in a per-run temporary data directory. Durable fake-agent events included daemon wall-clock receipt timestamps. The page sampled `Date.now()` against `performance.now()` five times per run and used the mean offset for conversion; uncertainty is the maximum half-range of calibration samples plus 1 ms for wall-clock resolution, at most ±1 ms in every run. The offset (daemon wall time minus page `performance.now()`) ranged from 1,792,535,777,147 to 1,792,536,258,509 ms across the sequence; group median offsets are in `b4-summary.json` and each run file records its own offset. The measurement ends at `performance.now()` on entry to the second rAF callback after the event row is committed and visible, using the converted daemon receipt time as the start (D64). It measures callback latency, not completed paint or scanout.
+
+#### B4 results history
+
+The original matrix was withdrawn: automated scrolling mounted old virtualized rows seconds after daemon receipt, and those scroll-time mounts were counted as B4 latency; daemon subscribers also polled durable events every 100 ms. Those results are not performance evidence.
+
+**W4-i corrected matrix:** all 60/60 planned runs were valid, with 200,036 sampled rows. Overall median/p95 was **900 / 3,014 ms**, failing the proposed p95 ≤50 ms target. At 5k events, cell medians were about 100–230 ms; at 50k × 1 stream they were about 2 seconds. Earlier hangs were traced to unacknowledged relay batches and hidden-window runs receiving no rendered frames; both causes have since been fixed.
+
+**W4-j rework:** Tauri channels, a Rust-side windowed event store, per-frame coalescing, memoized Markdown, and fixed row height. Headless microbenchmarks only: the Rust store completed 50,000 JSON append/range pairs in 149.724 ms (333,948 pairs/s); frontend projection updates took 0.0161 / 0.0191 ms per 64-row update at 5k / 50k rows. These do not measure relay throughput, WKWebView rendering, or B4 latency. Live remeasurement is pending the scheduled night run.
+
+The W4-j acceptance concern remains open: it requires 500 measured rows (1%) for a 50k run, but the final review did not establish that the live relay cadence will mount enough distinct rows. The retention cap for the Rust-side event history is also undecided; the spike currently retains all durable rows so prior ranges remain available.
+
+B5 first-frame recheck from these runs: 5k×1 matched 149/150 (99.33%) cold and 150/150 warm; 5k×4 matched 150/150 in both; 5k×8 matched 149/150 (99.33%) in both. For 50k×1, cold/warm matched 145/150 (96.67%) and 144/150 (96%); 50k×4 matched 141/150 (94%) in both; 50k×8 matched 146/150 (97.33%) and 143/150 (95.33%). Both 50k×4 cases fall below D58's 95% threshold. Existing B5 tables above remain from the original composer-only runs.
+
 ### Other observations
 
-The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up proxy. It ends after a mounted row's next frame and a following task, not at a daemon-received event's painted frame. B4 is therefore **unmeasured**. Scroll, frame, heap, and long-task diagnostics remain in the raw per-run JSON; WebKit does not expose all browser diagnostics available in Chromium.
+The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up proxy. Scroll, frame, heap, and long-task diagnostics remain in the raw per-run JSON; WebKit does not expose all browser diagnostics available in Chromium.
 
 ## 4. Verdict
 
 - **B3 idle:** The whole Tauri/WebKit process tree measures below 180 MB physical footprint in all five new samples, with 61.229 MB of worst-sample headroom. Loaded 50k×8 usage is separately reported and exceeds 180 MB.
 - **B5:** This matrix does not establish a pass for the 16 ms budget. Native cold 50k×4 and 50k×8 each have a 17 ms individual sample, with four first-frame misses across 2,100 inputs (2,096/2,100 matched, 99.8%; this meets the D58 ≥95% budget, pending the physical-keyboard check). Note: `spikes/reviews4/n3-final.md` quotes 2,099/2,100 and WebKit 1,734/1,880; the result files give 2,096/2,100 and 1,368/1,880, and the result files are authoritative. WebKit has 512 first-frame misses across 1,880 inputs; warm 5k×8 and 50k scenarios show raw run-level p95s around 371–401 ms. Chromium met the first-frame criterion in all 1,880 inputs and stayed below 10 ms raw maxima. Strict `≤16 ms` is near the nominal 60 Hz frame interval of 16.67 ms, so the owner should decide whether to specify a raw-time limit, a first-frame rate, or both. The owner adopted the first-frame-rate wording as D58 (2026-10-20).
-- **B4:** Still unmeasured. No daemon receipt timestamp or calibrated daemon-to-page clock is available.
-- **Stack decision:** Consistent with owner-approved D3 and D49, these results do not trigger the Svelte fallback. D49 keeps S5 open until B4 has real daemon receipt timestamps. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating this as final user-perceived latency evidence. No decision register entry was changed.
+- **B4:** W4-i fails the p95 ≤50 ms target (900 ms median / 3,014 ms p95). W4-j has no live B4 result yet; its scheduled night run is pending.
+- **Stack decision:** Under D49/S5, if W4-j still misses B4, measure a native Swift/AppKit list spike side by side using the same fake daemon, handshake, D64 semantics, and result JSON. Decide the stack after that comparison with Daliys. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating B5 as final user-perceived latency evidence. D49 itself is unchanged.
 
 ## 5. Reproduction
 
@@ -122,4 +138,4 @@ python3 b3-bench.py            # 5 idle and 5 loaded process-tree snapshots
 
 `npm run bench` builds the production bundle before starting `vite preview`, launches headful Playwright WebKit and Chromium, and uses `--no-sandbox` for Chromium. A full run writes `results/playwright.json`; smoke mode defaults to a timestamped file, and `S5_BENCH_OUTPUT` selects a path explicitly. `tauri-bench.sh` starts a loopback-only result receiver, launches and closes the bundled release app for each scenario, captures each JSON result and process snapshots, and stops the receiver. `b3-bench.py` uses the same release bundle and records `footprint` physical MB separately from summed `ps` RSS. Each matrix command keeps outliers in the result files.
 
-Raw data and process snapshots are in `spikes/s5-ui/results/`. The result files include per-run launch/latency/frame metrics, callback and rAF timestamp deltas, generated-token counts, and process samples. The B3 capture repeats five idle samples after a 61 s settle and five loaded 50k×8 snapshots after 12 s. Apps and harness-launched servers were closed after collection. The bundle build retains Vite's warning that the JavaScript chunk exceeds 500 kB.
+Raw data and process snapshots are in `spikes/s5-ui/results/`. The result files include per-run launch/latency/frame metrics, callback and rAF timestamp deltas, generated-token counts, and process samples. The B3 capture repeats five idle samples after a 61 s settle and five loaded 50k×8 snapshots after 12 s. Apps and harness-launched servers were closed after collection. The benchmark does not implement a reviewed interactive pairing screen; setup uses the daemon CLI in an isolated temporary data directory. The approval card was visually checked in the release app; `approval-card-review.png` is the saved capture. The bundle build retains Vite's warning that the JavaScript chunk exceeds 500 kB.

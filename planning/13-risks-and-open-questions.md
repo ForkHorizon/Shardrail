@@ -41,6 +41,13 @@ Only U5 and U7 remain, both deferred until other users (D46, R47). Everything el
 | U24 | Second session on a worktree without provider read-only | refuse and offer a separate worktree — owner decision 2026-10-19 | 06 §7, 12 D31 |
 | U26 | Hermes in Phase 1 | **no** — Hermes is not in Phase 1; if ever added, a permanent "file edits without approval" banner — owner decision 2026-10-19 | 12 D48, 03 §6, 10 Post-P1 candidate |
 
+### 1b. Open S5 decisions
+
+| Question | Status / decision needed | Recorded in |
+| --- | --- | --- |
+| What history/memory retention cap should the Rust-side event store use? | Open; the spike currently retains all durable rows so older ranges remain queryable | S5, `spikes/reviews11/w4j-final.md` |
+| Is the minimum of 500 measured rows (1%) a hard B4 gate for 50k-event runs? | Open; W4-j's sample-floor delivery is not established, and live remeasurement is pending | S5, `spikes/reviews11/w4j-final.md` |
+
 ## 2. Risks
 
 | ID | Risk | Severity | Treatment |

@@ -25,7 +25,7 @@ A workspace for supervising several AI coding agents (Codex, Claude Code, Grok B
 | 09 | [Release and licensing](09-release-and-licensing.md) | targets, licensing, privacy, name; §5 items deferred until other users |
 | 10 | [Roadmap and backlog](10-roadmap-and-backlog.md) | phases P0–P4 (P1a slim slice, P1e hardening), spikes S1–S9, epics, candidate tasks, dependencies |
 | 11 | [Modules](11-modules.md) | module table M01–M18, outlines of the foundational modules, engineering rules for AI agents |
-| 12 | [Decisions](12-decisions.md) | D1–D61 with rationale and what earlier versions got wrong |
+| 12 | [Decisions](12-decisions.md) | D1–D64 with rationale and what earlier versions got wrong |
 | 13 | [Risks and open questions](13-risks-and-open-questions.md) | owner decisions U1–U26 (all answered except U5/U7, deferred until other users), risks R1–R47, tensions, unverified assumptions |
 | 14 | [Evidence](14-evidence.md) | sources with access dates and confidence labels (EV-01–EV-31) |
 | 15 | [Independent review](15-independent-review.md) | 2026-10-18 review by a different model family (in Russian) with a resolution-status table showing where each finding was applied |
@@ -66,3 +66,4 @@ The first draft was written by Grok in Russian; three Claude review rounds then 
 - 2026-10-19 — owner accepted all remaining recommendations (17): U1, U2, U4, U6, U10, U11, U12, U15–U20, U22–U24, U26 answered (U2 deferred; U4 to Phase 3; U11 to Phase 2); Hermes not in Phase 1 (D48); P1a runtime checklist kept; core spikes S1-lite, S2, S5, S9-lite authorized. 01–08, 10–13, 15 aligned.
 - 2026-10-19 — owner set spike rules: code in gitignored `spikes/<id>/` (test repos in `spikes/<id>/workdir/`), notes committed in `planning/spikes/<id>.md` with the template in `planning/spikes/README.md` (10 §2); plan committed.
 - 2026-10-20 — owner decisions D49–D54 synced across 00–13 (T1.3a daemon skeleton added); then D55–D61 accepted (17 §Г): client key auth, approvals through the daemon, high-entropy redaction, B5 budget, tsc dev dependency, data-dir race and slow clients, docs sync. B3 updated to the final S5 run (idle 113.7 MB, ≈396 MB loaded); T1.15 moved under E1.13; Grok → budget-report link added; Python wording in 07 clarified.
+- 2026-10-22 — D64 records B4's callback-latency proxy; W4-i results and W4-j history synced across 07, 12, 13, 17 and S5. Live W4-j measurement remains pending.

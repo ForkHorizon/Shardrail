@@ -1,7 +1,7 @@
 # 07 — Performance and Resource Budgets
 > 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
-> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Budgets remain proposed acceptance limits; S5 provides partial measurements on the reference Mac (Daliys's MacBook Pro M5, 32 GB, macOS 27.0.1): B3 idle median is 113.7 MB / 180 MB (final re-run; ≈396 MB median under 50k×8 load), and B5 native matched 2,096/2,100 keystrokes by the first frame (max 17 ms); B5 budget per D58. B4 remains unmeasured pending daemon receipt timestamps. See [S5 results](spikes/s5-ui.md) and D49. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): B16 split warm/cold, B11 a target, measurement load for a solo developer. 2026-10-19 (owner): U1 answered — reference machine is Daliys's own Mac.
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Budgets remain proposed acceptance limits; S5 provides partial measurements on the reference Mac (Daliys's MacBook Pro M5, 32 GB, macOS 27.0.1): B3 idle median is 113.7 MB / 180 MB (final re-run; ≈396 MB median under 50k×8 load), and B5 native matched 2,096/2,100 keystrokes by the first frame (max 17 ms); B5 budget per D58. W4-i measured B4 above its target; W4-j live remeasurement is pending. See [S5 results](spikes/s5-ui.md), D49 and D64. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): B16 split warm/cold, B11 a target, measurement load for a solo developer. 2026-10-19 (owner): U1 answered — reference machine is Daliys's own Mac.
 
 ## 1. Where the cost is
 
@@ -16,7 +16,7 @@ Reference machine: Daliys's own current Apple Silicon Mac (U1, owner 2026-10-19)
 | B1 | daemon RSS idle ≤ 40 MB after 60 s | `shardraild`, 0 sessions | process sample |
 | B2 | ≤ 15 MB per idle session projection in the daemon | daemon only | RSS difference |
 | B3 | ≤ 180 MB idle; **S5 final: idle median 113.7 MB (max 115.0) of 180, pass; under 50k×8 load ≈396 MB median, reported separately (D61)** | **total physical footprint** of the app plus all `com.apple.WebKit.*` helper processes, empty transcript | `footprint` / Activity Monitor over the process tree; S5 measurement |
-| B4 | p95 ≤ 50 ms from daemon receipt of an event to the painted frame; **not measured in S5** | local, 1 active session | spans in daemon + frame mark; one host clock calibrated by round trip |
+| B4 | p95 ≤ 50 ms from daemon receipt to `performance.now()` at entry to the second rAF callback after the event row is committed and visible (D64); callback-latency proxy, not scanout. **W4-i: 900 ms median / 3,014 ms p95; fails. W4-j live result pending.** | local, 1 active session | daemon receipt timestamp mapped to the page clock; callback mark; see D64 and S5 |
 | B5 | **≥ 95% of keystrokes visible in the next frame (first rAF within 16.67 ms), plus one physical-keyboard check (D58)**; S5 native: 2,096/2,100 (99.8%), raw max 17 ms | UI | input trace; S5 used synthetic input and recorded loaded samples separately |
 | B6 | cold start to ready window ≤ 1.5 s | shell + daemon listening | timestamps, no provider login |
 | B7 | session list visible ≤ 1 s after `kill -9` | daemon + SQLite | integration test |
