@@ -11,11 +11,17 @@ import { createFrameSampler } from './frame-sampler';
 import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from './streaming-view';
+import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo, type PairingState } from './pairing';
 import './style.css';
 
 type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; daemonAgentChunkCount: number; userAgent: string };
 const started = performance.now();
 const b4Enabled = new URLSearchParams(location.search).has('b4');
+const pairingApi: PairingApi = {
+  inspect: () => invoke<PairingInfo>('pairing_info'),
+  pair: (daemonPublicKey) => invoke<string>('pair_desktop', { expectedPublicKey: daemonPublicKey }),
+  unpair: () => invoke('unpair_desktop'),
+};
 function b4Trace(stage: string, data: Record<string, unknown> = {}) {
   if (b4Enabled) void invoke('b4_trace', { stage, data }).catch((error: unknown) => console.error('B4 trace command failed', error));
 }
@@ -108,10 +114,14 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
   return <><div ref={parent} className="transcript" role="region" aria-label="Event transcript" tabIndex={0} onScroll={() => { followTail.current = parent.current !== null && parent.current.scrollHeight - parent.current.scrollTop - parent.current.clientHeight < 24; setLiveTail(followTail.current); onInput(); }}><div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((v) => { const row = rows[v.index - getRowStart()]; return row ? <div key={row.id} data-index={v.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 112, transform: `translateY(${v.start}px)` }}><Row row={row} onMount={(id) => mountedDaemonRows.current.add(id)} onUnmount={(id) => mountedDaemonRows.current.delete(id)}/></div> : null; })}</div></div></>;
 }
 function App() {
-  const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected');
+  const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected'), [pairing, setPairing] = useState<PairingState>({ kind: 'loading' }), [reconnect, setReconnect] = useState(0);
   // Readiness gates the generator until the external store has been initialized.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { reset(count, streams, !b4Enabled); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
+  useEffect(() => {
+    if (b4Enabled) return;
+    void pairingApi.inspect().then((info) => setPairing(stateFromInfo(info))).catch(() => setPairing({ kind: 'error', message: 'Could not read daemon identity. Check that the daemon is installed and retry.' }));
+  }, []);
   const runningRef = useRef(false);
   const rangeRequest = useRef<{ key: string; id: number; inFlight: boolean; pending?: { start: number; limit: number; noticeVersion?: number } }>({ key: '', id: 0, inFlight: false });
   const requestRange = useCallback((start: number, limit: number, noticeVersion?: number) => {
@@ -145,10 +155,12 @@ function App() {
     issue(start, limit, noticeVersion);
   }, [autobench]);
   useEffect(() => {
-    if (!autobench || !query.has('b4') || !ready) return;
-    const offsets: number[] = [];
-    for (let i = 0; i < 5; i++) { const before = performance.now(), wall = Date.now(), after = performance.now(); offsets.push(wall - (before + after) / 2); }
-    setDaemonClockMapping(offsets.reduce((a, b) => a + b, 0) / offsets.length, (Math.max(...offsets) - Math.min(...offsets)) / 2 + 1);
+    if (!ready || (b4Enabled && (!autobench || !query.has('b4'))) || (!b4Enabled && pairing.kind !== 'paired')) return;
+    if (b4Enabled) {
+      const offsets: number[] = [];
+      for (let i = 0; i < 5; i++) { const before = performance.now(), wall = Date.now(), after = performance.now(); offsets.push(wall - (before + after) / 2); }
+      setDaemonClockMapping(offsets.reduce((a, b) => a + b, 0) / offsets.length, (Math.max(...offsets) - Math.min(...offsets)) / 2 + 1);
+    }
     let unlistenStatus: (() => void) | undefined;
     const channel = new Channel<{ version: number; total: number; agentChunkCount: number }>();
     const removeChannel = coalesceChannelFrame(channel, (notice) => {
@@ -171,10 +183,19 @@ function App() {
       if (status.connected) (window as Window & { __daemonConnectedOnce?: boolean }).__daemonConnectedOnce = true;
       setTransportStatus(status.connected ? 'Connected · local shell relay' : status.error ? `Connection failed: ${status.error}` : 'Disconnected');
     }).then((remove) => { unlistenStatus = remove; setTransportStatus('Frontend channel ready'); b4Trace('ready', { channel: 'daemon-frames', events: count });
-      return invoke('start_b4_relay', { onFrames: channel, streams: Math.max(1, Math.min(8, streams)) });
-    }).catch((error: unknown) => { setTransportStatus(`Connection failed: ${String(error)}`); b4Trace('relay setup rejected', { error: String(error) }); console.error('S5 channel setup failed', error); });
+      return invoke(b4Enabled ? 'start_b4_relay' : 'start_paired_relay', { onFrames: channel, streams: Math.max(1, Math.min(8, streams)) });
+    }).catch((error: unknown) => {
+      if (b4Enabled) {
+        setTransportStatus(`Connection failed: ${String(error)}`);
+        b4Trace('relay setup rejected', { error: String(error) });
+        console.error('S5 channel setup failed', error);
+      } else {
+        setTransportStatus('Connection failed · check daemon and pairing');
+        void pairingApi.inspect().then((info) => setPairing(stateFromInfo(info))).catch(() => undefined);
+      }
+    });
     return () => { unlistenStatus?.(); removeChannel(); };
-  }, [autobench, count, query, ready, requestRange, streams]);
+  }, [autobench, b4Enabled, count, pairing.kind, query, ready, reconnect, requestRange, streams]);
   useLayoutEffect(() => {
     const input = takeCommittedInput(pendingInputs, draft);
     if (!input) return;
@@ -275,6 +296,21 @@ function App() {
   }
   function updateQuery(key: string, value: string) { const u = new URL(location.href); u.searchParams.set(key, value); window.location.assign(u.toString()); }
   const select = (label: string, value: string, options: string[], onChange: (value: string) => void) => <Select aria-label={label} selectedKey={value} onSelectionChange={(key) => onChange(String(key))}><Label>{label}</Label><Button><SelectValue/><span aria-hidden="true">⌄</span></Button><Popover><ListBox>{options.map((option) => <ListBoxItem key={option} id={option}>{option}</ListBoxItem>)}</ListBox></Popover></Select>;
-  return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header><section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
+  if (!b4Enabled && pairing.kind !== 'paired') {
+    const info = 'info' in pairing ? pairing.info : undefined;
+    const verify = () => { if (info) setPairing(beginConfirmation(info)); };
+    const refresh = () => { setPairing({ kind: 'loading' }); void pairingApi.inspect().then((next) => setPairing(stateFromInfo(next))).catch(() => setPairing({ kind: 'error', message: 'Could not read daemon identity. Check that the daemon is available and retry.' })); };
+    return <main className="pairing-page"><section className="pairing-card" aria-labelledby="pairing-title"><h1 id="pairing-title">Pair this desktop</h1>
+      {pairing.kind === 'loading' ? <p>Checking daemon identity…</p> : null}
+      {pairing.kind === 'error' ? <p role="alert">{pairing.message}</p> : null}
+      {pairing.kind === 'mismatch' ? <p role="alert">The daemon key changed since this client was paired. Verify the new fingerprint before re-pairing.</p> : null}
+      {pairing.kind === 'expired' ? <p role="alert">Confirmation expired. Review the current fingerprint and try again.</p> : null}
+      {info ? <><p>Compare this fingerprint with the daemon identity you expect. Pairing grants this local desktop full client scope.</p><output className="fingerprint" aria-label="Daemon SHA-256 fingerprint">{info.fingerprint}</output></> : null}
+      {pairing.kind === 'confirming' ? <><p role="status">Confirm within 60 seconds after checking the fingerprint.</p><Button onPress={() => { void confirmPairing(pairing, pairingApi).then(setPairing); }}>I verified this fingerprint — pair</Button><Button onPress={() => setPairing(stateFromInfo(pairing.info))}>Cancel</Button></> : null}
+      {pairing.kind === 'unpaired' || pairing.kind === 'mismatch' || pairing.kind === 'expired' ? <Button onPress={verify}>{pairing.kind === 'mismatch' ? 'Review fingerprint and re-pair' : pairing.kind === 'expired' ? 'Review fingerprint again' : 'Review fingerprint'}</Button> : null}
+      {pairing.kind === 'error' ? <Button onPress={refresh}>Retry</Button> : null}
+    </section></main>;
+  }
+  return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{pairing.kind === 'paired' ? <><span aria-label="Paired daemon fingerprint">{pairing.info.fingerprint}</span><Button onPress={() => setReconnect((current) => current + 1)}>Reconnect</Button><Button onPress={() => { void unpairClient(pairingApi).then(setPairing); }}>Unpair</Button></> : null}{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header><section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

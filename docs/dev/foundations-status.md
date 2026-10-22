@@ -21,6 +21,8 @@ Branch: `p1a/coordinator`
 
 ## Stubbed or deferred
 
+- W4-k-3 implements a local-only S5 desktop pairing gate over the existing daemon `client add/remove` registry commands. It pins the daemon public key, displays a SHA-256 fingerprint, expires unconfirmed prompts after 60 seconds, and blocks reconnect after a key change. The plan's one-time-code pairing for remote `limited` clients is still Phase 2; there is no pairing-request/approval API or owner-defined fingerprint confirmation format for that scope. This prototype uses explicit on-screen fingerprint review for its local `full` client and does not claim the Phase 2 flow.
+
 - This is foundations plus the coordinator core: no daemon binary, network/client gateway, provider adapter, process supervisor, real agent, UI, workspace service, or production application wiring.
 - Journal schema migration/versioning beyond additive column upgrades, salvage UI, retention, and purge/VACUUM are not implemented yet. Journal epoch creation and validation are implemented.
 - Provider process discovery and restart resolution still belong to M05; until then, a replayed active turn is conservatively marked detached/desynced and an idle process is marked desynced so the coordinator cannot assume a process is usable.
