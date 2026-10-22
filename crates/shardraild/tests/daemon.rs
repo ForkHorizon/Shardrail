@@ -249,6 +249,18 @@ fn transcript_hash(
 }
 
 #[test]
+fn shared_client_handshake_vector_matches_rust() {
+    let vector: serde_json::Value = serde_json::from_str(include_str!("../../../test-vectors/client-handshake-v1.json")).unwrap();
+    let text = |key: &str| vector[key].as_str().unwrap();
+    let message = transcript_hash([1, 1, 1], text("client_nonce"), text("server_nonce"), text("client_public_key"), text("host_public_key"));
+    assert_eq!(encode_hex(&message), text("transcript_sha256"));
+    let seed: [u8; 32] = decode_hex(text("client_seed")).try_into().unwrap();
+    let key = SigningKey::from_bytes(&seed);
+    assert_eq!(encode_hex(&key.verifying_key().to_bytes()), text("client_public_key"));
+    assert_eq!(encode_hex(&key.sign(&message).to_bytes()), text("client_signature"));
+}
+
+#[test]
 fn handshake_rejects_pre_auth_commands_and_cross_session_signature_replay() {
     let dir = tempdir().unwrap();
     let client = add_client(dir.path());
