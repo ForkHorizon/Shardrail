@@ -1,7 +1,7 @@
 # S5 — UI stack under load
 
 - **Spike:** S5 (10 §2) · **Measurement date:** 2026-10-21 · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
-- **Code:** `apps/s5-prototype/` · **Status:** B3 measured; W4-d B5 50k×4 recheck meets target; W4-f live readiness verified, B4 collection still blocked
+- **Code:** `apps/s5-prototype/` · **Status:** B3 measured; W4-d B5 50k×4 recheck meets target; W4-g B4 smoke still fails to save results
 
 ## 1. Goal and scope
 
@@ -102,6 +102,14 @@ After the CSP correction, the `smoke-live`, `smoke-trace`, and `smoke-trace2` co
 
 The 60-run cold/warm × 5k/50k × 1/4/8 × five-repetition matrix was not run. This review pass allowed at most 20 remeasurement runs; the 60-run gate remains open. B4 median/p95 values and the ≤50 ms verdict are unavailable; the optional B5 rerun was skipped. The second-rAF endpoint remains a paint-opportunity proxy, not proof of completed paint or display scanout. Rust now records process-start-to-page and process-start-to-readiness monotonic timings; the follow-up 5k readiness logs were 381–450 ms, and the 10-event check was 359 ms. No valid B4 sample or run-specific clock uncertainty was produced.
 
+#### W4-g live smoke follow-up (2026-10-22)
+
+Three cold 5k×1 smokes were run through the packaged release app with `b4=1`, each with a 120-second harness timeout. All three logs confirm frontend readiness, relay authentication, session requests, and receipt of all 5,000 daemon frames. All three timed out without a saved result: **0/3 valid smokes**. Raw timeout records and logs are under `apps/s5-prototype/bench-results/w4g-live/`.
+
+Two fixes were committed while diagnosing the missing B4 results: `a5146f8` checks row presence at layout commit and retains the sample through the second rAF even if virtualization removes the row; `148f427` schedules B4 sampling from each daemon row's layout commit. The S5 test suite passed 31/31 after both changes, lint passed, and the release app was rebuilt. The live smoke still did not save a result, so neither fix is validated end to end.
+
+The matrix was not started: **0/60 valid matrix runs**. The cold 5k×1 smoke cell has no valid sample arrays; per-cell and aggregate median/p95 are unavailable. There is no B4 pass/fail verdict against **≤50 ms**. The endpoint remains entry to a second rAF callback after layout commit, which is a paint-opportunity proxy and does not prove completed paint or display scanout. Do not infer latency from the relay frame receipt logs.
+
 B5's 50k×4 recheck completed five repetitions per launch group in the packaged release app, with the original 50k events, four local mock streams, and unchanged 16.67 ms first-frame criterion. Cold repetitions matched 30/30 each (raw input-to-rAF p95: 15, 14, 13, 15, 15 ms; group 150/150, 100%). Warm repetitions matched 30/30, 30/30, 30/30, 30/30, and 29/30 (raw p95: 15, 14, 14, 15, 14 ms; group 149/150, 99.33%). Combined: 299/300 (99.67%), above D58's ≥95% first-frame budget. The five-run median/nearest-rank p95 of per-run raw p95s were 15/15 ms cold and 14/15 ms warm. Raw records are in `spikes/s5-ui/results-w4d/b5-recheck/`.
 
 ### Other observations
@@ -112,7 +120,7 @@ The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up 
 
 - **B3 idle:** The whole Tauri/WebKit process tree measures below 180 MB physical footprint in all five new samples, with 61.229 MB of worst-sample headroom. Loaded 50k×8 usage is separately reported and exceeds 180 MB.
 - **B5:** The original broad matrix did not meet the ≥95% first-frame budget for every native scenario. Its 50k×4 row is superseded by the focused W4-d rerun, which matched 299/300 (99.67%). This does not replace results for the other scenarios. The original matrix's native aggregate was 2,096/2,100; note `spikes/reviews4/n3-final.md` quotes 2,099/2,100 and WebKit 1,734/1,880, while original result files give 2,096/2,100 and 1,368/1,880. WebKit had 512 first-frame misses across 1,880 inputs; warm 5k×8 and 50k scenarios showed raw run-level p95s around 371–401 ms. Chromium met the first-frame criterion in all 1,880 inputs and stayed below 10 ms raw maxima. Strict `≤16 ms` is near the nominal 60 Hz frame interval of 16.67 ms, so the owner should decide whether to specify a raw-time limit, a first-frame rate, or both. The owner adopted the first-frame-rate wording as D58 (2026-10-20).
-- **B4:** No valid target verdict. The earlier matrix used delayed scroll mounts and included a 100 ms daemon polling delay. The corrected second-rAF endpoint is a paint-opportunity proxy, not proof of completed paint. W4-f verified packaged-release frontend readiness and authenticated daemon delivery after correcting a static CSP conflict. The review fixes address disconnect completion checks, lifecycle/sample accounting, B4 mock and scroll interference, process-start readiness timing, and direct app-child cleanup; three short post-fix smokes still timed out without valid latency samples. The full matrix did not run; median/p95 and the ≤50 ms verdict remain unavailable.
+- **B4:** No valid target verdict. The earlier matrix used delayed scroll mounts and included a 100 ms daemon polling delay. W4-f verified packaged-release readiness and authenticated daemon delivery after correcting a static CSP conflict. W4-g added layout-commit sampling fixes, but all three 5k×1 live smokes still timed out after the relay received all 5,000 frames; 0/3 valid smokes and 0/60 matrix runs. Median/p95 and the ≤50 ms verdict remain unavailable. The second-rAF endpoint is a paint-opportunity proxy, not proof of completed paint.
 - **Stack decision:** D49's B4 requirement remains open until the corrected measurement matrix is rerun. No stack decision follows from the withdrawn B4 values. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating B5 as final user-perceived latency evidence. No decision register entry was changed.
 
 ## 5. Reproduction
