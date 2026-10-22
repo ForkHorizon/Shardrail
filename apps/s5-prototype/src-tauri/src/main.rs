@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, VecDeque};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -199,30 +200,45 @@ fn b4_trace_enabled(query: &str) -> bool {
     is_b4_query(query)
 }
 
-fn acknowledge_batch(ack: &(Mutex<Option<u64>>, Condvar), batch_id: u64) {
-    *ack.0.lock().unwrap() = Some(batch_id);
-    ack.1.notify_one();
+#[derive(Default)]
+struct BatchAckState {
+    outstanding: BTreeSet<u64>,
+    acknowledged: BTreeSet<u64>,
+}
+
+fn expect_batch_ack(ack: &(Mutex<BatchAckState>, Condvar), batch_id: u64) {
+    ack.0.lock().unwrap().outstanding.insert(batch_id);
+}
+
+fn acknowledge_batch(ack: &(Mutex<BatchAckState>, Condvar), batch_id: u64) {
+    let mut state = ack.0.lock().unwrap();
+    if state.outstanding.contains(&batch_id) {
+        state.acknowledged.insert(batch_id);
+        ack.1.notify_one();
+    }
 }
 
 fn wait_for_batch_ack(
-    ack: &(Mutex<Option<u64>>, Condvar),
+    ack: &(Mutex<BatchAckState>, Condvar),
     batch_id: u64,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
-    let mut received = ack.0.lock().unwrap();
+    let mut state = ack.0.lock().unwrap();
     loop {
-        if *received == Some(batch_id) {
-            *received = None;
+        if state.acknowledged.remove(&batch_id) {
+            state.outstanding.remove(&batch_id);
             return true;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            state.outstanding.remove(&batch_id);
             return false;
         }
-        let (next, result) = ack.1.wait_timeout(received, remaining).unwrap();
-        received = next;
-        if result.timed_out() && *received != Some(batch_id) {
+        let (next, result) = ack.1.wait_timeout(state, remaining).unwrap();
+        state = next;
+        if result.timed_out() && !state.acknowledged.contains(&batch_id) {
+            state.outstanding.remove(&batch_id);
             return false;
         }
     }
@@ -267,7 +283,7 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
         &json!({"connected":true,"host":hello["host_id"],"epoch":hello["journal_epoch"]}),
     );
     let reader_stream = writer.try_clone().map_err(|e| e.to_string())?;
-    let frame_ack = Arc::new((Mutex::new(None), Condvar::new()));
+    let frame_ack = Arc::new((Mutex::new(BatchAckState::default()), Condvar::new()));
     let ack_listener = Arc::clone(&frame_ack);
     webview.listen("daemon-frames-ack", move |event| {
         if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
@@ -305,7 +321,16 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
     std::thread::spawn(move || {
         let mut dispatched = 0usize;
         let mut batches = 0usize;
+        let mut in_flight = VecDeque::new();
+        let mut timed_out = None;
         while let Ok(first) = frames_rx.recv() {
+            if in_flight.len() == 4 {
+                let oldest = in_flight.pop_front().unwrap();
+                if !wait_for_batch_ack(&frame_ack, oldest, Duration::from_secs(10)) {
+                    timed_out = Some(oldest);
+                    break;
+                }
+            }
             let mut frames = vec![first];
             while frames.len() < 64 {
                 match frames_rx.try_recv() {
@@ -318,18 +343,31 @@ fn start_b4_relay(webview: &Webview, query: &str) -> Result<(), String> {
             }
             dispatched += frames.len();
             batches += 1;
+            let batch_id = batches as u64;
+            expect_batch_ack(&frame_ack, batch_id);
             dispatch(
                 &webview,
                 "daemon-frames",
-                &json!({"batchId": batches, "frames": frames}),
+                &json!({"batchId": batch_id, "frames": frames}),
             );
-            if !wait_for_batch_ack(&frame_ack, batches as u64, Duration::from_secs(10)) {
-                eprintln!("S5 relay stopped: frontend did not acknowledge batch={batches} frames={dispatched}");
-                break;
-            }
+            in_flight.push_back(batch_id);
             if batches.is_multiple_of(16) || dispatched >= 5_000 {
-                eprintln!("S5 relay dispatched frames={dispatched} acknowledged_batches={batches}");
+                eprintln!(
+                    "S5 relay dispatched frames={dispatched} batches={batches} in_flight={}",
+                    in_flight.len()
+                );
             }
+        }
+        if timed_out.is_none() {
+            while let Some(batch_id) = in_flight.pop_front() {
+                if !wait_for_batch_ack(&frame_ack, batch_id, Duration::from_secs(10)) {
+                    timed_out = Some(batch_id);
+                    break;
+                }
+            }
+        }
+        if let Some(batch_id) = timed_out {
+            eprintln!("S5 relay stopped: frontend did not acknowledge batch={batch_id} frames={dispatched}");
         }
         dispatch(&webview, "daemon-status", &json!({"connected":false}));
     });
@@ -425,8 +463,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_batch, b4_trace_enabled, handle_frontend_ready, is_b4_query, ready_callback,
-        register_ready_listener, should_register_ready_listener, wait_for_batch_ack,
+        acknowledge_batch, b4_trace_enabled, expect_batch_ack, handle_frontend_ready, is_b4_query,
+        ready_callback, register_ready_listener, should_register_ready_listener,
+        wait_for_batch_ack, BatchAckState,
     };
     use std::{
         sync::{atomic::AtomicBool, atomic::Ordering, Arc, Condvar, Mutex},
@@ -507,17 +546,20 @@ mod tests {
     }
 
     #[test]
-    fn relay_waits_for_each_frontend_batch_acknowledgement() {
-        let acked = Arc::new((Mutex::new(None), Condvar::new()));
+    fn relay_matches_out_of_order_acknowledgements_and_times_out_missing_batches() {
+        let acked = Arc::new((Mutex::new(BatchAckState::default()), Condvar::new()));
+        expect_batch_ack(&acked, 7);
+        expect_batch_ack(&acked, 8);
         let ack_thread = Arc::clone(&acked);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(10));
+            acknowledge_batch(&ack_thread, 8);
             acknowledge_batch(&ack_thread, 7);
+            acknowledge_batch(&ack_thread, 999);
         });
         assert!(wait_for_batch_ack(&acked, 7, Duration::from_millis(100)));
-        assert!(!wait_for_batch_ack(&acked, 8, Duration::from_millis(10)));
-        acknowledge_batch(&acked, 9);
-        assert!(!wait_for_batch_ack(&acked, 8, Duration::from_millis(10)));
-        assert!(wait_for_batch_ack(&acked, 9, Duration::from_millis(10)));
+        assert!(wait_for_batch_ack(&acked, 8, Duration::from_millis(10)));
+        expect_batch_ack(&acked, 9);
+        assert!(!wait_for_batch_ack(&acked, 9, Duration::from_millis(10)));
     }
 }
