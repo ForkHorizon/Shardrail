@@ -1,7 +1,7 @@
 # S5 — UI stack under load
 
 - **Spike:** S5 (10 §2) · **Measurement date:** 2026-10-22 · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
-- **Code:** `spikes/s5-ui/` (not committed) · **Status:** B3 and B5 measured; W4-i B4 fails the target, W4-j live remeasurement is pending
+- **Code:** Phase 0 prototype in `spikes/s5-ui/`; W4-i/W4-j rework and current B4 harness in `apps/s5-prototype/` on `p1a/coordinator` · **Status:** B3 and B5 measured; W4-i B4 fails the target, W4-j live remeasurement is pending
 
 ## 1. Goal and scope
 
@@ -19,7 +19,7 @@ The raw B5 timer starts in the input handler and ends in the first `requestAnima
 
 Each scenario has five repetitions in a cold group and five in a warm group. Reported B5 `median/p95` is the median and nearest-rank p95 of the five per-run raw input-to-rAF p95 values. With five runs, nearest-rank p95 is the maximum of those five values. `min–max` is the range across the per-run individual-sample minimums and maximums. The first-frame columns count DOM matches by the first qualifying rAF callback, not visible pixels. No outlier was discarded. Playwright input text starts with `/` and includes command arguments, so slash-command parsing runs on every typed character.
 
-**Interpretation of 16 ms:** a strict input-to-paint limit of `≤16 ms` sits at the nominal 60 Hz frame interval of 16.67 ms. It is not a device-independent guarantee: refresh rate and frame boundaries matter. Proposed budget wording for the owner to decide: **“At least 95% of draft updates match the committed DOM by the first rAF callback within the nominal 60 Hz frame interval (16.67 ms); report raw input-to-rAF median, p95, maximum, and callback/frame timestamps.”** This is a proposal, not a decision or an approved budget.
+**Interpretation of 16 ms:** a strict input-to-paint limit of `≤16 ms` sits at the nominal 60 Hz frame interval of 16.67 ms. It is not a device-independent guarantee: refresh rate and frame boundaries matter. D58 budget: **“At least 95% of draft updates match the committed DOM by the first rAF callback within the nominal 60 Hz frame interval (16.67 ms); report raw input-to-rAF median, p95, maximum, and callback/frame timestamps.”** This wording was adopted as D58 on 2026-10-20.
 
 ### Build, launch groups, and workload
 
@@ -100,11 +100,11 @@ The original matrix was withdrawn: automated scrolling mounted old virtualized r
 
 **W4-i corrected matrix:** all 60/60 planned runs were valid, with 200,036 sampled rows. Overall median/p95 was **900 / 3,014 ms**, failing the proposed p95 ≤50 ms target. At 5k events, cell medians were about 100–230 ms; at 50k × 1 stream they were about 2 seconds. Earlier hangs were traced to unacknowledged relay batches and hidden-window runs receiving no rendered frames; both causes have since been fixed.
 
-**W4-j rework:** Tauri channels, a Rust-side windowed event store, per-frame coalescing, memoized Markdown, and fixed row height. Headless microbenchmarks only: the Rust store completed 50,000 JSON append/range pairs in 149.724 ms (333,948 pairs/s); frontend projection updates took 0.0161 / 0.0191 ms per 64-row update at 5k / 50k rows. These do not measure relay throughput, WKWebView rendering, or B4 latency. Live remeasurement is pending the scheduled night run.
+**W4-j rework:** Tauri channels, a Rust-side windowed event store, per-frame coalescing, memoized Markdown, and fixed row height. Headless microbenchmarks only: the Rust store completed 50,000 JSON append/range pairs in 149.724 ms (333,948 pairs/s); frontend projection updates took 0.0161 / 0.0191 ms per 64-row update at 5k / 50k rows. These do not measure relay throughput, WKWebView rendering, or B4 latency. Live remeasurement is pending the scheduled night run. Before treating it as D64 evidence, fix and regression-test the coordinator sampler: review found it currently samples mounted overscan rows without checking that each row intersects the transcript viewport.
 
 The W4-j acceptance concern remains open: it requires 500 measured rows (1%) for a 50k run, but the final review did not establish that the live relay cadence will mount enough distinct rows. The retention cap for the Rust-side event history is also undecided; the spike currently retains all durable rows so prior ranges remain available.
 
-B5 first-frame recheck from these runs: 5k×1 matched 149/150 (99.33%) cold and 150/150 warm; 5k×4 matched 150/150 in both; 5k×8 matched 149/150 (99.33%) in both. For 50k×1, cold/warm matched 145/150 (96.67%) and 144/150 (96%); 50k×4 matched 141/150 (94%) in both; 50k×8 matched 146/150 (97.33%) and 143/150 (95.33%). Both 50k×4 cases fall below D58's 95% threshold. Existing B5 tables above remain from the original composer-only runs.
+B5 first-frame recheck from these runs: 5k×1 matched 149/150 (99.33%) cold and 150/150 warm; 5k×4 matched 150/150 in both; 5k×8 matched 149/150 (99.33%) in both. For 50k×1, cold/warm matched 145/150 (96.67%) and 144/150 (96%); 50k×4 matched 141/150 (94%) in both; 50k×8 matched 146/150 (97.33%) and 143/150 (95.33%). Both 50k×4 cases fall below D58's 95% threshold. Existing B5 tables above remain from the original composer-only runs; the W4-j coalesced-channel path has not yet been remeasured under this load.
 
 ### Other observations
 
@@ -113,13 +113,17 @@ The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up 
 ## 4. Verdict
 
 - **B3 idle:** The whole Tauri/WebKit process tree measures below 180 MB physical footprint in all five new samples, with 61.229 MB of worst-sample headroom. Loaded 50k×8 usage is separately reported and exceeds 180 MB.
-- **B5:** This matrix does not establish a pass for the 16 ms budget. Native cold 50k×4 and 50k×8 each have a 17 ms individual sample, with four first-frame misses across 2,100 inputs (2,096/2,100 matched, 99.8%; this meets the D58 ≥95% budget, pending the physical-keyboard check). Note: `spikes/reviews4/n3-final.md` quotes 2,099/2,100 and WebKit 1,734/1,880; the result files give 2,096/2,100 and 1,368/1,880, and the result files are authoritative. WebKit has 512 first-frame misses across 1,880 inputs; warm 5k×8 and 50k scenarios show raw run-level p95s around 371–401 ms. Chromium met the first-frame criterion in all 1,880 inputs and stayed below 10 ms raw maxima. Strict `≤16 ms` is near the nominal 60 Hz frame interval of 16.67 ms, so the owner should decide whether to specify a raw-time limit, a first-frame rate, or both. The owner adopted the first-frame-rate wording as D58 (2026-10-20).
+- **B5:** This matrix does not establish a pass for the 16 ms budget. Native cold 50k×4 and 50k×8 each have a 17 ms individual sample, with four first-frame misses across 2,100 inputs (2,096/2,100 matched, 99.8%; meeting the D58 ≥95% budget for this composer-only matrix, pending the physical-keyboard check). The 50k×4 streaming rechecks also fell to 141/150 (94%) in both cold and warm groups, below D58's 95% threshold; this remains unverified on W4-j. Note: `spikes/reviews4/n3-final.md` quotes 2,099/2,100 and WebKit 1,734/1,880; the result files give 2,096/2,100 and 1,368/1,880, and the result files are authoritative. WebKit has 512 first-frame misses across 1,880 inputs; warm 5k×8 and 50k scenarios show raw run-level p95s around 371–401 ms. Chromium met the first-frame criterion in all 1,880 inputs and stayed below 10 ms raw maxima. Strict `≤16 ms` is near the nominal 60 Hz frame interval of 16.67 ms, so the owner should decide whether to specify a raw-time limit, a first-frame rate, or both. The owner adopted the first-frame-rate wording as D58 (2026-10-20).
 - **B4:** W4-i fails the p95 ≤50 ms target (900 ms median / 3,014 ms p95). W4-j has no live B4 result yet; its scheduled night run is pending.
-- **Stack decision:** Under D49/S5, if W4-j still misses B4, measure a native Swift/AppKit list spike side by side using the same fake daemon, handshake, D64 semantics, and result JSON. Decide the stack after that comparison with Daliys. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating B5 as final user-perceived latency evidence. D49 itself is unchanged.
+- **Stack decision:** Under D49/S5, if W4-j still misses B4, implement and measure a native Swift/AppKit list spike side by side (the `apps/s5-swift/` target does not yet exist) using the same fake daemon, handshake, D64 semantics, and result JSON. Decide the stack after that comparison with Daliys. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating B5 as final user-perceived latency evidence. D49 itself is unchanged.
 
 ## 5. Reproduction
 
-From the repository root:
+The committed Phase 0 prototype in `spikes/s5-ui/` reproduces the earlier B3/B5 matrix. The W4-i/W4-j code and B4 harness live in the `p1a/coordinator` worktree at `apps/s5-prototype/`; the harness needs release binaries and runs the native app. Do not treat a future run as D64-valid until its sampler excludes overscan-only rows.
+
+For a future W4-j B4 run, from the `p1a/coordinator` repository root, build the daemon and fake agent with `cargo build --release -p shardraild -p shardrail-fake-acp`, then build the prototype with `cd apps/s5-prototype && npm run build && npm run tauri -- build --bundles app`. After the visibility sampler fix and its regression test, run `bash b4-bench.sh` from `apps/s5-prototype/`. This performs the live B4 matrix and launches the native app.
+
+From the repository root, the older Phase 0 matrix is reproduced with:
 
 ```sh
 cd spikes/s5-ui

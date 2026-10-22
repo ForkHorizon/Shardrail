@@ -5,7 +5,7 @@
 
 ## 1. Owner decisions needed
 
-Only U5 and U7 remain, both deferred until other users (D46, R47). Everything else is answered (§1a; bulk answers 2026-10-19 in [17](17-owner-decisions-2026-10-19.md)).
+Only U5 and U7 remain among the initial owner questions (U1–U26); both are deferred until other users (D46, R47). The S5 architectural questions remain open in §1b. All other initial owner questions are answered in §1a (bulk answers 2026-10-19 in [17](17-owner-decisions-2026-10-19.md)).
 
 | ID | Question | Blocks | Recommendation / interim |
 | --- | --- | --- | --- |
