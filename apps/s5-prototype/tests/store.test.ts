@@ -1,24 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyDaemonEvent, applyPendingUpdates, daemonReceiptToRafMs, eventCount, getRows, markDaemonRowsCommitted, markRowsCommitted, mockCreationToMountedRowFollowupLatency, pushToken, reset, subscribe, tokenCount } from '../src/store';
+import { intersectingVirtualItems } from '../src/frame-sampler';
 
-test('B4 samples rows committed at layout even if virtualization removes them before the second frame', () => {
+test('B4 excludes overscan, accepts partial intersections, and samples when a row later enters the viewport once', () => {
   const updates: FrameRequestCallback[] = [];
   const samples: FrameRequestCallback[] = [];
-  let committed = true;
   const previous = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = (callback) => { updates.push(callback); return updates.length; };
   try {
     reset(0, 1);
     applyDaemonEvent(1, { session_id: 's1', kind: 'session_created', payload: {} }, 1000);
     applyDaemonEvent(2, { session_id: 's1', kind: 'agent_message_chunk', payload: { content: { text: 'chunk' } } }, 1001);
+    applyDaemonEvent(3, { session_id: 's1', kind: 'agent_message_chunk', payload: { content: { text: 'chunk' } } }, 1002);
     updates[0]!(performance.now());
-    markDaemonRowsCommitted(getRows().map((row) => row.id), (callback) => { samples.push(callback); return samples.length; }, () => 1_020, () => committed);
-    assert.equal(samples.length, 1);
-    committed = false;
-    samples[0]!(0);
-    samples[1]!(0);
-    assert.equal(daemonReceiptToRafMs.length, 1);
+    const items = [{ index: 1, start: 80, size: 20 }, { index: 2, start: 95, size: 20 }];
+    assert.deepEqual(intersectingVirtualItems(items, 100, 100).map(({ index }) => index), [2], 'a row touching only the viewport edge is excluded while a partial overlap is included');
+    assert.deepEqual(intersectingVirtualItems([...items, { index: 3, start: 190, size: 20 }], 100, 100).map(({ index }) => index), [2, 3], 'partial overlap at the far edge is included');
+    const markVisible = (virtualItems: typeof items, scrollTop: number) => {
+      const visible = intersectingVirtualItems(virtualItems, scrollTop, 100);
+      markDaemonRowsCommitted(visible.map(({ index }) => getRows()[index]!.id), (callback) => { samples.push(callback); return samples.length; }, () => 1_020, () => true);
+    };
+    markVisible(items, 100);
+    assert.equal(samples.length, 1, 'the partially visible row schedules; the overscan row does not');
+    markVisible([{ index: 1, start: 99, size: 20 }], 100);
+    assert.equal(samples.length, 2, 'the formerly overscan row schedules when it enters the viewport');
+    markVisible([{ index: 1, start: 99, size: 20 }, { index: 2, start: 95, size: 20 }], 100);
+    assert.equal(samples.length, 2, 'scheduled rows are deduplicated');
+    for (let index = 0; index < samples.length; index++) samples[index]!(0);
+    assert.equal(daemonReceiptToRafMs.length, 2, 'both intersecting rows contribute exactly one sample');
     reset(0, 1);
   } finally {
     globalThis.requestAnimationFrame = previous;

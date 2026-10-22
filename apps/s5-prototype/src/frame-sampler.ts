@@ -1,3 +1,7 @@
+export function intersectingVirtualItems<T extends { start: number; size: number }>(items: T[], scrollTop: number, clientHeight: number) {
+  return items.filter((item) => item.start < scrollTop + clientHeight && item.start + item.size > scrollTop);
+}
+
 export function createFrameSampler(
   request: (callback: FrameRequestCallback) => number,
   cancel: (id: number) => void,

@@ -7,7 +7,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { createPortal } from 'react-dom';
 import { daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRowStart, getRows, isLiveTail, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, rowCount, setDaemonAgentChunkCount, setDaemonAgentCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, setLiveTail, sortedLatency, tokenCount, useRows } from './store';
 import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameIntervalMs, percentile, supportsLongTaskEntries, takeCommittedInput } from './metrics-utils';
-import { createFrameSampler } from './frame-sampler';
+import { createFrameSampler, intersectingVirtualItems } from './frame-sampler';
 import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream } from './bench-utils';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from './streaming-view';
@@ -92,7 +92,10 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
   const virtualizer = useVirtualizer({ count: rowCount(), getScrollElement: () => parent.current, estimateSize: () => 112, overscan: transcriptOverscan(b4Enabled) });
   const virtualItems = virtualizer.getVirtualItems();
   useLayoutEffect(() => {
-    const visibleRows = virtualItems.flatMap((item) => rows[item.index - getRowStart()] ? [rows[item.index - getRowStart()]!] : []);
+    if (followTail.current && parent.current) parent.current.scrollTop = parent.current.scrollHeight;
+    const viewport = parent.current;
+    const intersectingItems = viewport ? intersectingVirtualItems(virtualItems, viewport.scrollTop, viewport.clientHeight) : [];
+    const visibleRows = intersectingItems.flatMap((item) => rows[item.index - getRowStart()] ? [rows[item.index - getRowStart()]!] : []);
     markRowsCommitted(visibleRows.map((row) => row.id));
     markDaemonRowsCommitted(
       visibleRows.map((row) => row.id),
@@ -100,7 +103,6 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
       () => performance.now(),
       (id) => mountedDaemonRows.current.has(id),
     );
-    if (followTail.current && parent.current) parent.current.scrollTop = parent.current.scrollHeight;
     if (ready && !firstPaintMeasured.current) {
       firstPaintMeasured.current = true;
       measureReadyCommitAfterFrame(true, started, () => performance.now(), requestAnimationFrame, (callback) => window.setTimeout(callback, 0), (elapsed) => { (window as Window & { __firstTranscriptRenderOpportunityMs?: number }).__firstTranscriptRenderOpportunityMs = elapsed; });
