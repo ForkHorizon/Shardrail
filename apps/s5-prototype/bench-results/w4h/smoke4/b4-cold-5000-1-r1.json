@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-22T00:25:52.714Z",
+  "temperature": "cold",
+  "streams": 1,
+  "inputMethod": "Synthetic InputEvent dispatched to the focused composer",
+  "firstTranscriptRenderOpportunityMs": 0,
+  "longTasks": null,
+  "maxLongTaskMs": null,
+  "frameP95": null,
+  "frameMax": null,
+  "frameSamples": 0,
+  "commitCount": 0,
+  "commitMs": 0,
+  "eventStoreCount": 10005,
+  "generatedTokens": 0,
+  "heapMB": null,
+  "mockCreationToMountedRowFollowupP95": null,
+  "composerP95": null,
+  "composerMin": null,
+  "composerMax": null,
+  "composerSamples": 0,
+  "matchesByFirstFrame": 0,
+  "firstFrameSamples": 0,
+  "firstFrameDeltasMs": [],
+  "firstFrameRafTimestampDeltasMs": [],
+  "b4": {
+    "count": 0,
+    "medianMs": null,
+    "p95Ms": null,
+    "maxMs": null,
+    "samplesMs": [],
+    "clockOffsetMs": 1792628751766,
+    "clockUncertaintyMs": 1
+  },
+  "daemonAgentChunkCount": 5000,
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+  "scrollSmoothness": {
+    "frameP95Ms": null,
+    "frameMaxMs": null,
+    "frames": 0
+  }
+}

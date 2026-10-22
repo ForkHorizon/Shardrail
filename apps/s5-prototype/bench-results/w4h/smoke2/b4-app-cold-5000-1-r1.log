@@ -1,0 +1,35 @@
+S5_BENCH_QUERY=Some("events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1")
+S5 page event Started elapsed_ms=246.37162500000002 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Started tauri://localhost
+S5 page event Finished elapsed_ms=307.90579099999997 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Finished tauri://localhost
+S5 page event Started elapsed_ms=378.93320800000004 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Started tauri://localhost?events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1
+S5 frontend readiness listener registered
+S5 page event Finished elapsed_ms=379.270708 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Finished tauri://localhost?events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1
+S5 frontend readiness event received elapsed_ms=480.640
+S5 starting daemon relay
+S5 B4 trace stage=ready data={"events":5000,"listeners":"daemon-frames,daemon-status"}
+S5 paired client 01a160fb-8497-7155-bd23-8f41e925afc2
+S5 authenticated daemon socket
+S5 session requests sent
+S5 B4 trace stage=daemon status received data={"connected":true,"epoch":"01a160fb-817d-700f-8636-b731ffc9ad6b","host":"01a160fb-817d-700f-8636-b7325676b9bc"}
+S5 B4 trace stage=first daemon-frames batch received data={"frameKinds":["command_accepted","durable_event"],"frames":2}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":1}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":2}
+S5 relay received frames=1000 agent_chunks=996
+S5 B4 trace stage=frontend relay milestone data={"agentChunks":995,"frontendFrames":1006}
+S5 relay received frames=2000 agent_chunks=1996
+S5 relay dispatched frames=2048
+S5 relay received frames=3000 agent_chunks=2996
+S5 relay received frames=4000 agent_chunks=3996
+S5 relay received frames=5000 agent_chunks=4996
+S5 relay dispatched frames=5005
+S5 relay dispatched frames=5006
+S5 B4 trace stage=completion wait started data={"connectedOnce":true,"expectedAgentChunks":5000}
+S5 B4 trace stage=completion condition evaluated data={"committedRows":11,"connectedOnce":true,"expectedAgentChunks":5000,"frontendAgentChunks":5000,"rows":10005}
+S5 B4 trace stage=rows committed data={"committedRows":11,"rows":10005}
+S5 B4 trace stage=samples collected data={"count":17,"daemonAgentChunkCount":5000}
+S5 B4 trace stage=report fetch started data={"bodyBytes":1306,"url":"http://127.0.0.1:5174/result"}
+S5 B4 trace stage=report fetch resolved data={"ok":true,"status":200}

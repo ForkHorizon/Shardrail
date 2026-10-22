@@ -1,0 +1,56 @@
+S5_BENCH_QUERY=Some("events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1")
+S5 page event Started elapsed_ms=196.113542 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Started tauri://localhost
+S5 page event Finished elapsed_ms=245.578792 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Finished tauri://localhost
+S5 page event Started elapsed_ms=301.78675 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Started tauri://localhost?events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1
+S5 frontend readiness listener registered
+S5 page event Finished elapsed_ms=302.017709 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1"), fragment: None })
+page load Finished tauri://localhost?events=5000&streams=1&duration=6000&autostart=0&autobench=1&run=cold-5000-1-r1&temperature=cold&b4=1
+S5 frontend readiness event received elapsed_ms=395.725
+S5 starting daemon relay
+S5 B4 trace stage=ready data={"events":5000,"listeners":"daemon-frames,daemon-status"}
+S5 paired client 01a160fd-a083-715c-b2c4-768fd9d3b11f
+S5 authenticated daemon socket
+S5 session requests sent
+S5 B4 trace stage=daemon status received data={"connected":true,"epoch":"01a160fd-9de9-70c4-9ecb-1555e41c5a37","host":"01a160fd-9de9-70c4-9ecb-1556edfa1e88"}
+S5 B4 trace stage=first daemon-frames batch received data={"frameKinds":["command_accepted","durable_event"],"frames":2}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":1}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":2,"frontendFrames":2}
+S5 B4 trace stage=frontend lifecycle batch data={"batchFrames":2}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":0,"batchFrames":2,"frontendFrames":4}
+S5 B4 trace stage=first chunk received in frontend data={"frameCursor":4}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":191,"batchFrames":14,"frontendFrames":195}
+S5 relay dispatched frames=195 acknowledged_batches=16
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":303,"batchFrames":14,"frontendFrames":307}
+S5 relay dispatched frames=307 acknowledged_batches=32
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":401,"batchFrames":1,"frontendFrames":405}
+S5 relay dispatched frames=405 acknowledged_batches=48
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":512,"batchFrames":1,"frontendFrames":516}
+S5 relay dispatched frames=516 acknowledged_batches=64
+S5 relay received frames=1000 agent_chunks=996
+S5 relay received frames=2000 agent_chunks=1996
+S5 relay received frames=3000 agent_chunks=2996
+S5 relay received frames=4000 agent_chunks=3996
+S5 B4 trace stage=frontend relay milestone data={"agentChunks":960,"frontendFrames":1028}
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":64,"frontendAgentChunks":1000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":1024,"batchFrames":64,"frontendFrames":1028}
+S5 relay received frames=5000 agent_chunks=4996
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":1536,"batchFrames":64,"frontendFrames":1540}
+S5 relay dispatched frames=1540 acknowledged_batches=80
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":64,"frontendAgentChunks":2000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":2048,"batchFrames":64,"frontendFrames":2052}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":2560,"batchFrames":64,"frontendFrames":2564}
+S5 relay dispatched frames=2564 acknowledged_batches=96
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":64,"frontendAgentChunks":3000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3008,"batchFrames":64,"frontendFrames":3012}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":3584,"batchFrames":64,"frontendFrames":3588}
+S5 relay dispatched frames=3588 acknowledged_batches=112
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":64,"frontendAgentChunks":4000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":4032,"batchFrames":64,"frontendFrames":4036}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":4608,"batchFrames":64,"frontendFrames":4612}
+S5 relay dispatched frames=4612 acknowledged_batches=128
+S5 B4 trace stage=frontend chunk milestone data={"batchFrames":10,"frontendAgentChunks":5000,"relayFramesExpected":5000}
+S5 B4 trace stage=frontend batch acknowledged data={"agentChunks":5000,"batchFrames":10,"frontendFrames":5006}
+S5 relay dispatched frames=5006 acknowledged_batches=135
