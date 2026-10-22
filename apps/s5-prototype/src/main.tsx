@@ -95,8 +95,9 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
     if (followTail.current && parent.current) parent.current.scrollTop = parent.current.scrollHeight;
     const viewport = parent.current;
     const intersectingItems = viewport ? intersectingVirtualItems(virtualItems, viewport.scrollTop, viewport.clientHeight) : [];
+    const mountedRows = virtualItems.flatMap((item) => rows[item.index - getRowStart()] ? [rows[item.index - getRowStart()]!] : []);
     const visibleRows = intersectingItems.flatMap((item) => rows[item.index - getRowStart()] ? [rows[item.index - getRowStart()]!] : []);
-    markRowsCommitted(visibleRows.map((row) => row.id));
+    markRowsCommitted(mountedRows.map((row) => row.id));
     markDaemonRowsCommitted(
       visibleRows.map((row) => row.id),
       requestAnimationFrame,
