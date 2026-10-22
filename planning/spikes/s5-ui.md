@@ -124,6 +124,8 @@ The final diagnostic POST returned HTTP 200, but the saved sample count was zero
 
 One follow-up cold 5k×1 smoke passed with a visible, focused page, all 5,000 chunks, and 751 second-rAF samples (15.02% coverage). Its median/p95 were 579/733 ms, above the proposed ≤50 ms target. This is one valid diagnostic run, not enough to determine the budget verdict; the 60-run matrix remains 0/60. The final gate now requires at least `min(events, max(20, 1% of events))` samples; this run's 751 samples exceed its 50-sample floor. Raw logs and result JSON are under `/Users/daliys/Daliys/Shardrail/spikes/reviews9/w4h-fix-smoke/`.
 
+After the smoke, the relay was changed headlessly to keep up to four 64-frame batches in flight while retaining exact acknowledgements and a bounded queue. The live smoke predates this final relay window and does not verify its latency effect; no second smoke was run under the one-smoke review limit.
+
 B5's 50k×4 recheck completed five repetitions per launch group in the packaged release app, with the original 50k events, four local mock streams, and unchanged 16.67 ms first-frame criterion. Cold repetitions matched 30/30 each (raw input-to-rAF p95: 15, 14, 13, 15, 15 ms; group 150/150, 100%). Warm repetitions matched 30/30, 30/30, 30/30, 30/30, and 29/30 (raw p95: 15, 14, 14, 15, 14 ms; group 149/150, 99.33%). Combined: 299/300 (99.67%), above D58's ≥95% first-frame budget. The five-run median/nearest-rank p95 of per-run raw p95s were 15/15 ms cold and 14/15 ms warm. Raw records are in `spikes/s5-ui/results-w4d/b5-recheck/`.
 
 ### Other observations
