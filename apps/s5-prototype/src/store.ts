@@ -73,10 +73,10 @@ export function applyDaemonEvent(cursor: number, event: { session_id: string; ki
 export function markDaemonRowsCommitted(ids: number[], requestFrame: (callback: FrameRequestCallback) => number = requestAnimationFrame, now: () => number = () => performance.now(), isCommitted: (id: number) => boolean = (id) => Boolean(document.querySelector(`[data-daemon-event-id="${id}"]`))) {
   for (const id of ids) {
     const receipt = daemonReceipts.get(id);
-    if (receipt === undefined || daemonScheduled.has(id)) continue;
+    if (receipt === undefined || daemonScheduled.has(id) || !isCommitted(id)) continue;
     daemonScheduled.add(id);
     requestFrame(() => requestFrame(() => {
-      if (isCommitted(id)) daemonReceiptToRafMs.push(now() - (receipt - pageClockOffsetMs));
+      daemonReceiptToRafMs.push(now() - (receipt - pageClockOffsetMs));
       daemonReceipts.delete(id); daemonScheduled.delete(id);
     }));
   }
