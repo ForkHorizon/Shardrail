@@ -58,3 +58,10 @@ Branch: `p1a/coordinator`
 ## Final summary
 
 P1a foundations, the coordinator core, M01 directory/lock guards, the authenticated `shardraild` gateway, fake ACP approvals through the daemon, and the TypeScript socket client are present on `p1a/coordinator`. Production provider adapters and interactive pairing UI remain outside this slice. See [daemon-status.md](daemon-status.md). No real provider executable or model API was used.
+
+### W4-k-2 Swift/AppKit fallback spike (2026-10-22)
+
+- Added `apps/s5-swift` as a macOS 14+ SwiftPM library/executable spike using only Apple system frameworks. CryptoKit Ed25519 signs the same v1 transcript as the TS/Rust clients; `test-vectors/client-handshake-v1.json` is shared by Swift, TypeScript, and Rust tests.
+- The AppKit table uses fixed-height reused rows, full in-memory event history, and display-frame update coalescing. B4 uses the D64 second-frame endpoint and the existing visible-window, all-chunks, and `max(20, 1%)` sample-floor gates. The B4 night harness emits compatible per-run JSON with `stack: "swift-appkit"`; no aggregate summary script exists in this checkout to extend.
+- **Open questions:** retained event history has no cap; decide retention before long-running production use. B5 input measurement is deferred. The D49 and D55–D63 rows referenced by spike tasks are still absent from `planning/12-decisions.md`; this spike follows the explicit D64 and task requirements without inferring missing decision rationale.
+- No app or live benchmark was run. Headless build and tests use the installed Xcode beta toolchain through `DEVELOPER_DIR` because the selected Command Line Tools installation does not include XCTest.
