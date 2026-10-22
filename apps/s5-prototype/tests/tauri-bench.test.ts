@@ -12,13 +12,14 @@ test('B4 harness configures daemon delivery without synthetic scrolling', () => 
   const app = readFileSync('src/main.tsx', 'utf8');
   assert.match(script, /S5_BENCH_QUERY=.*&b4=1/);
   assert.match(script, /&autostart=0/);
-  assert.match(script, /!r\.b4\?\.count \|\| r\.daemonAgentChunkCount !== Number\(process\.argv\[2\]\)/);
+  assert.match(script, /!r\.b4\?\.count \|\| r\.daemonAgentChunkCount !== Number\(process\.argv\[2\]\) \|\| r\.pageVisibility !== "visible" \|\| r\.pageFocused !== true/);
   assert.match(script, /check-bench-app-freshness\.sh/);
   assert.match(script, /cleanup-bench-processes\.sh "\$app_pid" "\$temp_dir\/webkit-before\.txt"/);
+  assert.match(script, /open -a "\$app_bundle"/);
   assert.match(app, /if \(!query\.has\('b4'\)\) \{[\s\S]*el\.scrollTop =/);
 });
 
-test('B4 shell harness accepts a headless app result from its result server', () => {
+test('B4 shell harness accepts visible results and rejects hidden-window samples', () => {
   const directory = mkdtempSync(join(tmpdir(), 's5-b4-harness-'));
   const resultsDir = join(directory, 'results');
   const app = join(directory, 'stub-app.mjs');
@@ -28,22 +29,26 @@ test('B4 shell harness accepts a headless app result from its result server', ()
     writeFileSync(app, `#!/usr/bin/env node
 const query = new URLSearchParams(process.env.S5_BENCH_QUERY);
 const events = Number(query.get('events'));
-const response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: query.get('run'), result: { b4: { count: events }, daemonAgentChunkCount: events } }) });
+const response = await fetch('http://127.0.0.1:5174/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ filename: query.get('run'), result: { b4: { count: events }, daemonAgentChunkCount: events, pageVisibility: process.env.S5_TEST_VISIBILITY ?? 'visible', pageFocused: process.env.S5_TEST_FOCUSED !== 'false' } }) });
 if (!response.ok) process.exit(1);
 `);
     writeFileSync(daemon, '#!/bin/bash\nsleep 60\n');
     writeFileSync(fakeAgent, '#!/bin/bash\nexit 0\n');
     for (const file of [app, daemon, fakeAgent]) chmodSync(file, 0o755);
-    const run = spawnSync('bash', ['b4-bench.sh'], {
-      encoding: 'utf8',
-      timeout: 15_000,
-      env: { ...process.env, S5_BENCH_APP: app, SHARDRAILD_BIN: daemon, SHARDRAIL_FAKE_ACP_BIN: fakeAgent, S5_BENCH_WAIT_SECONDS: '3', S5_BENCH_RESULTS_DIR: resultsDir, S5_B4_EVENTS: '3', S5_B4_STREAMS: '1', S5_B4_TEMPERATURES: 'cold', S5_B4_REPETITIONS: '1' },
-    });
+    const env = { ...process.env, S5_BENCH_APP: app, SHARDRAILD_BIN: daemon, SHARDRAIL_FAKE_ACP_BIN: fakeAgent, S5_BENCH_WAIT_SECONDS: '3', S5_BENCH_RESULTS_DIR: resultsDir, S5_B4_EVENTS: '3', S5_B4_STREAMS: '1', S5_B4_TEMPERATURES: 'cold', S5_B4_REPETITIONS: '1' };
+    const run = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env });
     assert.equal(run.error, undefined, run.error?.message);
     assert.equal(run.status, 0, run.stderr);
     const result = JSON.parse(readFileSync(join(resultsDir, 'b4-cold-3-1-r1.json'), 'utf8')) as { b4: { count: number }; daemonAgentChunkCount: number };
     assert.equal(result.b4.count, 3);
     assert.equal(result.daemonAgentChunkCount, 3);
+    const hidden = spawnSync('bash', ['b4-bench.sh'], { encoding: 'utf8', timeout: 15_000, env: { ...env, S5_TEST_VISIBILITY: 'hidden', S5_TEST_FOCUSED: 'false' } });
+    assert.equal(hidden.error, undefined, hidden.error?.message);
+    assert.equal(hidden.status, 1);
+    assert.match(hidden.stderr, /wrote incomplete daemon samples/);
+    const rejected = JSON.parse(readFileSync(join(resultsDir, 'b4-cold-3-1-r1.json'), 'utf8')) as { pageVisibility: string; pageFocused: boolean };
+    assert.equal(rejected.pageVisibility, 'hidden');
+    assert.equal(rejected.pageFocused, false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

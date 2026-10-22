@@ -2,6 +2,10 @@
 set -u
 cd "$(dirname "$0")"
 app="${S5_BENCH_APP:-$PWD/src-tauri/target/release/bundle/macos/S5 UI Spike.app/Contents/MacOS/s5-ui}"
+app_bundle="${S5_BENCH_APP_BUNDLE:-}"
+if [ -z "$app_bundle" ] && [ "$app" = "$PWD/src-tauri/target/release/bundle/macos/S5 UI Spike.app/Contents/MacOS/s5-ui" ]; then
+  app_bundle="$PWD/src-tauri/target/release/bundle/macos/S5 UI Spike.app"
+fi
 daemon_bin="${SHARDRAILD_BIN:-$PWD/../../target/release/shardraild}"
 fake_bin="${SHARDRAIL_FAKE_ACP_BIN:-$PWD/../../target/release/shardrail-fake-acp}"
 wait_seconds="${S5_BENCH_WAIT_SECONDS:-300}"
@@ -37,6 +41,7 @@ for events in "${event_sizes[@]}"; do
         ps -Ao pid=,command= | awk '/com\.apple\.WebKit\.(WebContent|Networking|GPU)( |$)/ { print $1 }' >"$temp_dir/webkit-before.txt"
         S5_SHARDRAIL_DATA_DIR="$temp_dir" SHARDRAIL_DAEMON="$daemon_bin" S5_BENCH_QUERY="events=$events&streams=$streams&duration=6000&autostart=0&autobench=1&run=$name&temperature=$temperature&b4=1" "$app" >"$results_dir/b4-app-$name.log" 2>&1 &
         app_pid=$!
+        if [ -n "$app_bundle" ] && [ -d "$app_bundle" ]; then open -a "$app_bundle"; fi
         done_run=0
         for _ in $(seq 1 "$wait_seconds"); do
           if [ -s "$results_dir/b4-$name.json" ]; then done_run=1; break; fi
@@ -50,7 +55,7 @@ for events in "${event_sizes[@]}"; do
         if [ "$done_run" != 1 ]; then
           printf '{"error":"B4 run timed out","events":%s,"streams":%s,"repetition":%s}\n' "$events" "$streams" "$repetition" >"$results_dir/b4-$name.json"
           failed=1
-        elif ! node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (!r.b4?.count || r.daemonAgentChunkCount !== Number(process.argv[2])) process.exit(1)' "$results_dir/b4-$name.json" "$events"; then
+        elif ! node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (!r.b4?.count || r.daemonAgentChunkCount !== Number(process.argv[2]) || r.pageVisibility !== "visible" || r.pageFocused !== true) process.exit(1)' "$results_dir/b4-$name.json" "$events"; then
           printf 'B4 scenario %s wrote incomplete daemon samples\n' "$name" >&2
           failed=1
         elif grep -q '"error"' "$results_dir/b4-$name.json"; then
