@@ -932,6 +932,24 @@ mod browser_listener_tests {
     }
 
     #[tokio::test]
+    async fn browser_router_waits_for_a_fragmented_websocket_request_line() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            browser_request_line(&stream).await.unwrap()
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"G").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client
+            .write_all(b"ET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            .await
+            .unwrap();
+        assert_eq!(server.await.unwrap(), b"GET /ws HTTP/1.1");
+    }
+
+    #[tokio::test]
     async fn browser_assets_require_same_origin_and_stay_inside_the_build_directory() {
         let assets = tempfile::tempdir().unwrap();
         fs::write(assets.path().join("index.html"), "browser app").unwrap();
@@ -1094,18 +1112,38 @@ async fn serve_browser_connection(
     port: u16,
     assets_dir: Option<PathBuf>,
 ) -> io::Result<()> {
-    let mut first = [0u8; 256];
-    let count = timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
-        .await
-        .map_err(|_| handshake_timeout())??;
-    let request_line = first[..count]
-        .split(|byte| *byte == b'\n')
-        .next()
-        .unwrap_or_default();
+    let request_line = browser_request_line(&stream).await?;
     if request_line.starts_with(b"GET /ws HTTP/") {
         return serve_browser_client(stream, daemon, port).await;
     }
     serve_browser_asset(&mut stream, port, assets_dir.as_deref()).await
+}
+
+async fn browser_request_line(stream: &tokio::net::TcpStream) -> io::Result<Vec<u8>> {
+    let mut request = [0u8; 16 * 1024];
+    loop {
+        let count = timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut request))
+            .await
+            .map_err(|_| handshake_timeout())??;
+        if let Some(end) = request[..count].iter().position(|byte| *byte == b'\n') {
+            let line_end = if end > 0 && request[end - 1] == b'\r' {
+                end - 1
+            } else {
+                end
+            };
+            return Ok(request[..line_end].to_vec());
+        }
+        if count == request.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "browser request line is too large",
+            ));
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 
 async fn serve_browser_asset(
