@@ -14,6 +14,14 @@ test('pairing requires explicit confirmation and pins the inspected daemon key',
   assert.deepEqual(state, { kind: 'paired', info: { ...info, clientId: 'client-id', pinnedPublicKey: info.daemonPublicKey } });
 });
 
+test('pairing forwards fallback-key acknowledgement only after explicit consent', async () => {
+  const fallback = { ...info, keyStorage: 'noble-fallback' as const };
+  let acknowledged = false;
+  const state = await confirmPairing(beginConfirmation(fallback, 100), api({ inspect: async () => fallback, pair: async (_key, _code, consent) => { acknowledged = consent === true; return 'client-id'; } }), 101, 'enrollment-code', true);
+  assert.equal(acknowledged, true);
+  assert.equal(state.kind, 'paired');
+});
+
 test('expired confirmation never registers a client', async () => {
   let called = false;
   const state = await confirmPairing(beginConfirmation(info, 100), api({ pair: async () => { called = true; return 'client-id'; } }), 60_100);

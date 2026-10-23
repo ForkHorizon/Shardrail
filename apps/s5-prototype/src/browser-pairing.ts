@@ -16,10 +16,13 @@ export const browserPairingApi: PairingApi = {
   async inspect(): Promise<PairingInfo> {
     const daemonPublicKey = await inspectBrowserIdentity(browserWebSocketUrl());
     const store = await openBrowserKeyStore();
-    const record = await store.get(daemonPublicKey);
+    let record = await store.get(daemonPublicKey);
     const previous = (await store.list())[0];
     const persistedPin = record?.clientId !== 'pending' ? record?.hostPublicKey ?? previous?.hostPublicKey ?? null : previous?.hostPublicKey ?? null;
     const pinnedPublicKey = localStorage.getItem(pinnedKeyName) ?? persistedPin;
+    if (!record && (!pinnedPublicKey || pinnedPublicKey === daemonPublicKey)) {
+      record = await createBrowserIdentity(daemonPublicKey, 'pending', store);
+    }
     return {
       daemonPublicKey,
       fingerprint: await daemonFingerprint(daemonPublicKey),
@@ -28,10 +31,13 @@ export const browserPairingApi: PairingApi = {
       ...(record ? { keyStorage: record.storage } : {}),
     };
   },
-  async pair(daemonPublicKey, enrollmentCode) {
+  async pair(daemonPublicKey, enrollmentCode, acknowledgeFallback) {
     if (!enrollmentCode) throw new Error('enter the one-time enrollment code from the local daemon');
     const store = await openBrowserKeyStore();
     const identity = await createBrowserIdentity(daemonPublicKey, 'pending', store);
+    if (identity.storage === 'noble-fallback' && acknowledgeFallback !== true) {
+      throw new Error('acknowledge the extractable browser key fallback before pairing');
+    }
     const enrolled = await enrollBrowser(browserWebSocketUrl(), enrollmentCode, identity.publicKey);
     if (enrolled.hostPublicKey !== daemonPublicKey) {
       await store.delete(daemonPublicKey);

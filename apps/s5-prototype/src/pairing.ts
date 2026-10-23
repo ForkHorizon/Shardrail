@@ -10,7 +10,7 @@ export type PairingState =
 
 export interface PairingApi {
   inspect(): Promise<PairingInfo>;
-  pair(daemonPublicKey: string, enrollmentCode?: string): Promise<string>;
+  pair(daemonPublicKey: string, enrollmentCode?: string, acknowledgeFallback?: boolean): Promise<string>;
   unpair(): Promise<void>;
 }
 
@@ -24,7 +24,7 @@ export function beginConfirmation(info: PairingInfo, now = performance.now()): P
   return { kind: 'confirming', info, expiresAt: now + 60_000 };
 }
 
-export async function confirmPairing(state: PairingState, api: PairingApi, now: number | (() => number) = () => performance.now(), enrollmentCode?: string): Promise<PairingState> {
+export async function confirmPairing(state: PairingState, api: PairingApi, now: number | (() => number) = () => performance.now(), enrollmentCode?: string, acknowledgeFallback = false): Promise<PairingState> {
   if (state.kind !== 'confirming') return state;
   const currentTime = () => typeof now === 'function' ? now() : now;
   if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
@@ -32,7 +32,7 @@ export async function confirmPairing(state: PairingState, api: PairingApi, now: 
     const current = await api.inspect();
     if (current.daemonPublicKey !== state.info.daemonPublicKey) return { kind: 'mismatch', info: current };
     if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
-    const clientId = await api.pair(current.daemonPublicKey, enrollmentCode);
+    const clientId = await api.pair(current.daemonPublicKey, enrollmentCode, acknowledgeFallback);
     return stateFromInfo({ ...current, clientId, pinnedPublicKey: current.daemonPublicKey });
   } catch {
     return { kind: 'error', message: 'Pairing failed. Check that the daemon is available, then retry.', info: state.info };
