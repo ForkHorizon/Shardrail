@@ -616,6 +616,11 @@ enum DaemonCommand {
 
 #[derive(Debug, Subcommand)]
 enum ClientCommand {
+    /// Issue a five-minute, single-use code for limited-scope browser enrollment.
+    Enroll {
+        #[arg(long, default_value = "browser")]
+        label: String,
+    },
     Add {
         #[arg(long)]
         label: String,
@@ -647,6 +652,21 @@ struct AuthorizedClient {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct AuthorizedClients {
     clients: Vec<AuthorizedClient>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Enrollment {
+    code_hash: String,
+    expires_at_ms: u128,
+    failed_attempts: u8,
+    label: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EnrollmentRequest {
+    kind: String,
+    code: String,
+    public_key: String,
 }
 
 struct Daemon {
@@ -1126,6 +1146,21 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
                 encode_hex(&host_key.verifying_key().to_bytes())
             );
         }
+        ClientCommand::Enroll { label } => {
+            let mut code = [0u8; 32];
+            fs::File::open("/dev/urandom")?.read_exact(&mut code)?;
+            let text = encode_hex(&code);
+            save_enrollment(
+                path,
+                &Enrollment {
+                    code_hash: encode_hex(&Sha256::digest(text.as_bytes())),
+                    expires_at_ms: wall_clock_ms() as u128 + 300_000,
+                    failed_attempts: 0,
+                    label,
+                },
+            )?;
+            println!("enrollment_code={text} expires_in_seconds=300");
+        }
         ClientCommand::List => {
             for client in entries.clients {
                 println!(
@@ -1158,6 +1193,79 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn save_enrollment(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
+    let target = path.join("browser-enrollment.json");
+    if fs::symlink_metadata(&target).is_ok_and(|meta| !meta.file_type().is_file()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "enrollment file must be regular",
+        ));
+    }
+    let temporary = path.join(format!(".browser-enrollment-{}.tmp", Uuid::now_v7()));
+    let mut file = create_private_file(&temporary)?;
+    file.write_all(&serde_json::to_vec(enrollment).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    fs::rename(temporary, target)?;
+    Ok(())
+}
+
+fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serde_json::Value> {
+    let reject = |message: &str| Ok(json!({"kind":"error","error":message}));
+    if request.kind != "enroll" || request.code.len() != 64 {
+        return reject("invalid enrollment request");
+    }
+    // Open the pinned directory directly; reopening via the data-dir helper would fchdir during
+    // concurrent WebSocket redemptions on macOS.
+    let directory = fs::File::open(path)?;
+    let _registry_lock = lock_client_registry(&directory)?;
+    let enrollment_path = path.join("browser-enrollment.json");
+    let mut enrollment: Enrollment = match fs::read(&enrollment_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return reject("enrollment unavailable");
+        }
+        Err(error) => return Err(error),
+    };
+    let hash = encode_hex(&Sha256::digest(request.code.as_bytes()));
+    if enrollment.expires_at_ms <= wall_clock_ms() as u128 {
+        fs::remove_file(enrollment_path)?;
+        return reject("enrollment expired");
+    }
+    if enrollment.failed_attempts >= 5 {
+        return reject("enrollment throttled");
+    }
+    if hash != enrollment.code_hash {
+        enrollment.failed_attempts += 1;
+        save_enrollment(path, &enrollment)?;
+        return reject("invalid enrollment code");
+    }
+    let public_key = match decode_hex(&request.public_key).and_then(|bytes| {
+        let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "public key must be 32 bytes")
+        })?;
+        VerifyingKey::from_bytes(&bytes).map_err(io::Error::other)?;
+        Ok(encode_hex(&bytes))
+    }) {
+        Ok(key) => key,
+        Err(_) => return reject("invalid browser public key"),
+    };
+    // Consume first so a crash can lose an enrollment, but can never register its key twice.
+    fs::remove_file(enrollment_path)?;
+    let mut clients = load_authorized_clients(path)?;
+    let id = Uuid::now_v7();
+    clients.clients.push(AuthorizedClient {
+        client_id: id,
+        public_key,
+        label: enrollment.label,
+        scope: ClientScope::Limited,
+    });
+    save_authorized_clients(path, &clients)?;
+    let host_key = load_or_create_signing_key(&path.join("host.key"))?;
+    Ok(
+        json!({"kind":"enrolled","client_id":id,"scope":"limited","host_public_key":encode_hex(&host_key.verifying_key().to_bytes())}),
+    )
 }
 
 fn lock_client_registry(directory: &fs::File) -> io::Result<fs::File> {
@@ -1476,6 +1584,22 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         .map_err(|_| handshake_timeout())??
         == 0
     {
+        return Ok(());
+    }
+    if serde_json::from_str::<serde_json::Value>(&line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("kind")
+                .and_then(|kind| kind.as_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("enroll")
+    {
+        let request: EnrollmentRequest = serde_json::from_str(&line).map_err(io::Error::other)?;
+        let reply = redeem_enrollment(daemon.data.directory_path(), request)?;
+        write_json_line(&outbound, &reply).await?;
         return Ok(());
     }
     let hello: ClientHello = serde_json::from_str(&line).map_err(io::Error::other)?;
@@ -1830,6 +1954,98 @@ fn wall_clock_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn enrollment_fixture(expires_at_ms: u128) -> (tempfile::TempDir, String, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let (_fd, path) = open_private_data_directory(directory.path()).unwrap();
+        let secret = "ab".repeat(32);
+        let signing_key = SigningKey::from_bytes(&[0xab; 32]);
+        let public_key = encode_hex(&signing_key.verifying_key().to_bytes());
+        save_enrollment(
+            &path,
+            &Enrollment {
+                code_hash: encode_hex(&Sha256::digest(secret.as_bytes())),
+                expires_at_ms,
+                failed_attempts: 0,
+                label: "test browser".into(),
+            },
+        )
+        .unwrap();
+        (directory, secret, public_key)
+    }
+
+    fn enrollment_request(code: String, public_key: String) -> EnrollmentRequest {
+        EnrollmentRequest {
+            kind: "enroll".into(),
+            code,
+            public_key,
+        }
+    }
+
+    #[test]
+    fn enrollment_is_limited_single_use_and_rejects_expiry_and_throttling() {
+        let (directory, code, key) = enrollment_fixture(wall_clock_ms() as u128 + 60_000);
+        let first = redeem_enrollment(
+            directory.path(),
+            enrollment_request(code.clone(), key.clone()),
+        )
+        .unwrap();
+        assert_eq!(first["scope"], "limited");
+        assert_eq!(first["kind"], "enrolled");
+        assert_eq!(
+            redeem_enrollment(directory.path(), enrollment_request(code, key.clone())).unwrap()["kind"],
+            "error"
+        );
+        let (expired, code, key) = enrollment_fixture(0);
+        assert_eq!(
+            redeem_enrollment(expired.path(), enrollment_request(code, key)).unwrap()["error"],
+            "enrollment expired"
+        );
+        let (throttled, _, key) = enrollment_fixture(wall_clock_ms() as u128 + 60_000);
+        for _ in 0..5 {
+            assert_eq!(
+                redeem_enrollment(
+                    throttled.path(),
+                    enrollment_request("00".repeat(32), key.clone())
+                )
+                .unwrap()["kind"],
+                "error"
+            );
+        }
+        assert_eq!(
+            redeem_enrollment(throttled.path(), enrollment_request("00".repeat(32), key)).unwrap()
+                ["error"],
+            "enrollment throttled"
+        );
+    }
+
+    #[test]
+    fn concurrent_enrollment_redemption_registers_only_one_client() {
+        let (directory, code, key) = enrollment_fixture(wall_clock_ms() as u128 + 60_000);
+        let path = directory.path().to_path_buf();
+        let workers = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let code = code.clone();
+                let key = key.clone();
+                std::thread::spawn(move || {
+                    redeem_enrollment(&path, enrollment_request(code, key)).unwrap()["kind"]
+                        == "enrolled"
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .filter(|won| *won)
+                .count(),
+            1
+        );
+        let clients = load_authorized_clients(directory.path()).unwrap();
+        assert_eq!(clients.clients.len(), 1);
+        assert_eq!(clients.clients[0].scope, ClientScope::Limited);
+    }
 
     #[test]
     fn rejects_common_network_mount_names() {
