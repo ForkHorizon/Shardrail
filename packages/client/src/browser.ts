@@ -121,6 +121,11 @@ export type BrowserClient = {
   close(): void;
 };
 
+export function resumeCursor(requested: number | undefined, host: Pick<ServerHello, "cursor" | "resync_required">) {
+  if (host.resync_required || requested === undefined || !Number.isSafeInteger(requested) || requested < 0) return 0;
+  return Math.min(requested, host.cursor);
+}
+
 function socketFrames(socket: WebSocket) {
   const queued: string[] = [];
   const waiting: { resolve: (value: string) => void; reject: (error: Error) => void }[] = [];
@@ -182,7 +187,7 @@ export async function connectBrowser(options: BrowserClientOptions): Promise<Bro
   const frameListeners = new Set<(frame: DaemonFrame) => void>();
   const errorListeners = new Set<(error: Error) => void>();
   const pendingFrames: DaemonFrame[] = [];
-  let cursor = options.cursor ?? 0;
+  let cursor = resumeCursor(options.cursor, host);
   let resumed = false;
   frames.onError((error) => errorListeners.forEach((listener) => listener(error)));
   void (async () => {

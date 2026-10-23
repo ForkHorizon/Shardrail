@@ -180,10 +180,23 @@ function App() {
           const info = await pairingApi.inspect();
           const identity = await (await openBrowserKeyStore()).get(info.daemonPublicKey);
           if (!identity || !info.clientId) throw new Error('browser key is missing; pair this browser again');
-          client = await connectBrowser({ url: browserWebSocketUrl(), identity });
+          const cursorKey = `shardrail-browser-cursor:${info.daemonPublicKey}`;
+          let cursor: number | undefined;
+          let journalEpoch: string | undefined;
+          try {
+            const saved = JSON.parse(localStorage.getItem(cursorKey) ?? 'null') as { cursor?: unknown; journalEpoch?: unknown } | null;
+            if (saved && Number.isSafeInteger(saved.cursor) && typeof saved.journalEpoch === 'string') {
+              cursor = saved.cursor as number;
+              journalEpoch = saved.journalEpoch;
+            }
+          } catch { /* Ignore corrupt cursor state and replay from the beginning. */ }
+          client = await connectBrowser({ url: browserWebSocketUrl(), identity, ...(cursor === undefined || journalEpoch === undefined ? {} : { cursor, journalEpoch }) });
           if (disposed) { client.close(); return; }
           client.onFrame((frame) => {
-            if (frame.kind === 'durable_event') applyDaemonEvent(frame.cursor, { session_id: frame.event.session_id, kind: frame.event.kind, payload: frame.event.payload }, frame.receipt_wall_clock_ms);
+            if (frame.kind === 'durable_event') {
+              applyDaemonEvent(frame.cursor, { session_id: frame.event.session_id, kind: frame.event.kind, payload: frame.event.payload }, frame.receipt_wall_clock_ms);
+              try { localStorage.setItem(cursorKey, JSON.stringify({ cursor: frame.cursor, journalEpoch: client?.host.journal_epoch ?? '' })); } catch (error) { console.warn('Could not persist browser event cursor', error); }
+            }
           });
           client.onError((error) => setTransportStatus(`Connection failed: ${error.message}`));
           setTransportStatus('Connected · browser WebSocket');

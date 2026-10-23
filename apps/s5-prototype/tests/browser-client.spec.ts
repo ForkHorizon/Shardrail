@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import 'fake-indexeddb/auto';
-import { createBrowserIdentity, hashBrowserTranscript, openBrowserKeyStore, signBrowserTranscript, type BrowserKeyStore } from '@shardrail/client/browser';
+import { createBrowserIdentity, hashBrowserTranscript, openBrowserKeyStore, resumeCursor, signBrowserTranscript, type BrowserKeyStore } from '@shardrail/client/browser';
 import vector from '../../../test-vectors/client-handshake-v1.json';
 
 describe('browser key storage', () => {
+  it('resets invalid, stale-epoch, and future cursors before replay', () => {
+    const host = { cursor: 12, resync_required: false };
+    expect(resumeCursor(8, host)).toBe(8);
+    expect(resumeCursor(99, host)).toBe(12);
+    expect(resumeCursor(-1, host)).toBe(0);
+    expect(resumeCursor(Number.NaN, host)).toBe(0);
+    expect(resumeCursor(8, { ...host, resync_required: true })).toBe(0);
+  });
+
   it('matches the shared Rust and TypeScript transcript vector', async () => {
     const digest = await hashBrowserTranscript(vector.client_nonce, vector.server_nonce, vector.client_public_key, vector.host_public_key);
     expect(Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')).toBe(vector.transcript_sha256);
