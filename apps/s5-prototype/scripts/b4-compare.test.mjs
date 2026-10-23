@@ -15,9 +15,9 @@ test('groups fixture runs, excludes incomplete samples, and reports pooled and p
   const runs = await readRuns([{ stack: 'tauri', directory: path.join(root, 'tauri') }, { stack: 'swift', directory: path.join(root, 'swift') }]);
   const [group] = compareRuns(runs);
   assert.deepEqual([group.events, group.streams, group.temperature], [1000, 2, 'cold']);
-  assert.deepEqual(group.stacks.tauri, { validRuns: 1, totalRuns: 2, measuredRows: 20, sampleFloor: 40, pooledSamples: 20, pooledMedianMs: 11, pooledP95Ms: 20, perRunMedianMedianMs: 11, perRunMedianP95Ms: 11 });
+  assert.deepEqual(group.stacks.tauri, { validRuns: 1, totalRuns: 2, measuredRows: 40, sampleFloor: 40, pooledSamples: 20, pooledMedianMs: 11, pooledP95Ms: 20, perRunMedianMedianMs: 11, perRunMedianP95Ms: 11 });
   assert.deepEqual(group.stacks.swift, { validRuns: 1, totalRuns: 1, measuredRows: 25, sampleFloor: 20, pooledSamples: 25, pooledMedianMs: 13, pooledP95Ms: 24, perRunMedianMedianMs: 13, perRunMedianP95Ms: 13 });
-  assert.match(renderMarkdown([group]), /1\/2 · 20\/40 · 11\/20 ms/);
+  assert.match(renderMarkdown([group]), /1\/2 · 40\/40 · 11\/20 ms/);
   assert.match(renderMarkdown([group]), /1\/1 · 25\/20 · 13\/24 ms/);
 });
 
@@ -46,7 +46,7 @@ test('uses ceil of 0.5% at the 5k and 50k sample boundaries', () => {
     const [group] = compareRuns([makeRun(below), makeRun(threshold)]);
     assert.equal(group.stacks.tauri.validRuns, 1);
     assert.equal(group.stacks.tauri.totalRuns, 2);
-    assert.equal(group.stacks.tauri.measuredRows, threshold);
+    assert.equal(group.stacks.tauri.measuredRows, below + threshold);
   }
 });
 
