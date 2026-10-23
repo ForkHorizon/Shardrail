@@ -50,18 +50,34 @@ async function cleanup() {
     const timer = setTimeout(() => { daemon.kill('SIGKILL'); resolveDone(); }, 2000);
     daemon.once('exit', () => { clearTimeout(timer); resolveDone(); });
   });
+  try {
+    const current = JSON.parse(await readFile(stateFile, 'utf8'));
+    if (current.daemonPid && current.daemonPid !== daemon.pid) {
+      try { process.kill(current.daemonPid, 'SIGTERM'); } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try { process.kill(current.daemonPid, 0); } catch { break; }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   await rm(stateFile, { force: true });
   await rm(dataDir, { recursive: true, force: true });
 }
-process.once('SIGTERM', () => { void cleanup().finally(() => process.exit()); });
-process.once('SIGINT', () => { void cleanup().finally(() => process.exit()); });
-
 try {
   const baseUrl = await endpoint;
   const ready = await fetch(baseUrl);
   if (!ready.ok) throw new Error(`test daemon served ${ready.status}`);
-  await writeFile(stateFile, JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint }));
-  await new Promise(() => {});
+  await writeFile(stateFile, JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint, daemonPid: daemon.pid, assetsDir: dist, browserPort: new URL(baseUrl).port }));
+  await new Promise((resolve) => {
+    const keepAlive = setInterval(() => {}, 60_000);
+    const stop = () => { clearInterval(keepAlive); resolve(); };
+    process.once('SIGTERM', stop);
+    process.once('SIGINT', stop);
+  });
 } finally {
   await cleanup();
 }

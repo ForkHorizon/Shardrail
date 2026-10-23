@@ -1,8 +1,9 @@
 import { defineConfig } from '@playwright/test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
-const stateFile = join(tmpdir(), 'shardrail-browser-e2e-state.json');
+const stateFile = process.env.SHARDRAIL_E2E_STATE ?? join(tmpdir(), `shardrail-browser-e2e-${randomUUID()}.json`);
 process.env.SHARDRAIL_E2E_STATE = stateFile;
 process.env.SHARDRAILD_BIN = process.env.SHARDRAILD_BIN ?? join(process.cwd(), '../../target/debug/shardraild');
 

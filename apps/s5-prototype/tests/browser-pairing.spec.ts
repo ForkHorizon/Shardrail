@@ -1,15 +1,47 @@
 import { test, expect } from '@playwright/test';
 import { connect } from '@shardrail/client';
 import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-type State = { baseUrl: string; dataDir: string; clientId: string; publicKey: string; privateKey: string; hostPublicKey: string; hostFingerprint: string };
+type State = { baseUrl: string; dataDir: string; clientId: string; publicKey: string; privateKey: string; hostPublicKey: string; hostFingerprint: string; daemonPid: number; assetsDir: string; browserPort: string };
 const stateFile = process.env.SHARDRAIL_E2E_STATE ?? join(tmpdir(), 'shardrail-browser-e2e-state.json');
 const state = JSON.parse(await readFile(stateFile, 'utf8')) as State;
+
+async function stopDaemon(pid: number) {
+  try { process.kill(pid, 'SIGTERM'); } catch { return; }
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { process.kill(pid, 0); } catch { return; }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  process.kill(pid, 'SIGKILL');
+}
+
+async function startDaemon() {
+  const binary = process.env.SHARDRAILD_BIN ?? '../../target/debug/shardraild';
+  const daemon = spawn(binary, ['--data-dir', state.dataDir, '--browser-listen', `127.0.0.1:${state.browserPort}`, '--browser-assets-dir', state.assetsDir], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  try {
+    await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`rotated daemon did not start: ${stderr}`)), 10_000);
+    daemon.stderr.setEncoding('utf8');
+    daemon.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+      if (stderr.includes(`127.0.0.1:${state.browserPort}/ws`)) { clearTimeout(timer); resolve(); }
+    });
+    daemon.once('exit', (code) => { clearTimeout(timer); reject(new Error(`rotated daemon exited with ${code}: ${stderr}`)); });
+    });
+  } catch (error) {
+    daemon.kill('SIGTERM');
+    throw error;
+  }
+  state.daemonPid = daemon.pid!;
+  await writeFile(stateFile, JSON.stringify(state));
+  return daemon.pid!;
+}
 
 test('pairs, persists the key on reload, reconnects, receives events, and blocks a changed daemon key', async ({ page }) => {
   const binary = process.env.SHARDRAILD_BIN ?? '../../target/debug/shardraild';
@@ -65,10 +97,22 @@ test('pairs, persists the key on reload, reconnects, receives events, and blocks
     client.close();
   }
 
-  await page.evaluate(() => localStorage.setItem('shardrail-daemon-public-key', '00'));
-  await page.reload();
-  await expect(page.getByRole('alert')).toContainText('daemon key changed');
-  await expect(page.getByRole('alert')).toContainText('Pairing is blocked');
+  const originalHostKey = await readFile(join(state.dataDir, 'host.key'));
+  const rotatedKey = randomBytes(32);
+  await stopDaemon(state.daemonPid);
+  await writeFile(join(state.dataDir, 'host.key'), rotatedKey);
+  await chmod(join(state.dataDir, 'host.key'), 0o600);
+  try {
+    await startDaemon();
+    await page.reload();
+    await expect(page.getByRole('alert')).toContainText('daemon key changed');
+    await expect(page.getByRole('alert')).toContainText('Pairing is blocked');
+  } finally {
+    await stopDaemon(state.daemonPid);
+    await writeFile(join(state.dataDir, 'host.key'), originalHostKey);
+    await chmod(join(state.dataDir, 'host.key'), 0o600);
+    await startDaemon();
+  }
 });
 
 test('uses the disclosed Noble fallback when the test flag disables WebCrypto Ed25519', async ({ page }) => {
@@ -92,6 +136,12 @@ test('uses the disclosed Noble fallback when the test flag disables WebCrypto Ed
   await page.getByRole('button', { name: 'Review fingerprint' }).click();
   await expect(page.getByLabel('Daemon SHA-256 fingerprint')).toHaveText(state.hostFingerprint);
   await page.getByRole('textbox', { name: 'One-time enrollment code' }).fill(code);
+  await expect(page.getByRole('note')).toContainText('extractable private key seed');
+  await expect(page.getByRole('button', { name: 'I verified this fingerprint — pair' })).toBeDisabled();
+  const fallbackConsent = page.getByRole('checkbox', { name: 'I understand the browser key can be read by same-origin script' });
+  await fallbackConsent.focus();
+  await fallbackConsent.press('Space');
+  await expect(fallbackConsent).toBeChecked();
   await page.getByRole('button', { name: 'I verified this fingerprint — pair' }).click();
   await expect(page.getByText('Connected · browser WebSocket')).toBeVisible();
   await expect(page.getByRole('note')).toContainText('extractable private key seed');
