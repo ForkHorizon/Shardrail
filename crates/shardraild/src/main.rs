@@ -22,7 +22,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::process::{ChildStdin, Command as TokioCommand};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -55,8 +55,15 @@ struct Args {
     test_write_ahead_delay_ms: u64,
     #[arg(long, value_name = "127.0.0.1:PORT")]
     browser_listen: Option<SocketAddr>,
+    #[arg(long, requires = "browser_listen")]
+    browser_assets_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
+}
+
+struct BrowserListenerOptions {
+    address: Option<SocketAddr>,
+    assets_dir: Option<PathBuf>,
 }
 
 async fn resolve_approval(
@@ -729,7 +736,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.fake_acp_disconnect_after_permission,
                 args.approval_timeout_secs,
                 args.test_write_ahead_delay_ms,
-                args.browser_listen,
+                BrowserListenerOptions {
+                    address: args.browser_listen,
+                    assets_dir: args.browser_assets_dir,
+                },
             )
             .await?
         }
@@ -744,7 +754,7 @@ async fn run(
     fake_acp_disconnect_after_permission: bool,
     approval_timeout_secs: u64,
     test_write_ahead_delay_ms: u64,
-    browser_listen: Option<SocketAddr>,
+    browser: BrowserListenerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -764,7 +774,7 @@ async fn run(
     Coordinator::recover_journal(&mut journal)?;
     let socket = path.join("shardraild.sock");
     let listener = bind_private_socket(&socket)?;
-    let browser_listener = if let Some(address) = browser_listen {
+    let browser_listener = if let Some(address) = browser.address {
         Some(bind_browser_listener(address).await?)
     } else {
         None
@@ -797,9 +807,15 @@ async fn run(
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let daemon = Arc::clone(&daemon);
+                        let browser_assets_dir = browser.assets_dir.clone();
                         tokio::spawn(async move {
-                            if let Err(error) =
-                                serve_browser_client(stream, daemon, address.port()).await
+                            if let Err(error) = serve_browser_connection(
+                                stream,
+                                daemon,
+                                address.port(),
+                                browser_assets_dir,
+                            )
+                            .await
                             {
                                 eprintln!("browser client connection ended: {error}");
                             }
@@ -916,6 +932,55 @@ mod browser_listener_tests {
     }
 
     #[tokio::test]
+    async fn browser_assets_require_same_origin_and_stay_inside_the_build_directory() {
+        let assets = tempfile::tempdir().unwrap();
+        fs::write(assets.path().join("index.html"), "browser app").unwrap();
+        fs::write(assets.path().join("app.js"), "console.log('ok')").unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let root = assets.path().to_path_buf();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                serve_browser_asset(&mut stream, address.port(), Some(&root))
+                    .await
+                    .unwrap();
+            }
+        });
+        for (target, origin, extra, expected) in [
+            ("/", format!("http://{address}"), "", "200 OK"),
+            (
+                "/../secret",
+                format!("http://{address}"),
+                "",
+                "404 Not Found",
+            ),
+            ("/", "http://evil.test".to_owned(), "", "403 Forbidden"),
+            (
+                "/",
+                format!("http://{address}"),
+                "host: evil.test\r\n",
+                "403 Forbidden",
+            ),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(
+                    format!("GET {target} HTTP/1.1\r\nHost: {address}\r\n{extra}Origin: {origin}\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}"))
+            );
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn browser_close_releases_unix_gateway_without_daemon_traffic() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -970,6 +1035,143 @@ mod browser_listener_tests {
         assert!(response.starts_with(b"HTTP/1.1 403"));
         assert!(server.await.unwrap().is_err());
     }
+}
+
+async fn serve_browser_connection(
+    mut stream: tokio::net::TcpStream,
+    daemon: Arc<Daemon>,
+    port: u16,
+    assets_dir: Option<PathBuf>,
+) -> io::Result<()> {
+    let mut first = [0u8; 256];
+    let count = timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
+        .await
+        .map_err(|_| handshake_timeout())??;
+    let request_line = first[..count]
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    if request_line.starts_with(b"GET /ws HTTP/") {
+        return serve_browser_client(stream, daemon, port).await;
+    }
+    serve_browser_asset(&mut stream, port, assets_dir.as_deref()).await
+}
+
+async fn serve_browser_asset(
+    stream: &mut tokio::net::TcpStream,
+    port: u16,
+    assets_dir: Option<&Path>,
+) -> io::Result<()> {
+    let mut request = Vec::with_capacity(1024);
+    while !request.ends_with(b"\r\n\r\n") {
+        if request.len() >= 16 * 1024 {
+            return write_http_error(stream, 431, "Request Header Fields Too Large").await;
+        }
+        let mut byte = [0u8; 1];
+        if timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut byte))
+            .await
+            .map_err(|_| handshake_timeout())??
+            == 0
+        {
+            return Ok(());
+        }
+        request.push(byte[0]);
+    }
+    let Ok(text) = std::str::from_utf8(&request) else {
+        return write_http_error(stream, 400, "Bad Request").await;
+    };
+    let mut lines = text.split("\r\n");
+    let Some(line) = lines.next() else {
+        return write_http_error(stream, 400, "Bad Request").await;
+    };
+    let mut parts = line.split(' ');
+    let (Some("GET"), Some(target), Some("HTTP/1.1"), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return write_http_error(stream, 405, "Method Not Allowed").await;
+    };
+    let expected_host = format!("127.0.0.1:{port}");
+    let expected_origin = format!("http://{expected_host}");
+    let mut hosts = Vec::new();
+    let mut origins = Vec::new();
+    for header in lines {
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "host" => hosts.push(value.trim()),
+            "origin" => origins.push(value.trim()),
+            _ => {}
+        }
+    }
+    if hosts.as_slice() != [expected_host.as_str()]
+        || origins.len() > 1
+        || origins
+            .first()
+            .is_some_and(|origin| *origin != expected_origin)
+    {
+        return write_http_error(stream, 403, "Forbidden").await;
+    }
+    let Some(assets_dir) = assets_dir else {
+        return write_http_error(stream, 404, "Not Found").await;
+    };
+    let relative = if target == "/" {
+        "index.html"
+    } else if target.starts_with('/')
+        && !target.contains(['?', '%', '\\'])
+        && target[1..]
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    {
+        &target[1..]
+    } else {
+        return write_http_error(stream, 404, "Not Found").await;
+    };
+    let Ok(root) = fs::canonicalize(assets_dir) else {
+        return write_http_error(stream, 404, "Not Found").await;
+    };
+    let Ok(path) = fs::canonicalize(root.join(relative)) else {
+        return write_http_error(stream, 404, "Not Found").await;
+    };
+    if !path.starts_with(&root) || !path.is_file() {
+        return write_http_error(stream, 404, "Not Found").await;
+    }
+    let content_type = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        _ => return write_http_error(stream, 404, "Not Found").await,
+    };
+    let body = fs::read(path)?;
+    if body.len() > 8 * 1024 * 1024 {
+        return write_http_error(stream, 413, "Content Too Large").await;
+    }
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(&body).await
+}
+
+async fn write_http_error(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    reason: &str,
+) -> io::Result<()> {
+    stream
+        .write_all(
+            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
 }
 
 async fn serve_browser_client(
@@ -1210,12 +1412,12 @@ fn save_enrollment(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
     file.write_all(&serde_json::to_vec(enrollment).map_err(io::Error::other)?)?;
     file.sync_all()?;
     fs::rename(temporary, target)?;
-    Ok(())
+    sync_directory(path)
 }
 
 fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serde_json::Value> {
     let reject = |message: &str| Ok(json!({"kind":"error","error":message}));
-    if request.kind != "enroll" || request.code.len() != 64 {
+    if request.kind != "enroll" {
         return reject("invalid enrollment request");
     }
     // Open the pinned directory directly; reopening via the data-dir helper would fchdir during
@@ -1238,7 +1440,7 @@ fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serd
     if enrollment.failed_attempts >= 5 {
         return reject("enrollment throttled");
     }
-    if hash != enrollment.code_hash {
+    if request.code.len() != 64 || hash != enrollment.code_hash {
         enrollment.failed_attempts += 1;
         save_enrollment(path, &enrollment)?;
         return reject("invalid enrollment code");
@@ -1255,6 +1457,7 @@ fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serd
     };
     // Consume first so a crash can lose an enrollment, but can never register its key twice.
     fs::remove_file(enrollment_path)?;
+    sync_directory(path)?;
     let mut clients = load_authorized_clients(path)?;
     let id = Uuid::now_v7();
     clients.clients.push(AuthorizedClient {
@@ -1347,6 +1550,19 @@ fn load_authorized_clients(path: &Path) -> io::Result<AuthorizedClients> {
     }
 }
 
+fn authorized_client(
+    path: &Path,
+    client_id: Uuid,
+    public_key: &str,
+) -> io::Result<Option<AuthorizedClient>> {
+    let directory = fs::File::open(path)?;
+    let _registry_lock = lock_client_registry(&directory)?;
+    Ok(load_authorized_clients(path)?
+        .clients
+        .into_iter()
+        .find(|client| client.client_id == client_id && client.public_key == public_key))
+}
+
 fn save_authorized_clients(path: &Path, clients: &AuthorizedClients) -> io::Result<()> {
     let target = path.join("authorized-clients.json");
     if fs::symlink_metadata(&target).is_ok_and(|meta| !meta.file_type().is_file()) {
@@ -1360,7 +1576,11 @@ fn save_authorized_clients(path: &Path, clients: &AuthorizedClients) -> io::Resu
     file.write_all(&serde_json::to_vec_pretty(clients).map_err(io::Error::other)?)?;
     file.sync_all()?;
     fs::rename(temporary, target)?;
-    Ok(())
+    sync_directory(path)
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
 }
 
 fn create_private_file(path: &Path) -> io::Result<fs::File> {
@@ -1730,6 +1950,17 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             }
         };
         let frame = parse_client_frame(&line)?;
+        let client = authorized_client(
+            daemon.data.directory_path(),
+            client.client_id,
+            &client.public_key,
+        )?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "client authorization was revoked",
+            )
+        })?;
         let (request, resolution, resume_after) = match frame {
             ClientFrame::Authenticate { .. } => {
                 return Err(io::Error::new(
@@ -1744,7 +1975,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         if let Some(request) = resolution {
             let approval_id = request.approval_id;
             let _command = daemon.command_lock.lock().await;
-            let result = resolve_approval(&daemon, client, request).await;
+            let result = resolve_approval(&daemon, &client, request).await;
             match result {
                 Ok(()) => {
                     write_frame(&outbound, &DaemonFrame::ApprovalResolved { approval_id }).await?
@@ -2041,6 +2272,42 @@ mod tests {
             redeem_enrollment(throttled.path(), enrollment_request("00".repeat(32), key)).unwrap()
                 ["error"],
             "enrollment throttled"
+        );
+    }
+
+    #[test]
+    fn malformed_enrollment_codes_count_toward_throttle() {
+        let (directory, code, key) = enrollment_fixture(wall_clock_ms() as u128 + 60_000);
+        for _ in 0..5 {
+            assert_eq!(
+                redeem_enrollment(
+                    directory.path(),
+                    enrollment_request("0".repeat(63), key.clone())
+                )
+                .unwrap()["error"],
+                "invalid enrollment code"
+            );
+        }
+        assert_eq!(
+            redeem_enrollment(directory.path(), enrollment_request(code, key)).unwrap()["error"],
+            "enrollment throttled"
+        );
+    }
+
+    #[test]
+    fn enrollment_consumption_is_durable_before_registry_failure() {
+        let (directory, code, key) = enrollment_fixture(wall_clock_ms() as u128 + 60_000);
+        fs::create_dir(directory.path().join("authorized-clients.json")).unwrap();
+        assert!(
+            redeem_enrollment(
+                directory.path(),
+                enrollment_request(code.clone(), key.clone())
+            )
+            .is_err()
+        );
+        assert_eq!(
+            redeem_enrollment(directory.path(), enrollment_request(code, key)).unwrap()["error"],
+            "enrollment unavailable"
         );
     }
 

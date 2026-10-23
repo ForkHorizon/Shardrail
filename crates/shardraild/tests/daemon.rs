@@ -163,14 +163,29 @@ fn browser_websocket_authenticates_rejects_pre_auth_command_and_delivers_events(
                 break;
             }
         }
-        ws.close(None).await.unwrap();
-
+        let removed = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+            .arg("--data-dir")
+            .arg(dir.path())
+            .args(["client", "remove", &client.id.to_string()])
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"resume","resume_after":0}).to_string().into())).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match tokio::time::timeout_at(deadline, ws.next()).await {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))) => continue,
+                Ok(None | Some(Err(_)) | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => break,
+                response => panic!("revoked WebSocket stayed open: {response:?}"),
+            }
+        }
+        let unauth_client = add_client(dir.path());
         let mut unauthenticated = format!("ws://{address}/ws").into_client_request().unwrap();
         unauthenticated.headers_mut().insert("host", address.parse().unwrap());
         unauthenticated.headers_mut().insert("origin", format!("http://{address}").parse().unwrap());
         let (mut ws, _) = tokio_tungstenite::connect_async(unauthenticated).await.unwrap();
         ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({
-            "min_version":1,"max_version":1,"client_id":client.id,"public_key":client.public_key,"nonce":"24".repeat(32),"resume_after":0,"journal_epoch":null
+            "min_version":1,"max_version":1,"client_id":unauth_client.id,"public_key":unauth_client.public_key,"nonce":"24".repeat(32),"resume_after":0,"journal_epoch":null
         }).to_string().into())).await.unwrap();
         let _ = ws.next().await.unwrap().unwrap();
         ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}}).to_string().into())).await.unwrap();
