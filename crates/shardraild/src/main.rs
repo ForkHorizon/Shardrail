@@ -936,46 +936,97 @@ mod browser_listener_tests {
         let assets = tempfile::tempdir().unwrap();
         fs::write(assets.path().join("index.html"), "browser app").unwrap();
         fs::write(assets.path().join("app.js"), "console.log('ok')").unwrap();
+        fs::write(assets.path().join("app.css"), "body { color: black }\n").unwrap();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let root = assets.path().to_path_buf();
         let server = tokio::spawn(async move {
-            for _ in 0..4 {
+            for _ in 0..7 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 serve_browser_asset(&mut stream, address.port(), Some(&root))
                     .await
                     .unwrap();
             }
         });
-        for (target, origin, extra, expected) in [
-            ("/", format!("http://{address}"), "", "200 OK"),
+        for (target, host, origin, extra, expected, content_type) in [
+            (
+                "/",
+                address.to_string(),
+                format!("http://{address}"),
+                "",
+                "200 OK",
+                Some("text/html; charset=utf-8"),
+            ),
+            (
+                "/app.js",
+                address.to_string(),
+                format!("http://{address}"),
+                "",
+                "200 OK",
+                Some("text/javascript; charset=utf-8"),
+            ),
+            (
+                "/app.css",
+                address.to_string(),
+                format!("http://{address}"),
+                "",
+                "200 OK",
+                Some("text/css; charset=utf-8"),
+            ),
             (
                 "/../secret",
+                address.to_string(),
                 format!("http://{address}"),
                 "",
                 "404 Not Found",
+                None,
             ),
-            ("/", "http://evil.test".to_owned(), "", "403 Forbidden"),
             (
                 "/",
+                address.to_string(),
+                "http://evil.test".to_owned(),
+                "",
+                "403 Forbidden",
+                None,
+            ),
+            (
+                "/",
+                address.to_string(),
                 format!("http://{address}"),
                 "host: evil.test\r\n",
                 "403 Forbidden",
+                None,
+            ),
+            (
+                "/",
+                "evil.test".to_owned(),
+                format!("http://{address}"),
+                "",
+                "403 Forbidden",
+                None,
             ),
         ] {
             let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
             stream
                 .write_all(
-                    format!("GET {target} HTTP/1.1\r\nHost: {address}\r\n{extra}Origin: {origin}\r\n\r\n")
-                        .as_bytes(),
+                    format!(
+                        "GET {target} HTTP/1.1\r\nHost: {host}\r\n{extra}Origin: {origin}\r\n\r\n"
+                    )
+                    .as_bytes(),
                 )
                 .await
                 .unwrap();
             let mut response = Vec::new();
             stream.read_to_end(&mut response).await.unwrap();
-            assert!(
-                String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}"))
-            );
+            let response = String::from_utf8_lossy(&response);
+            assert!(response.starts_with(&format!("HTTP/1.1 {expected}")));
+            if let Some(content_type) = content_type {
+                assert!(response.contains(&format!("Content-Type: {content_type}\r\n")));
+                assert!(
+                    response
+                        .contains("Content-Security-Policy: default-src 'self'; script-src 'self'")
+                );
+            }
         }
         server.await.unwrap();
     }
@@ -1149,11 +1200,14 @@ async fn serve_browser_asset(
     if body.len() > 8 * 1024 * 1024 {
         return write_http_error(stream, 413, "Content Too Large").await;
     }
+    let content_security_policy = format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws://127.0.0.1:{port}; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    );
     stream
         .write_all(
             format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-                body.len()
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-cache\r\nContent-Security-Policy: {content_security_policy}\r\nConnection: close\r\n\r\n",
+                body.len(),
             )
             .as_bytes(),
         )
