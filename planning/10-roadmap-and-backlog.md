@@ -68,13 +68,13 @@ Each spike takes days, not weeks, and produces a written note. **Core set before
 | E1.9 | P1e | workspace service: safe Git worker, scoped watchers, write lease (P1a shows provider-reported diffs only) | M11 | S8, E1.3 | F8, F19, B16 |
 | E1.10 | P1a | UI system and rendering pipeline | M15 | S5 | B5, N11; B4 result recorded as deferred debt |
 | E1.11 | P1a | primary browser UI: inbox, session view, palette, browser pairing | M14 | E1.8, E1.10 | F3–F5, F14 (local) |
-| E1.12 | Later desktop port | Tauri shell, short-lived shell-minted token, WebView isolation/capabilities, keychain; menu bar, notifications, connect-first and version-skew UI | M13 | E1.8 | port acceptance and B3 |
+| E1.12 | Later desktop port | Tauri shell, short-lived shell-minted token, WebView isolation/capabilities, keychain, code-signing peer admission; menu bar, notifications, connect-first and version-skew UI | M13 | E1.8 | port acceptance and B3 |
 | E1.13 | P1b | fake ACP scenarios and Grok adapter, second protocol after Codex (D52) | M06, M18 | E1.5, S2 | ACP fixtures run in CI + live smoke |
 | E1.14 | Post-P1 candidate | Hermes ACP mapping, only if reconsidered in a future phase (D48) | M06 | future owner decision | future phase acceptance criteria |
 | E1.15 | P1d | Claude channel (user's own API key, D29) or recorded exclusion | M08 | E1.6, S4 | smoke or exclusion record |
 | E1.16 | P1 close | manual handoff MVP (U19) | M12 | E1.6 | edited bundle → first prompt |
 | E1.17 | P1 close | budget and soak report | M18 | all in-scope P1 epics | stored traces |
-| E1.18 | P1e | hardening: S7 results feed the per-session checklist item by item (D47), with no aggregate status; macOS containment helper (D43), code-signing peer admission (own local identity, D46), drain-then-upgrade (D39), purge/salvage (D40) | M01, M05, M09, M04 | P1a, S7, S9 | F17, F20, F22, F25; B1, B3 |
+| E1.18 | P1e | hardening: S7 results feed the per-session checklist item by item (D47), with no aggregate status; macOS containment helper (D43), drain-then-upgrade (D39), purge/salvage (D40) | M01, M05, M09, M04 | P1a, S7, S9 | F17, F20, F22, F25; B1, B3 |
 | E2.1 | P2 | Linux service, cgroups, linger, `bridge` | M16, M05 | P1 | P2 gate |
 | E2.2 | P2 | host management, federation, cross-host inbox | M13, M14 | E2.1 | F14, F16 |
 | E2.3 | P2 | remote limited clients via the SSH bridge | M10 | E2.1 | scope tests |

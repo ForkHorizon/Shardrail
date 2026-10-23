@@ -37,6 +37,8 @@ class BrowserFirstPlanTests(unittest.TestCase):
         self.assertNotIn("M13", hardening)
         self.assertIn("Later desktop port", desktop_port)
         self.assertIn("version-skew UI", desktop_port)
+        self.assertIn("code-signing peer admission", desktop_port)
+        self.assertNotIn("code-signing peer admission", hardening)
 
     def test_enrollment_is_distinct_from_authentication_and_tested(self):
         security = read_plan("06-security.md")
