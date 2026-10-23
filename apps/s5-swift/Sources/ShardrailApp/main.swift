@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("event")); column.title = "Event"; table.addTableColumn(column); table.dataSource = self; table.delegate = self
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
         let root = NSStackView(views: [status, scroll]); root.orientation = .vertical; root.spacing = 8; root.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12); root.setHuggingPriority(.defaultHigh, for: .vertical)
+        NSLayoutConstraint.activate([scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 860), scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 600)])
         window.contentView = root; root.translatesAutoresizingMaskIntoConstraints = false
         if let content = window.contentView { NSLayoutConstraint.activate([root.leadingAnchor.constraint(equalTo: content.leadingAnchor), root.trailingAnchor.constraint(equalTo: content.trailingAnchor), root.topAnchor.constraint(equalTo: content.topAnchor), root.bottomAnchor.constraint(equalTo: content.bottomAnchor)]) }
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
