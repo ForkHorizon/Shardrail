@@ -820,12 +820,15 @@ fn browser_request_allowed(request: &WsRequest, port: u16) -> bool {
         && origins.iter().next().and_then(|value| value.to_str().ok())
             == Some(expected_origin.as_str())
         && request.uri().path() == "/ws"
+        && request.uri().scheme().is_none()
+        && request.uri().authority().is_none()
         && request.uri().query().is_none()
 }
 
 #[cfg(test)]
 mod browser_listener_tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     fn request(uri: &str, host: &[&str], origin: &[&str]) -> WsRequest {
         let mut builder = WsRequest::builder().uri(uri);
@@ -864,6 +867,16 @@ mod browser_listener_tests {
                 &["127.0.0.1:4411"],
                 &["http://127.0.0.1:4411", "http://127.0.0.1:4411"],
             ),
+            request(
+                "http://attacker.invalid/ws",
+                &["127.0.0.1:4411"],
+                &["http://127.0.0.1:4411"],
+            ),
+            request(
+                "http://127.0.0.1:4411/ws",
+                &["127.0.0.1:4411"],
+                &["http://127.0.0.1:4411"],
+            ),
         ] {
             assert!(!browser_request_allowed(&bad, 4411));
         }
@@ -879,41 +892,112 @@ mod browser_listener_tests {
             assert!(error.to_string().contains("127.0.0.1"));
         }
     }
+
+    #[tokio::test]
+    async fn browser_close_releases_unix_gateway_without_daemon_traffic() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (unix_gateway, mut unix_peer) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            tunnel_browser_client(websocket, unix_gateway)
+                .await
+                .unwrap();
+        });
+        let (mut browser, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+
+        browser.close(None).await.unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            timeout(Duration::from_secs(1), unix_peer.read(&mut byte))
+                .await
+                .expect("gateway write half should close promptly")
+                .unwrap(),
+            0
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_absolute_form_request_never_upgrades() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_browser_websocket(stream, address.port()).await
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET http://attacker.invalid/ws HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: http://127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+                    address.port(), address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+            .await
+            .expect("rejected connection should close")
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 403"));
+        assert!(server.await.unwrap().is_err());
+    }
 }
 
-#[allow(clippy::result_large_err)] // tungstenite's callback requires an HTTP response as its rejection value.
 async fn serve_browser_client(
     stream: tokio::net::TcpStream,
     daemon: Arc<Daemon>,
     port: u16,
 ) -> io::Result<()> {
-    let websocket = timeout(
-        HANDSHAKE_TIMEOUT,
-        tokio_tungstenite::accept_hdr_async_with_config(
-            stream,
-            move |request: &WsRequest, response: WsResponse| {
-                if browser_request_allowed(request, port) {
-                    Ok(response)
-                } else {
-                    Err(WsResponse::builder()
-                        .status(403)
-                        .body(Some(
-                            "browser listener rejected Host, Origin, path, or query".into(),
-                        ))
-                        .expect("static rejection response is valid"))
-                }
-            },
-            Some(
-                WebSocketConfig::default()
-                    .max_message_size(Some(1_048_576))
-                    .max_frame_size(Some(1_048_576)),
-            ),
+    let websocket = timeout(HANDSHAKE_TIMEOUT, accept_browser_websocket(stream, port))
+        .await
+        .map_err(|_| handshake_timeout())?
+        .map_err(io::Error::other)?;
+    let unix = UnixStream::connect(daemon.data.directory_path().join("shardraild.sock")).await?;
+    tunnel_browser_client(websocket, unix).await
+}
+
+#[allow(clippy::result_large_err)] // tungstenite's callback requires an HTTP response as its rejection value.
+async fn accept_browser_websocket(
+    stream: tokio::net::TcpStream,
+    port: u16,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    tokio_tungstenite::tungstenite::Error,
+> {
+    tokio_tungstenite::accept_hdr_async_with_config(
+        stream,
+        move |request: &WsRequest, response: WsResponse| {
+            if browser_request_allowed(request, port) {
+                Ok(response)
+            } else {
+                Err(WsResponse::builder()
+                    .status(403)
+                    .body(Some(
+                        "browser listener rejected Host, Origin, path, or query".into(),
+                    ))
+                    .expect("static rejection response is valid"))
+            }
+        },
+        Some(
+            WebSocketConfig::default()
+                .max_message_size(Some(1_048_576))
+                .max_frame_size(Some(1_048_576)),
         ),
     )
     .await
-    .map_err(|_| handshake_timeout())?
-    .map_err(io::Error::other)?;
-    let unix = UnixStream::connect(daemon.data.directory_path().join("shardraild.sock")).await?;
+}
+
+async fn tunnel_browser_client(
+    websocket: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    unix: UnixStream,
+) -> io::Result<()> {
     let (mut ws_write, mut ws_read) = websocket.split();
     let (unix_read, mut unix_write) = unix.into_split();
     let client_to_daemon = async {
@@ -959,8 +1043,10 @@ async fn serve_browser_client(
         }
         Ok::<(), io::Error>(())
     };
-    tokio::try_join!(client_to_daemon, daemon_to_client)?;
-    Ok(())
+    tokio::select! {
+        result = client_to_daemon => result,
+        result = daemon_to_client => result,
+    }
 }
 
 fn default_data_dir() -> PathBuf {
