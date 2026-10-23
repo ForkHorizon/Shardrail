@@ -6,7 +6,7 @@ import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { compareRuns, readRuns, renderMarkdown } from './b4-compare.mjs';
+import { compareRuns, readRuns, renderMarkdown, sampleFloor } from './b4-compare.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -26,15 +26,41 @@ test('keeps timeout attempts, rejects count/sample mismatches, and skips corrupt
   const tauri = path.join(directory, 'tauri'), swift = path.join(directory, 'swift');
   mkdirSync(tauri); mkdirSync(swift);
   try {
-    writeFileSync(path.join(tauri, 'timeout.json'), JSON.stringify({ error: 'timed out', events: 1000, streams: 2 }));
-    writeFileSync(path.join(tauri, 'short.json'), JSON.stringify({ events: 1000, streams: 2, pageVisibility: 'visible', daemonAgentChunkCount: 1000, b4: { count: 20, samplesMs: [5] } }));
+    writeFileSync(path.join(tauri, 'b4-cold-1000-2-r1.json'), JSON.stringify({ error: 'timed out', events: 1000, streams: 2 }));
+    writeFileSync(path.join(tauri, 'b4-cold-1000-2-r2.json'), JSON.stringify({ events: 1000, streams: 2, pageVisibility: 'visible', daemonAgentChunkCount: 1000, b4: { count: 20, samplesMs: [5] } }));
     writeFileSync(path.join(tauri, 'corrupt.json'), '{');
-    writeFileSync(path.join(swift, 'legacy.json'), JSON.stringify({ streams: 2, pageVisibility: 'visible', daemonAgentChunkCount: 1000, b4: { count: 20, samplesMs: Array.from({ length: 20 }, (_, i) => i + 1) } }));
+    writeFileSync(path.join(swift, 'b4-cold-1000-2-r1.json'), JSON.stringify({ streams: 2, pageVisibility: 'visible', daemonAgentChunkCount: 1000, b4: { count: 20, samplesMs: Array.from({ length: 20 }, (_, i) => i + 1) } }));
     const runs = await readRuns([{ stack: 'tauri', directory: tauri }, { stack: 'swift', directory: swift }]);
     const group = compareRuns(runs)[0];
-    assert.deepEqual(group.stacks.tauri, { validRuns: 0, totalRuns: 2, measuredRows: 0, sampleFloor: 40, pooledSamples: 0, pooledMedianMs: null, pooledP95Ms: null, perRunMedianMedianMs: null, perRunMedianP95Ms: null });
+    assert.deepEqual(group.stacks.tauri, { validRuns: 0, totalRuns: 2, measuredRows: 20, sampleFloor: 40, pooledSamples: 0, pooledMedianMs: null, pooledP95Ms: null, perRunMedianMedianMs: null, perRunMedianP95Ms: null });
     assert.equal(group.stacks.swift.validRuns, 1);
     assert.equal(group.stacks.swift.pooledP95Ms, 20, 'p95 uses the same floor index as the runtime metrics');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('uses ceil of 0.5% at the 5k and 50k sample boundaries', () => {
+  assert.equal(sampleFloor(5_000), 25);
+  assert.equal(sampleFloor(50_000), 250);
+  for (const [events, below, threshold] of [[5_000, 24, 25], [50_000, 249, 250]]) {
+    const makeRun = (count) => ({ stack: 'tauri', events, streams: 1, temperature: 'cold', pageVisibility: 'visible', daemonAgentChunkCount: events, b4: { count, samplesMs: Array(count).fill(1) } });
+    const [group] = compareRuns([makeRun(below), makeRun(threshold)]);
+    assert.equal(group.stacks.tauri.validRuns, 1);
+    assert.equal(group.stacks.tauri.totalRuns, 2);
+    assert.equal(group.stacks.tauri.measuredRows, threshold);
+  }
+});
+
+test('groups failed filename-only Tauri records by their benchmark cell and keeps repetition metadata', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'b4-compare-name-'));
+  try {
+    writeFileSync(path.join(directory, 'b4-warm-50000-4-r3.json'), JSON.stringify({ error: 'samples incomplete', daemonAgentChunkCount: 50_000, b4: { count: 249 } }));
+    const [run] = await readRuns([{ stack: 'tauri', directory }]);
+    assert.deepEqual([run.temperature, run.events, run.streams, run.repetition], ['warm', 50_000, 4, 3]);
+    const [group] = compareRuns([run]);
+    assert.deepEqual([group.events, group.streams, group.temperature], [50_000, 4, 'warm']);
+    assert.equal(group.stacks.tauri.validRuns, 0);
+    assert.equal(group.stacks.tauri.totalRuns, 1);
+    assert.equal(group.stacks.tauri.sampleFloor, 250);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

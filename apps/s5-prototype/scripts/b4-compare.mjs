@@ -4,7 +4,8 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-export function sampleFloor(events) { return Math.min(events, Math.max(20, Math.ceil(events / 100))); }
+export const B4_MINIMUM_SAMPLE_RATE = 0.005;
+export function sampleFloor(events) { return Math.min(events, Math.max(20, Math.ceil(events * B4_MINIMUM_SAMPLE_RATE))); }
 const percentile = (values, fraction) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * fraction))] : null;
 const median = (values) => percentile(values, 0.5);
 
@@ -28,7 +29,7 @@ export function compareRuns(runs) {
       const runMedians = valid.map((run) => run.medianMs).filter(Number.isFinite);
       return [stack, {
         validRuns: valid.length, totalRuns: values.length,
-        measuredRows: valid.reduce((sum, run) => sum + run.count, 0), sampleFloor: sampleFloor(group.events) * values.length,
+        measuredRows: values.reduce((sum, run) => sum + (Number.isInteger(run.count) && run.count >= 0 ? run.count : run.samples.length), 0), sampleFloor: sampleFloor(group.events) * values.length,
         pooledSamples: pooled.length, pooledMedianMs: median(pooled), pooledP95Ms: percentile(pooled, 0.95),
         perRunMedianMedianMs: median(runMedians), perRunMedianP95Ms: percentile(runMedians, 0.95),
       }];
@@ -60,6 +61,11 @@ async function jsonFiles(directory) {
   return found;
 }
 
+function filenameMetadata(file) {
+  const match = path.basename(file).match(/^b4-(cold|warm)-(\d+)-(\d+)-r(\d+)\.json$/);
+  return match && { temperature: match[1], events: Number(match[2]), streams: Number(match[3]), repetition: Number(match[4]) };
+}
+
 export async function readRuns(inputs) {
   const runs = [];
   for (const { stack, directory } of inputs) {
@@ -72,9 +78,13 @@ export async function readRuns(inputs) {
         continue;
       }
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-      const events = Number.isInteger(value.events) ? value.events : (!value.error ? value.daemonAgentChunkCount : undefined);
-      if (!Number.isInteger(events) || !Number.isInteger(value.streams) || (!value.b4 && !value.error)) continue;
-      runs.push({ ...value, events, stack, temperature: value.temperature ?? 'unspecified' });
+      const metadata = filenameMetadata(file);
+      const events = value.events ?? metadata?.events ?? (!value.error ? value.daemonAgentChunkCount : undefined);
+      const streams = value.streams ?? metadata?.streams;
+      const temperature = value.temperature ?? metadata?.temperature;
+      const repetition = value.repetition ?? metadata?.repetition;
+      if (!Number.isInteger(events) || !Number.isInteger(streams) || !temperature || (!value.b4 && !value.error)) continue;
+      runs.push({ ...value, events, streams, temperature, repetition, stack });
     }
   }
   return runs;

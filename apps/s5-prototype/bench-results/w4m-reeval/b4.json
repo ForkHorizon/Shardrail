@@ -1,0 +1,350 @@
+[
+  {
+    "events": 5000,
+    "streams": 1,
+    "temperature": "cold",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 5236,
+        "sampleFloor": 125,
+        "pooledSamples": 5236,
+        "pooledMedianMs": 256.165566444397,
+        "pooledP95Ms": 367.97490632534027,
+        "perRunMedianMedianMs": 250.8561511039734,
+        "perRunMedianP95Ms": 282.51548957824707
+      },
+      "tauri": {
+        "validRuns": 3,
+        "totalRuns": 5,
+        "measuredRows": 248,
+        "sampleFloor": 125,
+        "pooledSamples": 163,
+        "pooledMedianMs": 172,
+        "pooledP95Ms": 422,
+        "perRunMedianMedianMs": 171,
+        "perRunMedianP95Ms": 293
+      }
+    }
+  },
+  {
+    "events": 5000,
+    "streams": 1,
+    "temperature": "warm",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 5166,
+        "sampleFloor": 125,
+        "pooledSamples": 5166,
+        "pooledMedianMs": 241.1343092918396,
+        "pooledP95Ms": 360.1361895799637,
+        "perRunMedianMedianMs": 244.19482493400574,
+        "perRunMedianP95Ms": 246.7686458826065
+      },
+      "tauri": {
+        "validRuns": 2,
+        "totalRuns": 5,
+        "measuredRows": 263,
+        "sampleFloor": 125,
+        "pooledSamples": 133,
+        "pooledMedianMs": 189,
+        "pooledP95Ms": 325,
+        "perRunMedianMedianMs": 201,
+        "perRunMedianP95Ms": 201
+      }
+    }
+  },
+  {
+    "events": 5000,
+    "streams": 4,
+    "temperature": "cold",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 4168,
+        "sampleFloor": 125,
+        "pooledSamples": 4168,
+        "pooledMedianMs": 193.35286462306976,
+        "pooledP95Ms": 284.36605870723724,
+        "perRunMedianMedianMs": 185.41098964214325,
+        "perRunMedianP95Ms": 266.7041002511978
+      },
+      "tauri": {
+        "validRuns": 3,
+        "totalRuns": 5,
+        "measuredRows": 246,
+        "sampleFloor": 125,
+        "pooledSamples": 171,
+        "pooledMedianMs": 121,
+        "pooledP95Ms": 293,
+        "perRunMedianMedianMs": 134,
+        "perRunMedianP95Ms": 159
+      }
+    }
+  },
+  {
+    "events": 5000,
+    "streams": 4,
+    "temperature": "warm",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 4233,
+        "sampleFloor": 125,
+        "pooledSamples": 4233,
+        "pooledMedianMs": 187.62520503997803,
+        "pooledP95Ms": 268.35636138916016,
+        "perRunMedianMedianMs": 182.607652425766,
+        "perRunMedianP95Ms": 218.6669968366623
+      },
+      "tauri": {
+        "validRuns": 1,
+        "totalRuns": 5,
+        "measuredRows": 237,
+        "sampleFloor": 125,
+        "pooledSamples": 59,
+        "pooledMedianMs": 103,
+        "pooledP95Ms": 198,
+        "perRunMedianMedianMs": 103,
+        "perRunMedianP95Ms": 103
+      }
+    }
+  },
+  {
+    "events": 5000,
+    "streams": 8,
+    "temperature": "cold",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 4072,
+        "sampleFloor": 125,
+        "pooledSamples": 4072,
+        "pooledMedianMs": 134.18617522716522,
+        "pooledP95Ms": 207.32008862495422,
+        "perRunMedianMedianMs": 139.59913551807404,
+        "perRunMedianP95Ms": 162.28263020515442
+      },
+      "tauri": {
+        "validRuns": 1,
+        "totalRuns": 5,
+        "measuredRows": 211,
+        "sampleFloor": 125,
+        "pooledSamples": 51,
+        "pooledMedianMs": 76,
+        "pooledP95Ms": 127,
+        "perRunMedianMedianMs": 76,
+        "perRunMedianP95Ms": 76
+      }
+    }
+  },
+  {
+    "events": 5000,
+    "streams": 8,
+    "temperature": "warm",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 4036,
+        "sampleFloor": 125,
+        "pooledSamples": 4036,
+        "pooledMedianMs": 120.78786981105804,
+        "pooledP95Ms": 174.5436029434204,
+        "perRunMedianMedianMs": 119.54724299907684,
+        "perRunMedianP95Ms": 152.46618628501892
+      },
+      "tauri": {
+        "validRuns": 1,
+        "totalRuns": 5,
+        "measuredRows": 216,
+        "sampleFloor": 125,
+        "pooledSamples": 54,
+        "pooledMedianMs": 105,
+        "pooledP95Ms": 145,
+        "perRunMedianMedianMs": 105,
+        "perRunMedianP95Ms": 105
+      }
+    }
+  },
+  {
+    "events": 50000,
+    "streams": 1,
+    "temperature": "cold",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 53532,
+        "sampleFloor": 1250,
+        "pooledSamples": 53532,
+        "pooledMedianMs": 2447.5930273532867,
+        "pooledP95Ms": 3592.1923867464066,
+        "perRunMedianMedianMs": 2439.9383606910706,
+        "perRunMedianP95Ms": 2503.542303442955
+      },
+      "tauri": {
+        "validRuns": 3,
+        "totalRuns": 5,
+        "measuredRows": 2485,
+        "sampleFloor": 1250,
+        "pooledSamples": 1527,
+        "pooledMedianMs": 1361,
+        "pooledP95Ms": 2566,
+        "perRunMedianMedianMs": 1408,
+        "perRunMedianP95Ms": 1430
+      }
+    }
+  },
+  {
+    "events": 50000,
+    "streams": 1,
+    "temperature": "warm",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 53726,
+        "sampleFloor": 1250,
+        "pooledSamples": 53726,
+        "pooledMedianMs": 2425.8128353357315,
+        "pooledP95Ms": 3604.4636269807816,
+        "perRunMedianMedianMs": 2408.901689529419,
+        "perRunMedianP95Ms": 2537.111705183983
+      },
+      "tauri": {
+        "validRuns": 4,
+        "totalRuns": 5,
+        "measuredRows": 2815,
+        "sampleFloor": 1250,
+        "pooledSamples": 2349,
+        "pooledMedianMs": 1649,
+        "pooledP95Ms": 2915,
+        "perRunMedianMedianMs": 1671,
+        "perRunMedianP95Ms": 1801
+      }
+    }
+  },
+  {
+    "events": 50000,
+    "streams": 4,
+    "temperature": "cold",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 44559,
+        "sampleFloor": 1250,
+        "pooledSamples": 44559,
+        "pooledMedianMs": 1622.8073425292969,
+        "pooledP95Ms": 2355.611557364464,
+        "perRunMedianMedianMs": 1691.927803993225,
+        "perRunMedianP95Ms": 1863.158418059349
+      },
+      "tauri": {
+        "validRuns": 0,
+        "totalRuns": 5,
+        "measuredRows": 2061,
+        "sampleFloor": 1250,
+        "pooledSamples": 0,
+        "pooledMedianMs": null,
+        "pooledP95Ms": null,
+        "perRunMedianMedianMs": null,
+        "perRunMedianP95Ms": null
+      }
+    }
+  },
+  {
+    "events": 50000,
+    "streams": 4,
+    "temperature": "warm",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 45511,
+        "sampleFloor": 1250,
+        "pooledSamples": 45511,
+        "pooledMedianMs": 1563.544097661972,
+        "pooledP95Ms": 2374.101602911949,
+        "perRunMedianMedianMs": 1682.9166855812073,
+        "perRunMedianP95Ms": 1776.2061393260956
+      },
+      "tauri": {
+        "validRuns": 0,
+        "totalRuns": 5,
+        "measuredRows": 2214,
+        "sampleFloor": 1250,
+        "pooledSamples": 0,
+        "pooledMedianMs": null,
+        "pooledP95Ms": null,
+        "perRunMedianMedianMs": null,
+        "perRunMedianP95Ms": null
+      }
+    }
+  },
+  {
+    "events": 50000,
+    "streams": 8,
+    "temperature": "cold",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 41265,
+        "sampleFloor": 1250,
+        "pooledSamples": 41265,
+        "pooledMedianMs": 1116.5784440040588,
+        "pooledP95Ms": 1777.2444441318512,
+        "perRunMedianMedianMs": 1113.5965690612793,
+        "perRunMedianP95Ms": 1197.4838490486145
+      },
+      "tauri": {
+        "validRuns": 0,
+        "totalRuns": 5,
+        "measuredRows": 2048,
+        "sampleFloor": 1250,
+        "pooledSamples": 0,
+        "pooledMedianMs": null,
+        "pooledP95Ms": null,
+        "perRunMedianMedianMs": null,
+        "perRunMedianP95Ms": null
+      }
+    }
+  },
+  {
+    "events": 50000,
+    "streams": 8,
+    "temperature": "warm",
+    "stacks": {
+      "swift": {
+        "validRuns": 5,
+        "totalRuns": 5,
+        "measuredRows": 41656,
+        "sampleFloor": 1250,
+        "pooledSamples": 41656,
+        "pooledMedianMs": 1151.8956315517426,
+        "pooledP95Ms": 1722.8211523294449,
+        "perRunMedianMedianMs": 1136.555214881897,
+        "perRunMedianP95Ms": 1257.9972149133682
+      },
+      "tauri": {
+        "validRuns": 0,
+        "totalRuns": 5,
+        "measuredRows": 1956,
+        "sampleFloor": 1250,
+        "pooledSamples": 0,
+        "pooledMedianMs": null,
+        "pooledP95Ms": null,
+        "perRunMedianMedianMs": null,
+        "perRunMedianP95Ms": null
+      }
+    }
+  }
+]
