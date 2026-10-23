@@ -714,9 +714,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 anchored_path.as_path()
             };
             let key = load_or_create_signing_key(&path.join("host.key"))?;
+            let public_key = key.verifying_key().to_bytes();
             println!(
-                "host_public_key={}",
-                encode_hex(&key.verifying_key().to_bytes())
+                "host_public_key={} host_fingerprint={}",
+                encode_hex(&public_key),
+                encode_hex(&Sha256::digest(public_key))
             );
         }
         None => {
@@ -1586,20 +1588,30 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
     {
         return Ok(());
     }
-    if serde_json::from_str::<serde_json::Value>(&line)
+    let frame_kind = serde_json::from_str::<serde_json::Value>(&line)
         .ok()
         .and_then(|value| {
             value
                 .get("kind")
                 .and_then(|kind| kind.as_str())
                 .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("enroll")
-    {
+        });
+    if frame_kind.as_deref() == Some("enroll") {
         let request: EnrollmentRequest = serde_json::from_str(&line).map_err(io::Error::other)?;
         let reply = redeem_enrollment(daemon.data.directory_path(), request)?;
-        write_json_line(&outbound, &reply).await?;
+        finish_with_json(outbound, &mut abort_writer, &reply).await?;
+        return Ok(());
+    }
+    if frame_kind.as_deref() == Some("identity") {
+        finish_with_json(
+            outbound,
+            &mut abort_writer,
+            &json!({
+                "kind": "identity",
+                "host_public_key": encode_hex(&daemon.host_key.verifying_key().to_bytes()),
+            }),
+        )
+        .await?;
         return Ok(());
     }
     let hello: ClientHello = serde_json::from_str(&line).map_err(io::Error::other)?;
@@ -1928,6 +1940,19 @@ async fn finish_with_error(
         },
     )
     .await?;
+    drop(outbound);
+    if let Some(task) = writer.0.take() {
+        task.await.map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+async fn finish_with_json<T: serde::Serialize>(
+    outbound: mpsc::Sender<Vec<u8>>,
+    writer: &mut AbortWriter,
+    value: &T,
+) -> io::Result<()> {
+    write_json_line(&outbound, value).await?;
     drop(outbound);
     if let Some(task) = writer.0.take() {
         task.await.map_err(io::Error::other)?;

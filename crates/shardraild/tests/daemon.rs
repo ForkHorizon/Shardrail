@@ -1,4 +1,5 @@
 use ed25519_dalek::{Signature, Signer, SigningKey};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shardrail_journal::Journal;
@@ -59,6 +60,126 @@ fn start_daemon(path: &Path) -> Child {
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap()
+}
+
+fn start_browser_daemon(path: &Path, port: u16) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(path)
+        .arg("--fake-acp-path")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/shardrail-fake-acp"),
+        )
+        .arg("--browser-listen")
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn browser_websocket_authenticates_rejects_pre_auth_command_and_delivers_events() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let issued = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(dir.path())
+        .args(["client", "enroll", "--label", "browser test"])
+        .output()
+        .unwrap();
+    assert!(issued.status.success());
+    let code = String::from_utf8(issued.stdout)
+        .unwrap()
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("enrollment_code="))
+        .unwrap()
+        .to_owned();
+    let browser_key = SigningKey::from_bytes(&[0x42; 32]);
+    let browser_public_key = encode_hex(&browser_key.verifying_key().to_bytes());
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut daemon = start_browser_daemon(dir.path(), port);
+    let address = format!("127.0.0.1:{port}");
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request.headers_mut().insert("host", address.parse().unwrap());
+        request.headers_mut().insert("origin", format!("http://{address}").parse().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut ws, _) = loop {
+            match tokio_tungstenite::connect_async(request.clone()).await {
+                Ok(connection) => break connection,
+                Err(_) if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("browser daemon did not accept WebSocket: {error}"),
+            }
+        };
+        let mut enrollment_request = format!("ws://{address}/ws").into_client_request().unwrap();
+        enrollment_request.headers_mut().insert("host", address.parse().unwrap());
+        enrollment_request.headers_mut().insert("origin", format!("http://{address}").parse().unwrap());
+        let (mut enrollment_ws, _) = tokio_tungstenite::connect_async(enrollment_request).await.unwrap();
+        enrollment_ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"enroll","code":code.clone(),"public_key":browser_public_key}).to_string().into())).await.unwrap();
+        let enrolled: Value = serde_json::from_str(enrollment_ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(enrolled["kind"], "enrolled");
+        assert_eq!(enrolled["scope"], "limited");
+        let registered: Value = serde_json::from_slice(&std::fs::read(dir.path().join("authorized-clients.json")).unwrap()).unwrap();
+        assert!(registered["clients"].as_array().unwrap().iter().any(|entry| entry["client_id"] == enrolled["client_id"] && entry["scope"] == "limited"));
+        enrollment_ws.close(None).await.unwrap();
+        let mut replay_request = format!("ws://{address}/ws").into_client_request().unwrap();
+        replay_request.headers_mut().insert("host", address.parse().unwrap());
+        replay_request.headers_mut().insert("origin", format!("http://{address}").parse().unwrap());
+        let (mut replay_ws, _) = tokio_tungstenite::connect_async(replay_request).await.unwrap();
+        replay_ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"enroll","code":code,"public_key":browser_public_key}).to_string().into())).await.unwrap();
+        let replay: Value = serde_json::from_str(replay_ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(replay["kind"], "error");
+        replay_ws.close(None).await.unwrap();
+
+        let nonce = "23".repeat(32);
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({
+            "min_version":1,"max_version":1,"client_id":client.id,"public_key":client.public_key,
+            "nonce":nonce,"resume_after":0,"journal_epoch":null
+        }).to_string().into())).await.unwrap();
+        let hello: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        let host_secret: [u8; 32] = std::fs::read(dir.path().join("host.key")).unwrap().try_into().unwrap();
+        let host_key = SigningKey::from_bytes(&host_secret).verifying_key();
+        assert_eq!(hello["public_key"], encode_hex(&host_key.to_bytes()));
+        let transcript = transcript_hash([1, 1, 1], &nonce, hello["nonce"].as_str().unwrap(), &client.public_key, hello["public_key"].as_str().unwrap());
+        let signature = Signature::from_slice(&decode_hex(hello["signature"].as_str().unwrap())).unwrap();
+        host_key.verify_strict(&transcript, &signature).unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"authenticate","signature":encode_hex(&client.key.sign(&transcript).to_bytes())}).to_string().into())).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()["kind"], "authenticated");
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}}).to_string().into())).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = tokio::time::timeout_at(deadline, ws.next()).await.unwrap().unwrap().unwrap();
+            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if frame["kind"] == "durable_event" {
+                assert!(!frame["event"]["kind"].as_str().unwrap().is_empty());
+                break;
+            }
+        }
+        ws.close(None).await.unwrap();
+
+        let mut unauthenticated = format!("ws://{address}/ws").into_client_request().unwrap();
+        unauthenticated.headers_mut().insert("host", address.parse().unwrap());
+        unauthenticated.headers_mut().insert("origin", format!("http://{address}").parse().unwrap());
+        let (mut ws, _) = tokio_tungstenite::connect_async(unauthenticated).await.unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({
+            "min_version":1,"max_version":1,"client_id":client.id,"public_key":client.public_key,"nonce":"24".repeat(32),"resume_after":0,"journal_epoch":null
+        }).to_string().into())).await.unwrap();
+        let _ = ws.next().await.unwrap().unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}}).to_string().into())).await.unwrap();
+        let error: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(error["kind"], "error");
+        assert_eq!(error["error"], "authentication required");
+    });
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
 }
 
 fn start_fake_daemon(path: &Path, timeout_secs: u64, write_delay_ms: u64) -> Child {
