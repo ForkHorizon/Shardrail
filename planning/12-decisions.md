@@ -73,6 +73,7 @@
 ## 2026-10-23 — W4-m result
 
 The D64/D65-gated night data misses the 50 ms B4 target in every valid cell. At 5,000 events, valid Tauri p95 values are 127–422 ms and Swift values are 175–368 ms. At 50,000, valid Tauri 1-stream p95 values are 2,566–2,915 ms and Swift values are 1,723–3,604 ms; Tauri 4/8-stream cells have no valid per-row samples. Both implementations show similar latency growth with event count, pointing to daemon-to-UI delivery rather than the UI framework. D49 retains Tauri + React; Swift/AppKit remains a reference spike, and delivery-path work is next. See the [re-gated table](../spikes/wt-coordinator/apps/s5-prototype/bench-results/w4m-reeval/b4.md) and [verification report](../spikes/reviews15/w4m-final.md).
+**Owner direction (2026-10-23):** B4 is recorded as known performance debt and deferred; it is not worked on now and does not block the next step. The next product step is S1-lite (live Codex app-server on a test repo). Delivery-path work and a Tauri B4 rerun return later.
 
 ## Settled — do not reopen without new evidence
 
