@@ -16,15 +16,32 @@ run(['client', 'add', '--label', 'Playwright event source', '--scope', 'full']);
 const registry = JSON.parse(await readFile(join(dataDir, 'authorized-clients.json'), 'utf8'));
 const client = registry.clients[0];
 const privateKey = (await readFile(join(dataDir, `client-${client.client_id}.key`))).toString('hex');
-const hostPublicKey = run(['identity']).match(/host_public_key=([0-9a-f]+)/)?.[1];
-if (!hostPublicKey) throw new Error('shardraild did not report its identity');
+const identity = run(['identity']);
+const hostPublicKey = identity.match(/host_public_key=([0-9a-f]+)/)?.[1];
+const hostFingerprint = identity.match(/host_fingerprint=([0-9a-f]+)/)?.[1];
+if (!hostPublicKey || !hostFingerprint) throw new Error('shardraild did not report its identity');
 const dist = resolve('dist');
 const daemon = spawn(binary, [
   '--data-dir', dataDir,
-  '--browser-listen', '127.0.0.1:42937',
+  '--browser-listen', '127.0.0.1:0',
   '--browser-assets-dir', dist,
-], { stdio: 'ignore' });
+], { stdio: ['ignore', 'ignore', 'pipe'] });
 let stopping = false;
+let stderr = '';
+const endpoint = new Promise((resolveEndpoint, reject) => {
+  const timeout = setTimeout(() => reject(new Error(`daemon did not report its browser listener: ${stderr}`)), 10_000);
+  daemon.stderr.setEncoding('utf8');
+  daemon.stderr.on('data', (chunk) => {
+    stderr += chunk;
+    const address = stderr.match(/browser WebSocket listening at ws:\/\/127\.0\.0\.1:(\d+)\/ws/)?.[1];
+    if (address) {
+      clearTimeout(timeout);
+      resolveEndpoint(`http://127.0.0.1:${address}/`);
+    }
+  });
+  daemon.once('exit', (code) => reject(new Error(`test daemon exited with ${code}: ${stderr}`)));
+});
+
 async function cleanup() {
   if (stopping) return;
   stopping = true;
@@ -38,16 +55,13 @@ async function cleanup() {
 }
 process.once('SIGTERM', () => { void cleanup().finally(() => process.exit()); });
 process.once('SIGINT', () => { void cleanup().finally(() => process.exit()); });
-await writeFile(stateFile, JSON.stringify({ dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey }));
-for (let attempt = 0; attempt < 100; attempt++) {
-  try {
-    const response = await fetch('http://127.0.0.1:42937/');
-    if (response.ok) break;
-  } catch (error) {
-    if (attempt === 99) throw error;
-  }
-  if (daemon.exitCode !== null) throw new Error(`test daemon exited with ${daemon.exitCode}`);
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-  if (attempt === 99) throw new Error('test daemon did not serve the built SPA');
+
+try {
+  const baseUrl = await endpoint;
+  const ready = await fetch(baseUrl);
+  if (!ready.ok) throw new Error(`test daemon served ${ready.status}`);
+  await writeFile(stateFile, JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint }));
+  await new Promise(() => {});
+} finally {
+  await cleanup();
 }
-await new Promise(() => {});
