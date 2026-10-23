@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use futures_util::{SinkExt, StreamExt};
 use nix::fcntl::{OFlag, openat};
 use nix::sys::stat::{Mode, fchmod, fstat};
 use nix::sys::statfs::statfs;
@@ -15,16 +16,22 @@ use shardrail_session_core::{Approval, Session};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::process::{ChildStdin, Command as TokioCommand};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, timeout};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{
+    Request as WsRequest, Response as WsResponse,
+};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use uuid::Uuid;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -46,6 +53,8 @@ struct Args {
     approval_timeout_secs: u64,
     #[arg(long, default_value_t = 0)]
     test_write_ahead_delay_ms: u64,
+    #[arg(long, value_name = "127.0.0.1:PORT")]
+    browser_listen: Option<SocketAddr>,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
 }
@@ -698,6 +707,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.fake_acp_disconnect_after_permission,
                 args.approval_timeout_secs,
                 args.test_write_ahead_delay_ms,
+                args.browser_listen,
             )
             .await?
         }
@@ -712,6 +722,7 @@ async fn run(
     fake_acp_disconnect_after_permission: bool,
     approval_timeout_secs: u64,
     test_write_ahead_delay_ms: u64,
+    browser_listen: Option<SocketAddr>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -731,6 +742,11 @@ async fn run(
     Coordinator::recover_journal(&mut journal)?;
     let socket = path.join("shardraild.sock");
     let listener = bind_private_socket(&socket)?;
+    let browser_listener = if let Some(address) = browser_listen {
+        Some(bind_browser_listener(address).await?)
+    } else {
+        None
+    };
     let (event_generation, _) = watch::channel(0);
     let daemon = Arc::new(Daemon {
         data,
@@ -750,6 +766,28 @@ async fn run(
         "shardraild listening at {} (host {host_id}, epoch {epoch})",
         socket.display()
     );
+    if let Some(listener) = browser_listener {
+        let address = listener.local_addr()?;
+        eprintln!("browser WebSocket listening at ws://{address}/ws");
+        let daemon = Arc::clone(&daemon);
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let daemon = Arc::clone(&daemon);
+                        tokio::spawn(async move {
+                            if let Err(error) =
+                                serve_browser_client(stream, daemon, address.port()).await
+                            {
+                                eprintln!("browser client connection ended: {error}");
+                            }
+                        });
+                    }
+                    Err(error) => eprintln!("browser listener accept failed: {error}"),
+                }
+            }
+        });
+    }
     loop {
         let (stream, _) = listener.accept().await?;
         let daemon = Arc::clone(&daemon);
@@ -759,6 +797,170 @@ async fn run(
             }
         });
     }
+}
+
+async fn bind_browser_listener(address: SocketAddr) -> io::Result<TcpListener> {
+    if address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "browser listener must bind exactly to 127.0.0.1; IPv6 and non-loopback addresses are unsupported",
+        ));
+    }
+    TcpListener::bind(address).await
+}
+
+fn browser_request_allowed(request: &WsRequest, port: u16) -> bool {
+    let expected_host = format!("127.0.0.1:{port}");
+    let expected_origin = format!("http://127.0.0.1:{port}");
+    let hosts = request.headers().get_all("host");
+    let origins = request.headers().get_all("origin");
+    hosts.iter().count() == 1
+        && origins.iter().count() == 1
+        && hosts.iter().next().and_then(|value| value.to_str().ok()) == Some(expected_host.as_str())
+        && origins.iter().next().and_then(|value| value.to_str().ok())
+            == Some(expected_origin.as_str())
+        && request.uri().path() == "/ws"
+        && request.uri().query().is_none()
+}
+
+#[cfg(test)]
+mod browser_listener_tests {
+    use super::*;
+
+    fn request(uri: &str, host: &[&str], origin: &[&str]) -> WsRequest {
+        let mut builder = WsRequest::builder().uri(uri);
+        for value in host {
+            builder = builder.header("host", *value);
+        }
+        for value in origin {
+            builder = builder.header("origin", *value);
+        }
+        builder.body(()).unwrap()
+    }
+
+    #[test]
+    fn browser_upgrade_requires_exact_loopback_host_origin_and_clean_url() {
+        assert!(browser_request_allowed(
+            &request("/ws", &["127.0.0.1:4411"], &["http://127.0.0.1:4411"]),
+            4411
+        ));
+        for bad in [
+            request("/ws", &["127.0.0.1:4411.evil"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["localhost:4411"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["127.0.0.1:4411"], &[]),
+            request("/ws", &["127.0.0.1:4411"], &["http://evil.test"]),
+            request(
+                "/ws?token=x",
+                &["127.0.0.1:4411"],
+                &["http://127.0.0.1:4411"],
+            ),
+            request(
+                "/ws",
+                &["127.0.0.1:4411", "127.0.0.1:4411"],
+                &["http://127.0.0.1:4411"],
+            ),
+            request(
+                "/ws",
+                &["127.0.0.1:4411"],
+                &["http://127.0.0.1:4411", "http://127.0.0.1:4411"],
+            ),
+        ] {
+            assert!(!browser_request_allowed(&bad, 4411));
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_listener_refuses_non_loopback_addresses() {
+        for address in ["0.0.0.0:4411", "192.0.2.1:4411", "[::1]:4411"] {
+            let error = bind_browser_listener(address.parse().unwrap())
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("127.0.0.1"));
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)] // tungstenite's callback requires an HTTP response as its rejection value.
+async fn serve_browser_client(
+    stream: tokio::net::TcpStream,
+    daemon: Arc<Daemon>,
+    port: u16,
+) -> io::Result<()> {
+    let websocket = timeout(
+        HANDSHAKE_TIMEOUT,
+        tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            move |request: &WsRequest, response: WsResponse| {
+                if browser_request_allowed(request, port) {
+                    Ok(response)
+                } else {
+                    Err(WsResponse::builder()
+                        .status(403)
+                        .body(Some(
+                            "browser listener rejected Host, Origin, path, or query".into(),
+                        ))
+                        .expect("static rejection response is valid"))
+                }
+            },
+            Some(
+                WebSocketConfig::default()
+                    .max_message_size(Some(1_048_576))
+                    .max_frame_size(Some(1_048_576)),
+            ),
+        ),
+    )
+    .await
+    .map_err(|_| handshake_timeout())?
+    .map_err(io::Error::other)?;
+    let unix = UnixStream::connect(daemon.data.directory_path().join("shardraild.sock")).await?;
+    let (mut ws_write, mut ws_read) = websocket.split();
+    let (unix_read, mut unix_write) = unix.into_split();
+    let client_to_daemon = async {
+        while let Some(message) = ws_read.next().await {
+            match message.map_err(io::Error::other)? {
+                Message::Text(text) => {
+                    if text.len() > 1_048_576 || text.contains('\n') {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid browser frame",
+                        ));
+                    }
+                    unix_write.write_all(text.as_bytes()).await?;
+                    unix_write.write_all(b"\n").await?;
+                }
+                Message::Close(_) => return Ok(()),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "browser frames must be text",
+                    ));
+                }
+            }
+        }
+        Ok::<(), io::Error>(())
+    };
+    let daemon_to_client = async {
+        let mut reader = BufReader::new(unix_read);
+        let mut line = String::new();
+        while reader.read_line(&mut line).await? != 0 {
+            if line.len() > 1_048_577 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "daemon frame exceeds 1 MiB",
+                ));
+            }
+            let frame = line.trim_end_matches(['\r', '\n']);
+            ws_write
+                .send(Message::Text(frame.to_owned().into()))
+                .await
+                .map_err(io::Error::other)?;
+            line.clear();
+        }
+        Ok::<(), io::Error>(())
+    };
+    tokio::try_join!(client_to_daemon, daemon_to_client)?;
+    Ok(())
 }
 
 fn default_data_dir() -> PathBuf {

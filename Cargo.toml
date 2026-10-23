@@ -19,6 +19,8 @@ clap = { version = "4", features = ["derive"] }
 nix = { version = "0.31", features = ["fs", "socket", "user"] }
 ed25519-dalek = "2"
 sha2 = "0.10"
+futures-util = "=0.3.31"
+tokio-tungstenite = "=0.30.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

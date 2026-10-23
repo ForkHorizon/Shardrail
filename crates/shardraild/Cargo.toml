@@ -7,11 +7,13 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 ed25519-dalek.workspace = true
+futures-util.workspace = true
 nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["process"] }
+tokio-tungstenite.workspace = true
 uuid.workspace = true
 shardrail-coordinator = { path = "../coordinator", version = "0.1.0" }
 shardrail-journal = { path = "../journal", version = "0.1.0" }

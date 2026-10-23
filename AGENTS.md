@@ -4,7 +4,7 @@ These rules follow `planning/11-modules.md` §3 and `planning/08-ui-ux.md` §6. 
 
 - Read the relevant planning sections before changing a module. Keep changes within the requested phase and record uncovered decisions in `docs/dev/foundations-status.md`.
 - Do not run providers, call model APIs, or add provider integration without explicit authorization. Never use experimental provider APIs.
-- Direct dependencies are allowlisted here: Rust `serde`, `serde_json`, `schemars`, `thiserror`, `uuid`, `rusqlite`, `tokio`, `clap`, `nix`, `ed25519-dalek`, `sha2`; dev-only `tempfile`, `proptest`; TypeScript `json-schema-to-typescript`, `typescript`, `@types/node`; runtime `@noble/ed25519` pinned to `3.1.0` for the client handshake (D62). Additions require owner authorization and an update here; keep all lockfiles committed. `cargo-deny` checks the Rust dependency graph. Check official documentation for pinned dependencies before relying on APIs.
+- Direct dependencies are allowlisted here: Rust `serde`, `serde_json`, `schemars`, `thiserror`, `uuid`, `rusqlite`, `tokio`, `clap`, `nix`, `ed25519-dalek`, `sha2`, `futures-util` pinned to `0.3.31`, `tokio-tungstenite` pinned to `0.30.0`; dev-only `tempfile`, `proptest`; TypeScript `json-schema-to-typescript`, `typescript`, `@types/node`; runtime `@noble/ed25519` pinned to `3.1.0` for the client handshake (D62). Additions require owner authorization and an update here; keep all lockfiles committed. `cargo-deny` checks the Rust dependency graph. Check official documentation for pinned dependencies before relying on APIs.
 - S5 prototype-only direct dependencies are also authorized for the tracked spike: Rust `tauri`, `tauri-build`; TypeScript runtime `@tanstack/react-virtual`, `@tauri-apps/api`, `react`, `react-aria-components`, `react-dom`, `react-markdown`, `rehype-sanitize`; TypeScript development `@axe-core/playwright`, `@eslint/js`, `@playwright/test`, `@tauri-apps/cli`, `@types/react`, `@types/react-dom`, `@vitejs/plugin-react`, `babel-plugin-react-compiler`, `eslint`, `eslint-plugin-jsx-a11y`, `eslint-plugin-react-compiler`, `eslint-plugin-react-hooks`, `globals`, `tsx`, `typescript-eslint`, `vite`, `vitest`, `zod-validation-error`. These packages are confined to `apps/s5-prototype`; the UI stack is specified in `planning/08-ui-ux.md` §6.
 - Rust contract types are the source of truth. Export JSON Schema to `schema/`, generate TypeScript from that schema, and never hand-edit generated files.
 - Approval defaults, failures, disconnects, timeouts and recovery must never produce `allow`. Journal approval intent durably before writing a provider response.
@@ -46,5 +46,7 @@ scripts/check-schema-drift.sh
 | nix | `Cargo.lock` | https://docs.rs/nix/ |
 | ed25519-dalek | `Cargo.lock` | https://docs.rs/ed25519-dalek/ |
 | sha2 | `Cargo.lock` | https://docs.rs/sha2/ |
+| futures-util | `Cargo.lock` | https://docs.rs/futures-util/0.3.31/ |
+| tokio-tungstenite | `Cargo.lock` | https://docs.rs/tokio-tungstenite/0.30.0/ |
 | tempfile / proptest | `Cargo.lock` | https://docs.rs/ |
 | json-schema-to-typescript | `packages/contracts/package-lock.json` | https://github.com/bcherny/json-schema-to-typescript |
