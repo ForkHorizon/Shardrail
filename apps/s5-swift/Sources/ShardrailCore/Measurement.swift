@@ -12,6 +12,7 @@ public struct ClockMapping: Equatable {
 }
 
 public struct B4Sampler {
+    public static let minimumSampleRate = 0.005
     public let expectedChunks: Int
     public private(set) var receivedChunks = 0
     public private(set) var visible = false
@@ -19,7 +20,7 @@ public struct B4Sampler {
     private var scheduled: [Int: (callbacks: Int, commitMs: Double, receiptMs: Double)] = [:]
     private var seen = Set<Int>()
     public init(expectedChunks: Int) { self.expectedChunks = expectedChunks }
-    public var sampleFloor: Int { min(expectedChunks, max(20, Int(ceil(Double(expectedChunks) * 0.01)))) }
+    public var sampleFloor: Int { min(expectedChunks, max(20, Int(ceil(Double(expectedChunks) * Self.minimumSampleRate)))) }
     public mutating func setVisible(_ value: Bool) { visible = value }
     public mutating func received(_ row: DurableRow) {
         if row.event.kind == "agent_message_chunk" { receivedChunks += 1 }

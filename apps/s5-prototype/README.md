@@ -2,7 +2,7 @@
 
 ## Compare Tauri and Swift B4 runs
 
-The dependency-free comparison script reads per-run JSON recursively. Repeat `--tauri` to combine Tauri result directories; pass the Swift result directory with `--swift`. A run is valid only when the page was visible, all requested daemon chunks arrived, and its finite sample array matches the reported count and meets `max(20, 1%)` (capped at the event count). The report shows valid/total runs, measured rows against the sample floor for all attempts (including failed runs), pooled sample median/p95, and median/p95 of valid per-run medians.
+The dependency-free comparison script reads per-run JSON recursively. Repeat `--tauri` to combine Tauri result directories; pass the Swift result directory with `--swift`. A run is valid only when the page was visible, all requested daemon chunks arrived, and its finite sample array matches the reported count and meets `max(20, ceil(0.5% of events))` (capped at the event count). The report shows valid/total runs, measured rows against the sample floor for all attempts (including failed runs), pooled sample median/p95, and median/p95 of valid per-run medians.
 
 From the repository root:
 

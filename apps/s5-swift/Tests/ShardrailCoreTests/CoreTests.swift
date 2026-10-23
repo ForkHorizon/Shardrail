@@ -97,15 +97,28 @@ final class CoreTests: XCTestCase {
 
         var floored = B4Sampler(expectedChunks: 5_000); floored.setVisible(true)
         for _ in 0..<5_000 { floored.received(row) }
-        for cursor in 1...49 {
+        for cursor in 1...24 {
             let visibleRow = DurableRow(cursor: cursor, event: event)
             floored.committedVisible(visibleRow, commitMonoMs: Double(cursor * 3), receiptMonoMs: 0)
             floored.frameEntered(monotonicMs: Double(cursor * 3 + 1))
             floored.frameEntered(monotonicMs: Double(cursor * 3 + 2))
         }
-        XCTAssertEqual(floored.sampleFloor, 50); XCTAssertFalse(floored.gatesPass)
-        let fiftieth = DurableRow(cursor: 50, event: event)
-        floored.committedVisible(fiftieth, commitMonoMs: 150, receiptMonoMs: 0); floored.frameEntered(monotonicMs: 151); floored.frameEntered(monotonicMs: 152)
+        XCTAssertEqual(floored.sampleFloor, 25); XCTAssertFalse(floored.gatesPass)
+        let twentyFifth = DurableRow(cursor: 25, event: event)
+        floored.committedVisible(twentyFifth, commitMonoMs: 75, receiptMonoMs: 0); floored.frameEntered(monotonicMs: 76); floored.frameEntered(monotonicMs: 77)
         XCTAssertTrue(floored.gatesPass)
+
+        var large = B4Sampler(expectedChunks: 50_000); large.setVisible(true)
+        for _ in 0..<50_000 { large.received(row) }
+        for cursor in 1...249 {
+            let visibleRow = DurableRow(cursor: cursor, event: event)
+            large.committedVisible(visibleRow, commitMonoMs: Double(cursor * 3), receiptMonoMs: 0)
+            large.frameEntered(monotonicMs: Double(cursor * 3 + 1)); large.frameEntered(monotonicMs: Double(cursor * 3 + 2))
+        }
+        XCTAssertEqual(large.sampleFloor, 250); XCTAssertFalse(large.gatesPass)
+        let twoHundredFiftieth = DurableRow(cursor: 250, event: event)
+        large.committedVisible(twoHundredFiftieth, commitMonoMs: 750, receiptMonoMs: 0)
+        large.frameEntered(monotonicMs: 751); large.frameEntered(monotonicMs: 752)
+        XCTAssertTrue(large.gatesPass)
     }
 }

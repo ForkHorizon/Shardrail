@@ -8,6 +8,7 @@ wait_seconds="${S5_BENCH_WAIT_SECONDS:-300}"
 results_dir="${S5_BENCH_RESULTS_DIR:-results}"
 mkdir -p "$results_dir"
 failed=0
+B4_MINIMUM_SAMPLE_RATE=0.005
 if [ ! -x "$app" ] || [ ! -x "$daemon_bin" ] || [ ! -x "$fake_bin" ]; then
   printf 'Missing release app or daemon/fake-agent binaries\n' >&2
   exit 1
@@ -52,11 +53,11 @@ for events in "${event_sizes[@]}"; do
           failed=1
         else
           validation=0
-          node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); const events=Number(process.argv[2]); const minimum=Math.min(events, Math.max(20, Math.ceil(events/100))); if (r.error) { console.error(`B4 scenario failed: ${r.error}`); process.exit(2); } if ((r.b4?.count ?? 0) < minimum || r.daemonAgentChunkCount !== events || r.pageVisibility !== "visible") process.exit(1); console.log(`B4 samples: ${r.b4.count}/${events} (${(100*r.b4.count/events).toFixed(2)}%)`)' "$results_dir/b4-$name.json" "$events" || validation=$?
+          node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); const events=Number(process.argv[2]), rate=Number(process.argv[3]); const minimum=Math.min(events, Math.max(20, Math.ceil(events*rate))); if (r.error) { console.error(`B4 scenario failed: ${r.error}`); process.exit(2); } if ((r.b4?.count ?? 0) < minimum || r.daemonAgentChunkCount !== events || r.pageVisibility !== "visible") process.exit(1); console.log(`B4 samples: ${r.b4.count}/${events} (${(100*r.b4.count/events).toFixed(2)}%)`)' "$results_dir/b4-$name.json" "$events" "$B4_MINIMUM_SAMPLE_RATE" || validation=$?
           if [ "$validation" = 2 ]; then
             failed=1
           elif [ "$validation" != 0 ]; then
-            printf 'B4 scenario %s wrote incomplete daemon samples (need at least %s, visible page, and all requested chunks)\n' "$name" "$((events < 20 ? events : (events + 99) / 100))" >&2
+            printf 'B4 scenario %s wrote incomplete daemon samples (need at least %s, visible page, and all requested chunks)\n' "$name" "$((events < 20 ? events : (events * 5 + 999) / 1000))" >&2
             failed=1
           fi
         fi

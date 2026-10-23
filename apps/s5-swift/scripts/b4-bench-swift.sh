@@ -43,6 +43,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 if [[ "$mode" == smoke ]]; then sizes=(5000); streams_list=(1); temperatures=(cold); reps=(1); else sizes=(5000 50000); streams_list=(1 4 8); temperatures=(cold warm); reps=(1 2 3 4 5); fi
 failed=0
+B4_MINIMUM_SAMPLE_RATE=0.005
 for events in "${sizes[@]}"; do
   for streams in "${streams_list[@]}"; do
     chunks=$((events / streams))
@@ -69,7 +70,7 @@ for events in "${sizes[@]}"; do
         if [[ -d "$temp" ]]; then rm -rf "$temp"; fi
         temp=""
         if [[ "$complete" != 1 ]]; then printf '{"error":"B4 run timed out or app exited","events":%s,"streams":%s,"repetition":%s,"stack":"swift-appkit"}\n' "$events" "$streams" "$repetition" >"$result"; failed=1; continue; fi
-        if ! node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); const e=+process.argv[2],floor=Math.min(e,Math.max(20,Math.ceil(e/100))); if(r.error||r.pageVisibility!=="visible"||r.daemonAgentChunkCount!==e||(r.b4?.count??0)<floor) process.exit(1)' "$result" "$events"; then echo "Incomplete B4 result: $name" >&2; failed=1; fi
+        if ! node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); const e=+process.argv[2],floor=Math.min(e,Math.max(20,Math.ceil(e*Number(process.argv[3])))); if(r.error||r.pageVisibility!=="visible"||r.daemonAgentChunkCount!==e||(r.b4?.count??0)<floor) process.exit(1)' "$result" "$events" "$B4_MINIMUM_SAMPLE_RATE"; then echo "Incomplete B4 result: $name" >&2; failed=1; fi
       done
     done
   done

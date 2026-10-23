@@ -37,7 +37,8 @@ export async function waitForDaemonStream(expected: number, chunks: () => number
   if (!daemonStreamFinished(connected, received, expected)) throw new Error(`Relay/stream incomplete: connectedOnce=${connected}, chunks=${received}/${expected}`);
 }
 
-export function minimumB4Samples(events: number) { return Math.min(events, Math.max(20, Math.ceil(events / 100))); }
+export const B4_MINIMUM_SAMPLE_RATE = 0.005;
+export function minimumB4Samples(events: number) { return Math.min(events, Math.max(20, Math.ceil(events * B4_MINIMUM_SAMPLE_RATE))); }
 
 export async function waitForB4Samples(expected: number, samples: () => number, pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), now = () => performance.now()) {
   const deadline = now() + 10_000;

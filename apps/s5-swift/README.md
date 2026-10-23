@@ -1,6 +1,6 @@
 # Shardrail Swift AppKit spike
 
-A macOS 14+ SwiftPM experiment with separate `ShardrailCore` library and `shardrail-swift` AppKit executable targets. It authenticates to the same local `shardraild` Unix socket using the v1 transcript-bound Ed25519 handshake, stores all received rows in memory, and presents them in a fixed-height reused `NSTableView`. Updates are coalesced on display frames. B4 samples daemon agent chunks at the second display-frame callback after a visible row commit; it requires a visible window, all requested chunks, and `max(20, 1%)` distinct row samples (capped at the event count).
+A macOS 14+ SwiftPM experiment with separate `ShardrailCore` library and `shardrail-swift` AppKit executable targets. It authenticates to the same local `shardraild` Unix socket using the v1 transcript-bound Ed25519 handshake, stores all received rows in memory, and presents them in a fixed-height reused `NSTableView`. Updates are coalesced on display frames. B4 samples daemon agent chunks at the second display-frame callback after a visible row commit; it requires a visible window, all requested chunks, and `max(20, ceil(0.5% of events))` distinct row samples (capped at the event count).
 
 The five-sample wall/monotonic mapping uses the mean offset and half the observed offset range plus 1 ms uncertainty, matching the web prototype. B4 is a paint-opportunity proxy and does not prove completed paint or scanout. Full event history has no retention cap in this spike; memory retention policy remains an open question. B5 input measurements are deferred.
 
