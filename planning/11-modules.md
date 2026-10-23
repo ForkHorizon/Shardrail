@@ -1,5 +1,6 @@
 # 11 — Modules
 > 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
+> 2026-10-23 (owner, D66): M14 is the primary Phase 1 client; M13 Tauri shell is deferred to a later desktop port; M10 loopback listener/pairing moves into Phase 1.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Module outlines are the starting point for detailed (Level 2) planning; they are not specifications. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): ACP dual-stack in M06, `WorkspaceState` port, drain coordination, macOS containment technique. Implementation language for daemon modules: Rust (D1, owner-approved 2026-10-18); Go and C#/.NET were rejected. 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44); §3 engineering rules for AI agents added. 2026-10-19 (owner): D27 approved — Rust types → `schemars` JSON Schema (committed) → TypeScript, `ts-rs` fallback, CI drift check. 2026-10-19: M08 terms gate replaced by D29/D45. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 
@@ -16,11 +17,11 @@
 | M07 | Codex adapter | thread/turn/item mapping, approvals, background terminals, schema reference, pinning | `thread/shellCommand` in UI, experimental API | M06 | TB-1 |
 | M08 | Claude channel | adapter or SDK supervisor; trust settings; branding; user-supplied API key only (D29) | claude.ai login, token collection/brokering | M06 | credentials stay with the provider SDK |
 | M09 | Approval broker & policy | approval records with write-ahead responses (D34), option classes, expiry, re-confirmation, host protection state (internal), verification checklist (D47), trust, policy gating, provider bypass table (06 §3a); owns `ApprovalStore`, `NotificationSink` and reads `WorkspaceState` ports | judging commands by text | M03 (events), ports | primary safety invariant |
-| M10 | Client gateway | transports, handshake, keys, scopes, pairing (P2), fan-out, backpressure, resync, presence; implements `NotificationSink` | domain semantics | M02, M03, M09 (via port), M11 | TB-3 |
+| M10 | Client gateway | transports, handshake, keys, scopes, Phase 1 loopback browser listener and pairing, fan-out, backpressure, resync, presence; implements `NotificationSink` | domain semantics | M02, M03, M09 (via port), M11 | TB-3, TB-7 |
 | M11 | Workspace service | trust state storage, tree, safe Git worker (Phase 1e), watchers, write lease; implements `WorkspaceState` (trust, HEAD, diff hash) for M09 and M05 | file writes | M01 | TB-4 |
 | M12 | Handoff | bundle assembly, preview, redaction; later Task model | provider memory transfer | M03, M04 | redaction |
-| M13 | Desktop shell | window, menu bar, notifications, keychain, deep links (no actions), connect-first, SSH bridge launcher | domain logic | M10 | keychain ACL |
-| M14 | Web UI | inbox, session view, workspace pane, palette, host federation | source of truth | M10, M15 | untrusted rendering |
+| M13 | Desktop shell (deferred port) | Tauri window, menu bar, notifications, keychain, deep links (no actions), shell-minted token, WebView isolation, connect-first, SSH bridge launcher | domain logic | M10 | keychain ACL; Tauri isolation |
+| M14 | Primary Phase 1 Web UI | browser pairing, inbox, session view, workspace pane, palette; later host federation | source of truth | M10, M15 | untrusted rendering; browser credential storage |
 | M15 | UI system & rendering | tokens, React Aria–based primitives, accessibility, streaming Markdown via one `untrusted-render` module, TanStack virtualization, safe rendering (08 §6) | product flows | — | TB-2 |
 | M16 | Remote host & bridge | systemd unit, `bridge` subcommand, cgroups, linger, reboot behavior | network listeners | M01, M10 | TB-5 |
 | M17 | Mobile client | per D28 | everything until Phase 3 (U4 deferred) | M10, M14 | `limited` scope |
@@ -82,7 +83,8 @@ Ports break the earlier dependency cycles: the approval broker defines `Approval
 - **Handshake:** client hello (protocol range, key proof) ↔ server hello (host id, version, scopes, cursor, `journal_epoch`), mutual and transcript-bound.
 - **Requests** `{command_id, kind, preconditions?, payload}` → `{command_id, outcome | typed error with current state}`; subscriptions per session or host; `resync_required` with snapshot on gaps.
 - **Backpressure:** drop pending ephemeral updates first; if durable backlog still exceeds the bound, end the subscription with `resync_required`; the engine never blocks on a client.
-- **Open:** browser credential storage; whether a local `shardrail` CLI exists in Phase 1; one connection per host (recommended).
+- **Phase 1:** opt-in loopback WebSocket and browser pairing. Browser clients default to `limited`; a separate explicit local authorization is required for `full`. Use non-extractable WebCrypto Ed25519 keys in IndexedDB when supported; otherwise disclose the extractable `@noble/ed25519` IndexedDB fallback in the pairing UI. Host and Origin checks happen before upgrade/authentication; credentials never appear in URLs.
+- **Open:** whether a local `shardrail` CLI exists beyond the local pairing/authorization flow; one connection per host (recommended).
 
 ## 3. Engineering rules for AI agents (all modules; D44)
 

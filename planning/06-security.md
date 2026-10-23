@@ -1,12 +1,13 @@
 # 06 — Security and Trust
 > 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
+> 2026-10-23 (owner, D66): browser security is part of Phase 1; loopback WebSocket admission checks Host and Origin, browser credentials stay out of URLs, and paired browser clients default to `limited` scope.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Security claims are qualified; none is verified by testing yet — spikes S7–S9 do that. 2026-10-19 (owner, D46): code-signing peer admission verifies Daliys's own local/self-signed identity (no Developer ID); release-signing items deferred to 09 §5. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. §3b added. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized.
 > Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): provider approval-bypass paths (§3a, D37), agent-authored approval text (§5, D38), macOS containment technique (§8, D43), extra inherited capabilities, supply chain (§12), Grok caveats.
 
 ## 1. Threat model
 
-Sources of attack on a machine: untrusted repositories (prompt injection, hooks, Git configuration), model output, MCP servers, project-level provider configuration, other processes of the same user — **including the supervised agents themselves**. External network does not reach the daemon (no listening network port). A phone is treated as a device that can be stolen.
+Sources of attack on a machine: untrusted repositories (prompt injection, hooks, Git configuration), model output, MCP servers, project-level provider configuration, other processes of the same user — **including the supervised agents themselves**. The daemon has no network listener by default; when the user opts in to the Phase 1 browser listener, it binds loopback only and enforces Host and Origin checks. A phone is treated as a device that can be stolen.
 
 The core safety invariant (N9): **no supervised agent action that needs approval proceeds without an explicit decision by an authorized human, and Shardrail never misreports that decision.**
 
@@ -18,8 +19,9 @@ The core safety invariant (N9): **no supervised agent action that needs approval
 | TB-2 | daemon data | content inside events, as rendered in clients | untrusted-rendering policy (§5) |
 | TB-3 | authenticated client with scope | any other process, including agents | client identity (§4), approval protection (§3) |
 | TB-4 | Shardrail code | repository content, `.git/config`, attributes, environment | safe Git (§6), workspace trust (§7) |
-| TB-5 | SSH-authenticated bridge | network | OpenSSH; daemon never listens on a network interface |
+| TB-5 | SSH-authenticated bridge | remote network | OpenSSH; daemon has no non-loopback listener |
 | TB-6 | — | each provider's environment and credentials | separate environments; separate Unix user optional (U11, deferred to Phase 2) |
+| TB-7 | loopback browser connection | hostile web pages, DNS rebinding, other local processes | exact Host and Origin allowlists; asymmetric paired credentials; default `limited` scope; no credentials in URLs |
 
 ## 3. Approval protection against the agents (D20)
 
@@ -84,13 +86,13 @@ Each item shows `verified`, `not verified`, `failed` or `n/a`, its source (runti
 
 ## 4. Client identity and scopes (D21)
 
-- Clients hold **asymmetric** keys (desktop: keychain); the daemon stores public keys only. The daemon's identity key is in the macOS keychain; on Linux it is a `0600` file readable by the same UID (documented weakness, one more reason for U11).
+- Clients hold **asymmetric** keys; the daemon stores public keys only. Browser keys use non-extractable WebCrypto Ed25519 keys in IndexedDB where supported. If the browser lacks Ed25519 key generation/signing, the documented fallback is the pinned `@noble/ed25519` implementation with its private seed persisted in IndexedDB; this fallback is extractable by same-origin script and must be disclosed in the browser pairing UI. No private key or credential is sent in a URL/query string. Desktop keychain storage belongs to the later Tauri port. The daemon's identity key is in the macOS keychain; on Linux it is a `0600` file readable by the same UID (documented weakness, one more reason for U11).
 - Handshake: mutual and bound to the transcript (a Noise-style pattern, chosen in detailed planning); the remote daemon's key is pinned end to end through the SSH bridge in addition to SSH host authentication (*why:* the SSH host key authenticates the machine, not the daemon behind the socket).
-- Scopes: **`full`** — local desktop admitted by peer UID + code-signing identity of the peer process, or a desktop presenting its keychain key over the SSH bridge; **`limited`** — SSH bridge alone, and paired browser/mobile clients: observe, prompt, answer approvals with once/deny only.
-- Pairing (one-time code shown in a `full` client) applies only to `limited` clients.
+- Scopes: **`full`** — a locally authorized client; **`limited`** — paired browser/mobile clients by default: observe, prompt, and answer approvals with once/deny only. Scope is assigned by the daemon from the pairing record, never accepted from client frames.
+- Pairing (one-time code from the local daemon pairing flow) creates a `limited` browser client by default. A browser client cannot elevate its own scope; policy-weakening actions (trust changes, sandbox weakening, allow-all) and `widening`/`boundary-breaking` approval options require `full`.
 - Policy-weakening actions (trust changes, sandbox weakening, allow-all) and `widening`/`boundary-breaking` approval options require `full`.
 - Developer builds use a build-time admission constant and always report the host as `unprotected`.
-- Phase 1a has a single local desktop client admitted by peer UID plus a shell-minted token (dev builds are `unprotected` anyway); **code-signing peer admission moves to Phase 1e hardening** (D40). Under the single-user scope (D46) it verifies Daliys's own local/self-signed (or Apple Development) signing identity — the daemon pins that certificate/designated requirement at install — instead of requiring Developer ID; unsigned dev builds stay `unprotected`. Asymmetric pairing and the mutual handshake arrive with remote/browser clients in Phase 2.
+- Phase 1 uses the browser client with the loopback listener opt-in; it authenticates through the paired Ed25519 mutual handshake and defaults to `limited`. Host validation mitigates DNS rebinding; Origin validation blocks cross-site WebSocket requests. Both checks are mandatory before upgrade/authentication, and credentials are accepted only in protocol frames after upgrade, never in URL/query parameters. Tauri-only peer-UID admission, shell-minted tokens, isolation and keychain storage are deferred to the desktop port.
 
 ## 5. Untrusted content rendering (D22)
 
@@ -98,7 +100,7 @@ All provider, tool and file content is untrusted: allowlisted Markdown subset, n
 
 **Agent-authored text is untrusted even inside protocol fields (D38).** ACP `title`/`description`, Codex `reason`, Hermes `description` and similar fields are written by the model and can be steered by prompt injection ("Run tests (safe)" over `curl … | sh`). The card's primary area shows only machine-checkable data: argv / `rawInput` / `command`, `cwd`, paths from `locations`/`changes`, network host:port, option class. Explanatory fields are rendered secondary, in a box labelled "agent's description". If the provider does not disclose the action (ACP v2 request without `subject`, Codex network approval without a meaningful command), the card says "action not disclosed by provider" and allow requires a second confirmation.
 
-**WebView hardening (Tauri).** Tauri isolation pattern enabled; Tauri 2 capabilities grant only the IPC commands the UI needs (no shell, fs, http or opener plugins); untrusted Markdown renders in a sandboxed frame without IPC access. Script injection into the WebView equals token theft (D16), so these are prerequisites for Phase 1a, not polish.
+**WebView hardening (later Tauri port).** Tauri isolation pattern enabled; Tauri 2 capabilities grant only the IPC commands the UI needs (no shell, fs, http or opener plugins); untrusted Markdown renders in a sandboxed frame without IPC access. Script injection into the WebView equals token theft (D16), so these are prerequisites for shipping the desktop port. Phase 1 browser CSP and untrusted rendering remain required, but use browser controls rather than Tauri isolation.
 
 ## 6. Safe Git (D23)
 
