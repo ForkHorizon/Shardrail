@@ -20,7 +20,7 @@ const identity = run(['identity']);
 const hostPublicKey = identity.match(/host_public_key=([0-9a-f]+)/)?.[1];
 const hostFingerprint = identity.match(/host_fingerprint=([0-9a-f]+)/)?.[1];
 if (!hostPublicKey || !hostFingerprint) throw new Error('shardraild did not report its identity');
-const dist = resolve('dist');
+const dist = resolve(process.env.SHARDRAIL_E2E_ASSETS_DIR ?? 'dist');
 const daemon = spawn(binary, [
   '--data-dir', dataDir,
   '--browser-listen', '127.0.0.1:0',
