@@ -1,5 +1,5 @@
 # 13 — Risks and Open Questions
-> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
+> 2026-10-23: D64/D65 and W4-m re-gate recorded. Tauri + React retained under D49; B4 misses point to the daemon-to-UI delivery path, the next work item.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): review recommendations added to U12, U22 (since answered); U25, U26 and R32–R43 added. 2026-10-18: U13 answered by the owner (Rust) and moved to §1a. 2026-10-18 (owner): U8 answered — React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual (D3); all code is written by AI coding agents (D44); U8 moved to §1a; R44–R45 added. 2026-10-19 (owner): U9/U25 answered — internal-use scope (D45); Claude via Agent SDK / `claude-agent-acp` with the user's own API key; Codex app-server with the user's own login; reopen trigger R46. U9, U25 moved to §1a; R3, R43 downgraded. 2026-10-19 (owner): single-user scope (D46) — Daliys is the only user on his own machines until the product fully works; distribution items deferred to 09 §5 (trigger R47). U3/U14 answered; U5, U7, R28, R29 deferred; R31, R41 adjusted; R47 added. 2026-10-19 (owner): U21 answered — v1 never shows a 'protected' status; each session shows a verification checklist (D47); S7 gates any future 'protected' status, which needs a separate decision. 2026-10-19 (owner): remaining owner questions answered in bulk (17); Hermes not in Phase 1 (D48); core spikes S1-lite, S2, S5, S9-lite authorized. All U questions are in §1a except U5/U7 (deferred until other users).
 
@@ -17,7 +17,7 @@ Only U5 and U7 remain among the initial owner questions (U1–U26); both are def
 | ID | Question | Answer | Recorded in |
 | --- | --- | --- | --- |
 | U13 | Daemon language: Rust, Go or C#/.NET NativeAOT | **Rust** — owner decision, 2026-10-18. Go and C#/.NET NativeAOT rejected; no dual-language prototype | D1 (12), 02 §8 |
-| U8 | UI framework (SolidJS, React, Svelte, …) | **React 19 + TypeScript strict + Vite (plain SPA, no Next.js/SSR) + React Aria Components + TanStack Virtual** — owner decision, 2026-10-18. Documented fallback: Svelte 5 + Bits UI, only if S5 shows React misses B3/B4/B5 in WKWebView | D3 (12), 02 §8, 08 §6, 16 |
+| U8 | UI framework (SolidJS, React, Svelte, …) | **React 19 + TypeScript strict + Vite (plain SPA, no Next.js/SSR) + React Aria Components + TanStack Virtual** — owner decision, 2026-10-18; retained 2026-10-23 under D49 after Tauri/Swift B4 comparison. Optimize daemon-to-UI delivery before reopening the framework choice | D3, D49 (12), 02 §8, 08 §6, 16 |
 | U9 | May Shardrail drive Claude via the Agent SDK / ACP adapter, and with which login? | **Internal use only (D45):** Agent SDK / `claude-agent-acp` with the user's own Anthropic API key; no claude.ai login offered in-app, no token brokering; no request to Anthropic needed now — owner decision, 2026-10-19. **Reopen before release if scope changes (R46)** | D29, D45 (12), 03 §6, 09 §2 |
 | U25 | May Shardrail drive a user's locally logged-in Codex through `codex app-server`? | **Internal use only (D45):** yes, with the user's own Codex login; no request to OpenAI needed now — owner decision, 2026-10-19. **Reopen before release if scope changes (R46)** | D45 (12), 03 §6, 09 §2 |
 | U3 | Product license | **Proprietary, all rights reserved for now** — owner decision, 2026-10-19 (single-user scope, D46). Reopen with distribution (R47); earlier options kept in 09 §5 | D46 (12), 09 §2, §5 |
@@ -46,7 +46,6 @@ Only U5 and U7 remain among the initial owner questions (U1–U26); both are def
 | Question | Status / decision needed | Recorded in |
 | --- | --- | --- |
 | What history/memory retention cap should the Rust-side event store use? | Open; the spike currently retains all durable rows so older ranges remain queryable | S5, `spikes/reviews11/w4j-final.md` |
-| Is the minimum of 500 measured rows (1%) a hard B4 gate for 50k-event runs? | Open; W4-j's sample-floor delivery is not established, and live remeasurement is pending | S5, `spikes/reviews11/w4j-final.md` |
 
 ## 2. Risks
 
@@ -67,7 +66,7 @@ Only U5 and U7 remain among the initial owner questions (U1–U26); both are def
 | R13 | Two agents write one worktree; diff shown for the wrong cwd | high | D31; unknown cwd shown as unknown |
 | R14 | Provider release cadence outpaces a solo maintainer | high | D24; contract fixtures; capability negotiation |
 | R15 | Phase 1 scope exceeds solo capacity | high | sliced Phase 1; fake agents first |
-| R16 | WKWebView misses B3/B5 | medium | S5; Swift shell fallback; transport independent of Tauri |
+| R16 | WKWebView misses B3/B5 | medium | Reassess only if B3/B5 evidence misses their budgets; W4-m B4 misses point to delivery-path work and did not trigger a Swift shell fallback (D49) |
 | R17 | Provider auto-update mid-session | medium | suppress where officially possible; compatibility classes |
 | R18 | User mistakes a permanent provider rule (`allow_always`) for a one-time allow | medium | scope labels; widening options desktop-only |
 | R19 | Node wrappers/adapters inflate memory | medium | provider footprint column; never hidden in daemon budget |

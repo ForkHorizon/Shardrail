@@ -145,7 +145,7 @@
 
 - **B1 (40 MB демон idle)** — реалистично с запасом для Rust/tokio/SQLite (обычно 10–25 MB). Ок.
 - **B3 (180 MB app + все WebKit-процессы)** — достижимо, но впритык; WebContent + GPU + Networking на Apple Silicon легко дают 120–250 MB physical footprint. Правильно, что решение отложено на S5. Важно мерить одинаковым инструментом (`footprint -p` по всем PID), иначе цифры несопоставимы.
-- **B4 (p95 ≤ 50 ms событие→кадр)** — реалистично при коалесинге по кадру.
+- **B4 (p95 ≤ 50 ms событие→кадр)** — прежняя оценка реалистичности опровергнута W4-m: во всех валидных ячейках p95 выше 50 мс и сходно растёт у Tauri и Swift; D49 сохраняет Tauri + React, следующая работа — путь доставки (07, 12 D49, W4-m re-gate от 2026-10-23).
 - **B7, B10, B13, B14** — реалистично; B14 (100 ms) тривиален локально.
 - **B8 (72 h soak)**, **B11 (≤1 wakeup/s по всему дереву WebKit)**, **B12** — дорого мерить соло; B11 может быть недостижим не по вине кода.
 - **B15/B16** — B16 при запрете fsmonitor нереалистичен на холодную (S17).
@@ -236,7 +236,7 @@
 | §6.5 delivery-table and badge simplification; cutting mobile/browser/federation/F15 from v1 | deferred | needs owner scope decision; 05 §5/§7 and 01 scope unchanged |
 | §6.6 doc freshness | addressed | 13 tensions, 00 next steps |
 | §7 U13 recommendation | **resolved by owner (2026-10-18): Rust**; C#/.NET and Go rejected, no dual prototype | 12 D1 (owner-approved), 13 §1a, 02 §8 |
-| §7 U8 recommendation | **resolved by owner (2026-10-18): React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual**; Svelte 5 fallback if S5 fails B3/B4/B5 | 12 D3, 13 §1a, 02 §8, 08 §6, 16 |
+| §7 U8 recommendation | **resolved by owner (2026-10-18): React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual; retained under D49 on 2026-10-23 after W4-m Tauri/Swift comparison**; delivery-path work comes next | 12 D3/D49, 13 §1a, 02 §8, 08 §6, 16 |
 | §7 U9 recommendation (and U25) | **resolved by owner (2026-10-19):** path (a), Agent SDK / adapter with the user's own API key; internal-use scope, no requests to Anthropic/OpenAI now | 12 D29/D45, 13 §1a, 03 §6, 09 §2 |
 | §7 U3/U14 recommendation | **resolved by owner (2026-10-19):** private, proprietary/all rights reserved for now; open-licensing options parked until other users (R47) | 12 D46, 13 §1a, 09 §2/§5 |
 | §7 U21 recommendation | **resolved by owner (2026-10-19):** no "protected" status in v1; per-session verification checklist; S7 gates any future status (separate decision) | 12 D47, 06 §3b, 13 §1a |

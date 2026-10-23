@@ -43,7 +43,7 @@ Same data model and derived states; one column; inbox and approvals first. Appro
 
 ## 6. UI stack and rules for AI agents (D3, D44)
 
-Stack (owner-approved 2026-10-18): React 19, TypeScript strict, Vite plain SPA (no Next.js/SSR/RSC), React Aria Components, TanStack Virtual, streaming Markdown through one sanitizing module; React Compiler enabled. Fallback Svelte 5 + Bits UI only if S5 shows React misses B3/B4/B5 in WKWebView. Research and sources: 16. General agent rules: 11 §3.
+Stack (owner-approved 2026-10-18; retained 2026-10-23 under D49): React 19, TypeScript strict, Vite plain SPA (no Next.js/SSR/RSC), React Aria Components, TanStack Virtual, streaming Markdown through one sanitizing module; React Compiler enabled. W4-m found similar B4 latency growth in Tauri and Swift, pointing to the daemon-to-UI delivery path; optimize that path before reopening the framework choice. Research and sources: 16. General agent rules: 11 §3.
 
 1. **Modern React only:** function components, React 19 APIs, React Compiler on; no class components, no `forwardRef`, no Next.js/RSC/server functions.
 2. **One primitive layer:** every interactive element (button, menu, listbox, tree, grid, dialog, tooltip) is a React Aria component; hand-written `role`/`aria-*` and custom key handling need review; no Radix/shadcn mixing.
