@@ -34,6 +34,7 @@ class BrowserFirstPlanTests(unittest.TestCase):
 
         for feature in ("menu bar", "keychain", "notifications", "connect-first", "version skew"):
             self.assertNotIn(feature, p1e)
+        self.assertNotIn("code-signing peer admission", p1e)
         self.assertNotIn("M13", hardening)
         self.assertIn("Later desktop port", desktop_port)
         self.assertIn("version-skew UI", desktop_port)
