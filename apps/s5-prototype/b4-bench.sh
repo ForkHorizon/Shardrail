@@ -57,7 +57,10 @@ for events in "${event_sizes[@]}"; do
           if [ "$validation" = 2 ]; then
             failed=1
           elif [ "$validation" != 0 ]; then
-            printf 'B4 scenario %s wrote incomplete daemon samples (need at least %s, visible page, and all requested chunks)\n' "$name" "$((events < 20 ? events : (events * 5 + 999) / 1000))" >&2
+            minimum_samples=$(((events * 5 + 999) / 1000))
+            if [ "$minimum_samples" -lt 20 ]; then minimum_samples=20; fi
+            if [ "$minimum_samples" -gt "$events" ]; then minimum_samples=$events; fi
+            printf 'B4 scenario %s wrote incomplete daemon samples (need at least %s, visible page, and all requested chunks)\n' "$name" "$minimum_samples" >&2
             failed=1
           fi
         fi
