@@ -1,0 +1,2 @@
+shardraild listening at ./shardraild.sock (host 01a16693-95ab-73fd-bfe5-95f86ad0f1b9, epoch 01a16693-95ab-73fd-bfe5-95f717e180a5)
+fake ACP session 01a16693-9668-73f2-9ff2-9ff6c64ae8b8 ended: fake ACP exited while approval was pending: Ok(ExitStatus(unix_wait_status(15)))

@@ -1,0 +1,73 @@
+S5_BENCH_QUERY=Some("events=50000&streams=8&duration=6000&autostart=0&autobench=1&run=cold-50000-8-r3&temperature=cold&b4=1")
+S5 page event Started elapsed_ms=204.276292 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Started tauri://localhost
+S5 page event Finished elapsed_ms=252.885375 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: None, fragment: None })
+page load Finished tauri://localhost
+S5 page event Started elapsed_ms=273.742208 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=50000&streams=8&duration=6000&autostart=0&autobench=1&run=cold-50000-8-r3&temperature=cold&b4=1"), fragment: None })
+page load Started tauri://localhost?events=50000&streams=8&duration=6000&autostart=0&autobench=1&run=cold-50000-8-r3&temperature=cold&b4=1
+S5 B4 window activation show=Ok(()) focus=Ok(())
+S5 page event Finished elapsed_ms=274.47749999999996 url=Ok(Url { scheme: "tauri", cannot_be_a_base: false, username: "", password: None, host: Some(Domain("localhost")), port: None, path: "", query: Some("events=50000&streams=8&duration=6000&autostart=0&autobench=1&run=cold-50000-8-r3&temperature=cold&b4=1"), fragment: None })
+page load Finished tauri://localhost?events=50000&streams=8&duration=6000&autostart=0&autobench=1&run=cold-50000-8-r3&temperature=cold&b4=1
+S5 B4 trace stage=automation effect evaluated data={"autobench":true,"focused":false,"ready":false,"visibility":"visible"}
+S5 B4 trace stage=automation effect evaluated data={"autobench":true,"focused":false,"ready":true,"visibility":"visible"}
+S5 B4 trace stage=automation started data={"focused":false,"visibility":"visible"}
+S5 B4 trace stage=B4 automation input skipped data={"reason":"synthetic composer input is outside the daemon-to-row measurement"}
+S5 B4 trace stage=completion wait started data={"connectedOnce":false,"expectedAgentChunks":50000}
+S5 B4 trace stage=ready data={"channel":"daemon-frames","events":50000}
+S5 starting daemon relay
+S5 paired client 01a16691-950e-7442-a4cd-18e23f6f3ade
+S5 authenticated daemon socket
+S5 session requests sent
+S5 B4 trace stage=daemon status received data={"connected":true,"epoch":"01a16691-9378-71c4-ad2d-5024109e3567","host":"01a16691-9378-71c4-ad2d-5025bf3da97e"}
+S5 relay received frames=1000 agent_chunks=988
+S5 relay received frames=2000 agent_chunks=1988
+S5 relay received frames=3000 agent_chunks=2988
+S5 relay received frames=4000 agent_chunks=3988
+S5 relay received frames=5000 agent_chunks=4988
+S5 relay received frames=6000 agent_chunks=5988
+S5 relay received frames=7000 agent_chunks=6988
+S5 relay received frames=8000 agent_chunks=7988
+S5 relay received frames=9000 agent_chunks=8988
+S5 relay received frames=10000 agent_chunks=9988
+S5 relay received frames=11000 agent_chunks=10988
+S5 relay received frames=12000 agent_chunks=11988
+S5 relay received frames=13000 agent_chunks=12988
+S5 relay received frames=14000 agent_chunks=13988
+S5 relay received frames=15000 agent_chunks=14988
+S5 relay received frames=16000 agent_chunks=15988
+S5 relay received frames=17000 agent_chunks=16988
+S5 relay received frames=18000 agent_chunks=17988
+S5 relay received frames=19000 agent_chunks=18972
+S5 relay received frames=20000 agent_chunks=19972
+S5 relay received frames=21000 agent_chunks=20972
+S5 relay received frames=22000 agent_chunks=21972
+S5 relay received frames=23000 agent_chunks=22972
+S5 relay received frames=24000 agent_chunks=23972
+S5 relay received frames=25000 agent_chunks=24972
+S5 relay received frames=26000 agent_chunks=25972
+S5 relay received frames=27000 agent_chunks=26972
+S5 relay received frames=28000 agent_chunks=27972
+S5 relay received frames=29000 agent_chunks=28972
+S5 relay received frames=30000 agent_chunks=29972
+S5 relay received frames=31000 agent_chunks=30972
+S5 relay received frames=32000 agent_chunks=31960
+S5 relay received frames=33000 agent_chunks=32960
+S5 relay received frames=34000 agent_chunks=33960
+S5 relay received frames=35000 agent_chunks=34960
+S5 relay received frames=36000 agent_chunks=35960
+S5 relay received frames=37000 agent_chunks=36960
+S5 relay received frames=38000 agent_chunks=37960
+S5 relay received frames=39000 agent_chunks=38960
+S5 relay received frames=40000 agent_chunks=39960
+S5 relay received frames=41000 agent_chunks=40960
+S5 relay received frames=42000 agent_chunks=41960
+S5 relay received frames=43000 agent_chunks=42960
+S5 relay received frames=44000 agent_chunks=43954
+S5 relay received frames=45000 agent_chunks=44954
+S5 relay received frames=46000 agent_chunks=45954
+S5 relay received frames=47000 agent_chunks=46954
+S5 relay received frames=48000 agent_chunks=47954
+S5 relay received frames=49000 agent_chunks=48954
+S5 relay received frames=50000 agent_chunks=49954
+S5 B4 trace stage=sample wait started data={"expectedSamples":500}
+S5 B4 trace stage=bench rejected data={"error":"Error: B4 samples incomplete: 439/500","frontendAgentChunks":50000,"samples":439}

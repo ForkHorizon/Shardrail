@@ -1,0 +1,9 @@
+{
+  "error": "Error: B4 samples incomplete: 381/500",
+  "events": 50000,
+  "streams": 8,
+  "daemonAgentChunkCount": 50000,
+  "b4": {
+    "count": 381
+  }
+}

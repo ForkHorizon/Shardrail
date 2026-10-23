@@ -1,0 +1,42 @@
+Fri Oct 23 04:00:57 CEST 2026 pipeline14 start (base 6d7306b)
+Fri Oct 23 04:00:57 CEST 2026 build cargo
+Fri Oct 23 04:01:13 CEST 2026 build tauri
+Fri Oct 23 04:01:15 CEST 2026 tauri build FAILED
+Fri Oct 23 04:01:22 CEST 2026 --- relaunch after CI=1 tauri flag fix ---
+Fri Oct 23 04:01:22 CEST 2026 pipeline14 start (base 6d7306b)
+Fri Oct 23 04:01:22 CEST 2026 build cargo
+Fri Oct 23 04:01:22 CEST 2026 build tauri
+Fri Oct 23 04:01:56 CEST 2026 build swift
+Fri Oct 23 04:02:01 CEST 2026 tauri smoke
+Fri Oct 23 04:02:58 CEST 2026 tauri smoke exit 1
+Fri Oct 23 04:02:59 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:02:59 CEST 2026 tauri smoke produced no valid result; matrix skipped
+Fri Oct 23 04:02:59 CEST 2026 swift smoke
+Fri Oct 23 04:08:02 CEST 2026 swift smoke exit 1
+Fri Oct 23 04:08:03 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:08:03 CEST 2026 swift smoke failed; matrix skipped
+Fri Oct 23 04:08:03 CEST 2026 compare
+Fri Oct 23 04:08:03 CEST 2026 compare exit 0
+Fri Oct 23 04:08:04 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:08:04 CEST 2026 pipeline14 finished
+Fri Oct 23 04:14:22 CEST 2026 --- relaunch after fixes f7782a0 (bench client key dir) and 4617eb5 (Swift window layout) ---
+Fri Oct 23 04:14:22 CEST 2026 pipeline14 start (base 4617eb5)
+Fri Oct 23 04:14:22 CEST 2026 build cargo
+Fri Oct 23 04:14:22 CEST 2026 build tauri
+Fri Oct 23 04:14:36 CEST 2026 build swift
+Fri Oct 23 04:14:37 CEST 2026 tauri smoke
+Fri Oct 23 04:14:40 CEST 2026 tauri smoke exit 0
+Fri Oct 23 04:14:41 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:14:41 CEST 2026 tauri matrix start
+Fri Oct 23 04:25:03 CEST 2026 tauri matrix exit 1
+Fri Oct 23 04:25:04 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:25:04 CEST 2026 swift smoke
+Fri Oct 23 04:25:05 CEST 2026 swift smoke exit 0
+Fri Oct 23 04:25:06 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:25:06 CEST 2026 swift matrix start
+Fri Oct 23 04:29:11 CEST 2026 swift matrix exit 0
+Fri Oct 23 04:29:12 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:29:12 CEST 2026 compare
+Fri Oct 23 04:29:12 CEST 2026 compare exit 0
+Fri Oct 23 04:29:13 CEST 2026 cleanup: left=[]
+Fri Oct 23 04:29:13 CEST 2026 pipeline14 finished
