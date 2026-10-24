@@ -71,3 +71,4 @@ The first draft was written by Grok in Russian; three Claude review rounds then 
 - 2026-10-23 — D64 clarified to use viewport-intersecting rows; D65 sets the 0.5% sample floor; W4-m re-gated night data shows Tauri and Swift miss B4 similarly, so D49 retains Tauri + React and delivery-path work comes next.
 - 2026-10-23 — D66 makes the normal-browser React UI the primary Phase 1 client; loopback listener and pairing move into Phase 1, Tauri shell/mobile/other platforms become later ports; W5-a roadmap added in 18.
 - 2026-10-24 — S5 UI spike note refreshed with D64 viewport filtering, D65 0.5% gate, W4-m Tauri vs Swift re-gate results, B4 deferred as performance debt, and D66 browser-first direction (W7-c).
+- 2026-10-24 — S5 review qualifies the delivery-path inference and records the unavailable Tauri 50k multi-stream comparison; clarified D70 hub-visible online/offline status.
