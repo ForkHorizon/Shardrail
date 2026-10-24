@@ -25,6 +25,7 @@ export interface BrowserSessionOptions {
   onStatus(phase: ConnectionPhase): void;
   onDurableEvent(event: JournalEvent): void;
   onControl(frame: Exclude<DaemonFrame, { kind: 'durable_event' }>): void;
+  onEpoch(epoch: string): void;
 }
 
 export interface BrowserSession {
@@ -89,10 +90,13 @@ export function createBrowserSession(options: BrowserSessionOptions): BrowserSes
     cancelTimer = undefined;
   };
   const remember = (epoch: string) => {
-    if (!cursor || cursor.journalEpoch !== epoch) {
+    const changed = cursor !== undefined && cursor.journalEpoch !== epoch;
+    if (!cursor || changed) {
       seen.clear();
       highWater = -1;
     }
+    if (changed) cursor = undefined;
+    options.onEpoch(epoch);
   };
 
   async function open(retrying: boolean) {

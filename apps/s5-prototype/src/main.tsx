@@ -5,7 +5,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { Button, Checkbox, Input, Label, ListBox, ListBoxItem, Popover, Select, SelectValue, TextField } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { createPortal } from 'react-dom';
-import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRowStart, getRows, isLiveTail, markDaemonRowsCommitted, markRowsCommitted, pushToken, reset, rowCount, setDaemonAgentChunkCount, setDaemonAgentCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, setLiveTail, sortedLatency, tokenCount, useRows } from './store';
+import { applyDaemonEvent, daemonAgentChunkCount, daemonClockMapping, daemonReceiptToRafMs, eventCount, getRowStart, getRows, isLiveTail, markDaemonRowsCommitted, markRowsCommitted, observeJournalEpoch, pushToken, reset, rowCount, setDaemonAgentChunkCount, setDaemonAgentCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, setLiveTail, sortedLatency, tokenCount, useRows } from './store';
 import { matchedInFirstFrame, measureReadyCommitAfterFrame, nominalFrameIntervalMs, percentile, supportsLongTaskEntries, takeCommittedInput } from './metrics-utils';
 import { createFrameSampler, intersectingVirtualItems } from './frame-sampler';
 import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Samples, waitForDaemonStream } from './bench-utils';
@@ -14,7 +14,8 @@ import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownV
 import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo, type PairingState } from './pairing';
 import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
 import { connectBrowser, openBrowserKeyStore } from '@shardrail/client/browser';
-import { createBrowserSession, cursorStorageKey, isKeyChangedError, type BrowserSession, type ConnectionPhase } from './browser-session';
+import { createBrowserSession, isKeyChangedError, type BrowserSession, type ConnectionPhase } from './browser-session';
+import { approvalIdFromPayload, reduceApprovalFlight, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
 import { MainScreen } from './MainScreen';
 import './style.css';
 
@@ -126,7 +127,14 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
 function App() {
   const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected'), [pairing, setPairing] = useState<PairingState>({ kind: 'loading' }), [pairingBusy, setPairingBusy] = useState(false), [enrollmentCode, setEnrollmentCode] = useState(''), [fallbackAcknowledged, setFallbackAcknowledged] = useState(false), [reconnect, setReconnect] = useState(0), [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>('connecting'), [approvalInFlight, setApprovalInFlight] = useState<ReadonlySet<string>>(() => new Set()), [approvalError, setApprovalError] = useState<string | null>(null);
   const browserSession = useRef<BrowserSession | null>(null);
-  const approvalInFlightRef = useRef<Set<string>>(new Set());
+  const approvalFlightRef = useRef<ApprovalFlight>({ inFlight: new Set(), error: null });
+  const publishApprovalFlight = (action: ApprovalFlightAction) => {
+    const next = reduceApprovalFlight(approvalFlightRef.current, action);
+    if (next === approvalFlightRef.current) return;
+    approvalFlightRef.current = next;
+    setApprovalInFlight(next.inFlight);
+    setApprovalError(next.error);
+  };
   // Readiness gates the generator until the external store has been initialized.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { reset(browserMain ? 0 : count, streams, !b4Enabled && !browserMain); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
@@ -148,41 +156,35 @@ function App() {
     const info = pairing.info;
     const holder: { current: BrowserSession | null } = { current: null };
     let cancelled = false;
-    const forgetInFlight = (message: string | null) => {
-      if (approvalInFlightRef.current.size === 0) return;
-      approvalInFlightRef.current = new Set();
-      setApprovalInFlight(new Set());
-      if (message) setApprovalError(message);
-    };
     void (async () => {
       try {
         const identity = await (await openBrowserKeyStore()).get(info.daemonPublicKey);
         if (cancelled) return;
         if (!identity || !info.clientId) throw new Error('browser key is missing; pair this browser again');
-        const key = cursorStorageKey(info.daemonPublicKey);
         const session = createBrowserSession({
           connect: connectBrowser,
           url: browserWebSocketUrl(),
           identity,
           // A new page replays the journal so the session list is complete. In-page reconnect uses the high-water cursor.
           loadCursor: () => undefined,
-          saveCursor: (cursor, journalEpoch) => {
-            try { localStorage.setItem(key, JSON.stringify({ cursor, journalEpoch })); } catch (error) { console.warn('Could not persist browser event cursor', error); }
-          },
+          saveCursor: () => undefined,
           schedule: (delayMs, run) => {
             const id = window.setTimeout(run, delayMs);
             return () => window.clearTimeout(id);
           },
           online: () => navigator.onLine,
+          onEpoch: (epoch) => { observeJournalEpoch(epoch); },
           onStatus: (phase) => {
             setConnectionPhase(phase);
-            if (phase !== 'connected') forgetInFlight('The approval response was not confirmed. It will not be retried.');
+            if (phase !== 'connected') publishApprovalFlight({ type: 'disconnect' });
           },
           onDurableEvent: (event) => {
             applyDaemonEvent(event.cursor, { session_id: event.sessionId, kind: event.kind, payload: event.payload, occurred_at_ms: event.occurredAtMs }, null);
+            publishApprovalFlight({ type: 'journal', kind: event.kind, approvalId: approvalIdFromPayload(event.payload) });
           },
           onControl: (frame) => {
-            if (frame.kind === 'error' || frame.kind === 'command_rejected') forgetInFlight('The daemon rejected the approval response. It was not allowed.');
+            if (frame.kind === 'approval_resolved') publishApprovalFlight({ type: 'resolved', approvalId: frame.approval_id });
+            if (frame.kind === 'error' || frame.kind === 'command_rejected') publishApprovalFlight({ type: 'rejected' });
           },
         });
         if (cancelled) { session.stop(); return; }
@@ -432,13 +434,7 @@ function App() {
   if (browserMain && pairing.kind === 'paired') {
     const resolveApproval = (approvalId: string, optionId: string) => {
       const result = browserSession.current?.resolveApproval(approvalId, optionId) ?? 'blocked';
-      if (result !== 'sent') {
-        setApprovalError('Could not send the approval response. It was not allowed.');
-        return;
-      }
-      approvalInFlightRef.current.add(approvalId);
-      setApprovalInFlight(new Set(approvalInFlightRef.current));
-      setApprovalError(null);
+      publishApprovalFlight(result === 'sent' ? { type: 'sent', approvalId } : { type: 'blocked' });
     };
     const keyStorage = pairing.info.keyStorage;
     return <MainScreen phase={connectionPhase} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval}/>;

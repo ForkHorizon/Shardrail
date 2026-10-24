@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agentText, approvalsForSession, eventsForSession, ingestJournalEvents, sessionSummaries, type JournalEvent } from '../src/session-model';
-import { applyDaemonEvent, eventCount, reset, sessionJournalEvents, subscribe } from '../src/store';
+import { activityTimestamp, agentText, approvalsForSession, checklistSummary, eventsForSession, ingestJournalEvents, plainEventText, reduceApprovalFlight, revealHiddenCharacters, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
+import { applyDaemonEvent, eventCount, observeJournalEpoch, reset, sessionJournalEvents, subscribe } from '../src/store';
 
 const event = (cursor: number, sessionId: string, kind: string, payload: unknown, occurredAtMs = cursor * 1000): JournalEvent => ({ cursor, sessionId, kind, payload, occurredAtMs });
 const snapshot = (lifecycle: string, turn: string, process: string) => ({ lifecycle, turn, process, queue: 'Empty' });
@@ -58,6 +58,9 @@ test('approval cards expose once options only and follow the daemon state', () =
   assert.equal(pending[0]?.allowOnceOptionId, 'allow_once');
   assert.equal(pending[0]?.denyOnceOptionId, 'reject_once');
   assert.equal(pending[0]?.toolKind, 'execute');
+  assert.equal(pending[0]?.actionDisclosed, false);
+  assert.equal(pending[0]?.command, null);
+  assert.equal(pending[0]?.cwd, null);
   const responding = approvalsForSession([
     requested,
     event(5, 'session-a', 'approval_responding', { approval_id: 'approval-1', decision: 'deny', option_id: 'reject_once' }),
@@ -72,6 +75,92 @@ test('approval cards expose once options only and follow the daemon state', () =
   ], 'session-a');
   assert.equal(terminal[0]?.state, 'denied');
   assert.equal(approvalsForSession([event(9, 'session-b', 'allowed', { approval_id: 'approval-2', decision: 'allow' })], 'session-a').length, 0);
+  const disclosed = approvalsForSession([event(10, 'session-a', 'approval_requested', {
+    approval_id: 'approval-3',
+    approval_kind: 'execute',
+    command: 'curl\u202E',
+    argv: ['curl', 'https://example.test'],
+    cwd: '/tmp/work',
+    raw_input: { cmd: 'curl' },
+    sandbox: 'workspace-write',
+    options: [{ option_id: 'allow_once', decision: 'allow', class: 'once' }],
+  })], 'session-a').find((card) => card.approvalId === 'approval-3');
+  assert.equal(disclosed?.actionDisclosed, true);
+  assert.equal(disclosed?.command, 'curl\u202E');
+  assert.deepEqual(disclosed?.argv, ['curl', 'https://example.test']);
+  assert.equal(disclosed?.cwd, '/tmp/work');
+  assert.equal(disclosed?.sandbox, 'workspace-write');
+  assert.equal(revealHiddenCharacters(disclosed?.command ?? ''), 'curl\\u202e');
+});
+
+test('coalesces chunk text and keeps other events as plain text', () => {
+  const items = transcriptItems([
+    event(1, 'session-a', 'agent_message_chunk', { content: { text: '```python\n' } }),
+    event(2, 'session-a', 'agent_message_chunk', { content: { text: 'print(1)\n```' } }),
+    event(3, 'session-a', 'tool_call_started', { name: 'echo', argv: ['echo', 'hi'] }),
+    event(4, 'session-a', 'agent_message_chunk', { content: { text: 'after' } }),
+  ]);
+  assert.equal(items.length, 3);
+  assert.equal(items[0]?.markdown, '```python\nprint(1)\n```');
+  assert.equal(items[0]?.cursorLabel, '#1–#2');
+  assert.equal(items[1]?.plain, plainEventText(event(3, 'session-a', 'tool_call_started', { name: 'echo', argv: ['echo', 'hi'] })));
+  assert.equal(items[1]?.markdown, null);
+  assert.equal(items[2]?.markdown, 'after');
+});
+
+test('activity timestamps reject non-finite values', () => {
+  assert.equal(activityTimestamp(Number.NaN), null);
+  assert.equal(activityTimestamp(Number.POSITIVE_INFINITY), null);
+  assert.equal(activityTimestamp(0), null);
+  assert.equal(activityTimestamp(-5), null);
+  assert.equal(activityTimestamp(1_700_000_000_000), '2023-11-14T22:13:20.000Z');
+});
+
+test('the verification checklist stays not verified and does not claim a single status', () => {
+  const summary = checklistSummary();
+  assert.equal(summary.unverified, VERIFICATION_CHECKS.length);
+  assert.equal(summary.failed, 0);
+  assert.equal(summary.checks.some((item) => item.status === 'verified' || /protected/i.test(item.status)), false);
+  assert.equal(summary.checks[0]?.lastChecked, null);
+});
+
+test('a confirmed approval leaves the in-flight set and a later disconnect does not alert', () => {
+  const sent = reduceApprovalFlight({ inFlight: new Set(), error: null }, { type: 'sent', approvalId: 'approval-1' });
+  const resolved = reduceApprovalFlight(sent, { type: 'resolved', approvalId: 'approval-1' });
+  assert.equal(resolved.inFlight.size, 0);
+  assert.equal(resolved.error, null);
+  const disconnected = reduceApprovalFlight(resolved, { type: 'disconnect' });
+  assert.equal(disconnected, resolved);
+  const journaled = reduceApprovalFlight(sent, { type: 'journal', kind: 'allowed', approvalId: 'approval-1' });
+  assert.equal(journaled.inFlight.size, 0);
+  assert.equal(reduceApprovalFlight(journaled, { type: 'disconnect' }).error, null);
+  const lost = reduceApprovalFlight(sent, { type: 'disconnect' });
+  assert.equal(lost.inFlight.size, 0);
+  assert.match(lost.error ?? '', /not confirmed/);
+  assert.match(reduceApprovalFlight(sent, { type: 'blocked' }).error ?? '', /not allowed/);
+  assert.equal(reduceApprovalFlight(sent, { type: 'journal', kind: 'agent_message_chunk', approvalId: 'approval-1' }), sent);
+});
+
+test('a changed journal epoch replaces stale cursors instead of dropping the new journal', () => {
+  const callbacks: FrameRequestCallback[] = [];
+  const previous = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => { callbacks.push(callback); return callbacks.length; };
+  try {
+    reset(0, 1, false);
+    assert.equal(observeJournalEpoch('epoch-old'), false);
+    applyDaemonEvent(1, { session_id: 'old-session', kind: 'session_created', payload: {}, occurred_at_ms: 10 }, null);
+    callbacks[0]!(0);
+    assert.deepEqual(sessionJournalEvents().map((item) => item.sessionId), ['old-session']);
+    assert.equal(observeJournalEpoch('epoch-new'), true);
+    assert.equal(sessionJournalEvents().length, 0);
+    applyDaemonEvent(1, { session_id: 'new-session', kind: 'session_created', payload: {}, occurred_at_ms: 20 }, null);
+    callbacks.at(-1)!(0);
+    assert.deepEqual(sessionJournalEvents().map((item) => item.sessionId), ['new-session']);
+    assert.equal(observeJournalEpoch('epoch-new'), false);
+  } finally {
+    globalThis.requestAnimationFrame = previous;
+    reset(0, 1, false);
+  }
 });
 
 test('coalesces session events once per frame and ignores a replayed cursor', () => {

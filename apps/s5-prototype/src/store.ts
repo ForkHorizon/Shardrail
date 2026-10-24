@@ -65,6 +65,8 @@ let sessionEvents: JournalEvent[] = [];
 const sessionCursors = new Set<number>();
 let pendingJournal: JournalEvent[] = [];
 const pendingCursors = new Set<number>();
+let journalEpoch: string | null = null;
+let journalGeneration = 0;
 export const sessionJournalEvents = () => sessionEvents;
 export const useSessionJournalEvents = () => { useSyncExternalStore(subscribe, () => revision, () => revision); return sessionEvents; };
 export function applyPendingUpdates(current: EventRow[], indexById: Map<number, number>, updates: EventRow[]) {
@@ -93,6 +95,8 @@ export function reset(count: number, streams: number, seedRows = true) {
   sessionCursors.clear();
   pendingJournal = [];
   pendingCursors.clear();
+  journalEpoch = null;
+  journalGeneration += 1;
   receivedAt.clear();
   scheduledLatency.clear();
   activeMessageByAgent.clear();
@@ -102,6 +106,22 @@ export function reset(count: number, streams: number, seedRows = true) {
   mockCreationToMountedRowFollowupLatency.length = 0;
   generatedTokens = 0;
   notify();
+}
+export function observeJournalEpoch(epoch: string) {
+  if (epoch.length === 0 || epoch === journalEpoch) return false;
+  const previous = journalEpoch;
+  journalEpoch = epoch;
+  if (previous === null) return false;
+  journalGeneration += 1;
+  sessionEvents = [];
+  sessionCursors.clear();
+  pendingJournal = [];
+  pendingCursors.clear();
+  pending = new Map();
+  if (raf !== 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf);
+  raf = 0;
+  notify();
+  return true;
 }
 export function setDaemonClockMapping(offsetMs: number, uncertaintyMs: number) { pageClockOffsetMs = offsetMs; pageClockUncertaintyMs = uncertaintyMs; }
 export function setDaemonAgentCount(count: number) { daemonAgentCount = Math.max(1, count); }
@@ -126,7 +146,10 @@ export function applyDaemonEvent(cursor: number, event: { session_id: string; ki
     }
   }
   pending.set(id, row);
+  const scheduledGeneration = journalGeneration;
   if (!raf) raf = requestAnimationFrame(() => {
+    raf = 0;
+    if (scheduledGeneration !== journalGeneration) return;
     const journal = pendingJournal;
     pendingJournal = [];
     pendingCursors.clear();
@@ -136,7 +159,8 @@ export function applyDaemonEvent(cursor: number, event: { session_id: string; ki
     }
     rows = applyPendingUpdates(rows, rowIndexById, [...pending.values()]);
     rowTotal = rows.length;
-    pending = new Map(); raf = 0; notify();
+    pending = new Map();
+    notify();
   });
   return id;
 }

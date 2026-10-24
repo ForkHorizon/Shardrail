@@ -52,6 +52,7 @@ test('resumes from the last cursor without replaying events or sending an approv
     onStatus: (phase) => statuses.push(phase),
     onDurableEvent: (event) => delivered.push(event),
     onControl: () => undefined,
+    onEpoch: () => undefined,
   });
   await flush();
   assert.deepEqual(delivered.map((event) => event.cursor), [1, 2, 4, 3]);
@@ -91,6 +92,7 @@ test('a changed host key stops reconnect and an offline browser waits', async ()
     onStatus: (phase) => statuses.push(phase),
     onDurableEvent: () => undefined,
     onControl: () => undefined,
+    onEpoch: () => undefined,
   });
   await flush();
   assert.deepEqual(statuses, ['connecting', 'key-changed']);
@@ -98,6 +100,44 @@ test('a changed host key stops reconnect and an offline browser waits', async ()
   online = false;
   session.setOnline(false);
   assert.equal(statuses.at(-1), 'key-changed');
+  session.stop();
+});
+
+test('a new journal epoch clears the resume cursor and delivers reused cursors', async () => {
+  const delivered: number[] = [];
+  const epochs: string[] = [];
+  const cursors: Array<number | undefined> = [];
+  const timers: { run: () => void }[] = [];
+  let saved: StoredCursor | undefined = { cursor: 1, journalEpoch: 'epoch-old' };
+  const scripts: Array<(socket: FakeSocket) => void> = [
+    (socket) => {
+      socket.emit(durable(1, 'old-session', 'session_created'));
+      socket.fail(new Error('daemon WebSocket closed'));
+    },
+    (socket) => {
+      socket.emit(durable(1, 'new-session', 'session_created'));
+    },
+  ];
+  const session = createBrowserSession({
+    connect: fakeConnect(scripts, cursors, [], ['epoch-old', 'epoch-new']),
+    url: 'ws://127.0.0.1:9/ws',
+    identity: { hostPublicKey: 'host', clientId: 'client', publicKey: 'key', storage: 'webcrypto' },
+    loadCursor: () => saved,
+    saveCursor: (cursor, journalEpoch) => { saved = { cursor, journalEpoch }; },
+    schedule: (_delay, run) => { timers.push({ run }); return () => undefined; },
+    online: () => true,
+    onStatus: () => undefined,
+    onDurableEvent: (event) => delivered.push(event.cursor),
+    onControl: () => undefined,
+    onEpoch: (epoch) => epochs.push(epoch),
+  });
+  await flush();
+  timers[0]?.run();
+  await flush();
+  assert.deepEqual(epochs, ['epoch-old', 'epoch-new']);
+  assert.deepEqual(delivered, [1, 1]);
+  assert.equal(saved?.journalEpoch, 'epoch-new');
+  assert.deepEqual(cursors, [1, 1]);
   session.stop();
 });
 
@@ -119,6 +159,7 @@ test('manual reconnect resets backoff after failures', async () => {
     onStatus: () => undefined,
     onDurableEvent: () => undefined,
     onControl: () => undefined,
+    onEpoch: () => undefined,
   });
   await flush();
   assert.equal(timers[0]?.delay, 200);
@@ -144,23 +185,24 @@ interface FakeSocket extends SessionSocket {
   fail(error: Error): void;
 }
 
-function fakeConnect(scripts: Array<(socket: FakeSocket) => void>, cursors: Array<number | undefined>, sent: { approval_id: string; option_id: string }[]) {
+function fakeConnect(scripts: Array<(socket: FakeSocket) => void>, cursors: Array<number | undefined>, sent: { approval_id: string; option_id: string }[], epochs: string[] = []) {
   let call = 0;
   return async (options: { cursor?: number }) => {
     cursors.push(options.cursor);
     const script = scripts[Math.min(call, scripts.length - 1)]!;
+    const epoch = epochs[Math.min(call, Math.max(epochs.length - 1, 0))] ?? 'epoch-1';
     call += 1;
-    const socket = openSocket((request) => sent.push(request));
+    const socket = openSocket((request) => sent.push(request), epoch);
     setTimeout(() => script(socket), 0);
     return socket;
   };
 }
 
-function openSocket(onResolve: (request: { approval_id: string; option_id: string }) => void): FakeSocket {
+function openSocket(onResolve: (request: { approval_id: string; option_id: string }) => void, epoch = 'epoch-1'): FakeSocket {
   const frames = new Set<(frame: DaemonFrame) => void>();
   const errors = new Set<(error: Error) => void>();
   const socket: FakeSocket = {
-    host: { journal_epoch: 'epoch-1' },
+    host: { journal_epoch: epoch },
     onFrame(listener) { frames.add(listener); return () => frames.delete(listener); },
     onError(listener) { errors.add(listener); return () => errors.delete(listener); },
     resolveApproval(request) { onResolve(request); },
