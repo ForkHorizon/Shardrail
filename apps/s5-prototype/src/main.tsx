@@ -14,12 +14,15 @@ import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownV
 import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo, type PairingState } from './pairing';
 import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
 import { connectBrowser, openBrowserKeyStore } from '@shardrail/client/browser';
+import { createBrowserSession, cursorStorageKey, isKeyChangedError, type BrowserSession, type ConnectionPhase } from './browser-session';
+import { MainScreen } from './MainScreen';
 import './style.css';
 
 type Metrics = { firstTranscriptRenderOpportunityMs: number; longTasks: number | null; maxLongTaskMs: number | null; frameP95: number | null; frameMax: number | null; frameSamples: number; commitCount: number; commitMs: number; eventStoreCount: number; generatedTokens: number; heapMB: number | null; mockCreationToMountedRowFollowupP95: number | null; composerP95: number | null; composerMin: number | null; composerMax: number | null; composerSamples: number; matchesByFirstFrame: number; firstFrameSamples: number; firstFrameDeltasMs: number[]; firstFrameRafTimestampDeltasMs: number[]; b4: { count: number; medianMs: number | null; p95Ms: number | null; maxMs: number | null; samplesMs: number[]; clockOffsetMs: number; clockUncertaintyMs: number }; daemonAgentChunkCount: number; userAgent: string };
 const started = performance.now();
 const browserMode = !('__TAURI_INTERNALS__' in window);
 const b4Enabled = new URLSearchParams(location.search).has('b4');
+const browserMain = browserMode && !b4Enabled;
 const desktopPairingApi: PairingApi = {
   inspect: () => invoke<PairingInfo>('pairing_info'),
   pair: (daemonPublicKey) => invoke<string>('pair_desktop', { expectedPublicKey: daemonPublicKey }),
@@ -121,10 +124,12 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
   return <><div ref={parent} className="transcript" role="region" aria-label="Event transcript" tabIndex={0} onScroll={() => { followTail.current = parent.current !== null && parent.current.scrollHeight - parent.current.scrollTop - parent.current.clientHeight < 24; setLiveTail(followTail.current); onInput(); }}><div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((v) => { const row = rows[v.index - getRowStart()]; return row ? <div key={row.id} data-index={v.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 112, transform: `translateY(${v.start}px)` }}><Row row={row} onMount={(id) => mountedDaemonRows.current.add(id)} onUnmount={(id) => mountedDaemonRows.current.delete(id)}/></div> : null; })}</div></div></>;
 }
 function App() {
-  const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected'), [pairing, setPairing] = useState<PairingState>({ kind: 'loading' }), [pairingBusy, setPairingBusy] = useState(false), [enrollmentCode, setEnrollmentCode] = useState(''), [fallbackAcknowledged, setFallbackAcknowledged] = useState(false), [reconnect, setReconnect] = useState(0);
+  const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected'), [pairing, setPairing] = useState<PairingState>({ kind: 'loading' }), [pairingBusy, setPairingBusy] = useState(false), [enrollmentCode, setEnrollmentCode] = useState(''), [fallbackAcknowledged, setFallbackAcknowledged] = useState(false), [reconnect, setReconnect] = useState(0), [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>('connecting'), [approvalInFlight, setApprovalInFlight] = useState<ReadonlySet<string>>(() => new Set()), [approvalError, setApprovalError] = useState<string | null>(null);
+  const browserSession = useRef<BrowserSession | null>(null);
+  const approvalInFlightRef = useRef<Set<string>>(new Set());
   // Readiness gates the generator until the external store has been initialized.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { reset(count, streams, !b4Enabled); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
+  useEffect(() => { reset(browserMain ? 0 : count, streams, !b4Enabled && !browserMain); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
   useEffect(() => {
     if (b4Enabled) return;
     void pairingApi.inspect().then((info) => setPairing(stateFromInfo(info))).catch(() => setPairing({ kind: 'error', message: 'Could not read daemon identity. Check that the daemon is installed and retry.' }));
@@ -138,6 +143,67 @@ function App() {
     if (!browserMode || pairing.kind !== 'paired' || pairing.info.keyStorage) return;
     void pairingApi.inspect().then((info) => setPairing(stateFromInfo(info))).catch(() => undefined);
   }, [pairing]);
+  useEffect(() => {
+    if (!browserMain || !ready || pairing.kind !== 'paired') return;
+    const info = pairing.info;
+    const holder: { current: BrowserSession | null } = { current: null };
+    let cancelled = false;
+    const forgetInFlight = (message: string | null) => {
+      if (approvalInFlightRef.current.size === 0) return;
+      approvalInFlightRef.current = new Set();
+      setApprovalInFlight(new Set());
+      if (message) setApprovalError(message);
+    };
+    void (async () => {
+      try {
+        const identity = await (await openBrowserKeyStore()).get(info.daemonPublicKey);
+        if (cancelled) return;
+        if (!identity || !info.clientId) throw new Error('browser key is missing; pair this browser again');
+        const key = cursorStorageKey(info.daemonPublicKey);
+        const session = createBrowserSession({
+          connect: connectBrowser,
+          url: browserWebSocketUrl(),
+          identity,
+          // A new page replays the journal so the session list is complete. In-page reconnect uses the high-water cursor.
+          loadCursor: () => undefined,
+          saveCursor: (cursor, journalEpoch) => {
+            try { localStorage.setItem(key, JSON.stringify({ cursor, journalEpoch })); } catch (error) { console.warn('Could not persist browser event cursor', error); }
+          },
+          schedule: (delayMs, run) => {
+            const id = window.setTimeout(run, delayMs);
+            return () => window.clearTimeout(id);
+          },
+          online: () => navigator.onLine,
+          onStatus: (phase) => {
+            setConnectionPhase(phase);
+            if (phase !== 'connected') forgetInFlight('The approval response was not confirmed. It will not be retried.');
+          },
+          onDurableEvent: (event) => {
+            applyDaemonEvent(event.cursor, { session_id: event.sessionId, kind: event.kind, payload: event.payload, occurred_at_ms: event.occurredAtMs }, null);
+          },
+          onControl: (frame) => {
+            if (frame.kind === 'error' || frame.kind === 'command_rejected') forgetInFlight('The daemon rejected the approval response. It was not allowed.');
+          },
+        });
+        if (cancelled) { session.stop(); return; }
+        holder.current = session;
+        browserSession.current = session;
+      } catch (error) {
+        if (!cancelled) setConnectionPhase(isKeyChangedError(error) ? 'key-changed' : 'reconnecting');
+      }
+    })();
+    const onOnline = () => holder.current?.setOnline(navigator.onLine);
+    const onOffline = () => holder.current?.setOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      cancelled = true;
+      holder.current?.stop();
+      if (browserSession.current === holder.current) browserSession.current = null;
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, [ready, pairing, reconnect]);
   const runningRef = useRef(false);
   const rangeRequest = useRef<{ key: string; id: number; inFlight: boolean; pending?: { start: number; limit: number; noticeVersion?: number } }>({ key: '', id: 0, inFlight: false });
   const requestRange = useCallback((start: number, limit: number, noticeVersion?: number) => {
@@ -172,6 +238,7 @@ function App() {
   }, [autobench]);
   useEffect(() => {
     if (!ready || (b4Enabled && (!autobench || !query.has('b4'))) || (!b4Enabled && pairing.kind !== 'paired')) return;
+    if (browserMain) return;
     if (browserMode) {
       let client: Awaited<ReturnType<typeof connectBrowser>> | undefined;
       let disposed = false;
@@ -361,6 +428,20 @@ function App() {
       {pairing.kind === 'unpaired' || (!browserMode && pairing.kind === 'mismatch') || pairing.kind === 'expired' ? <Button onPress={verify}>{pairing.kind === 'mismatch' ? 'Review fingerprint and re-pair' : pairing.kind === 'expired' ? 'Review fingerprint again' : 'Review fingerprint'}</Button> : null}
       {pairing.kind === 'error' ? <Button onPress={refresh}>Retry</Button> : null}
     </section></main>;
+  }
+  if (browserMain && pairing.kind === 'paired') {
+    const resolveApproval = (approvalId: string, optionId: string) => {
+      const result = browserSession.current?.resolveApproval(approvalId, optionId) ?? 'blocked';
+      if (result !== 'sent') {
+        setApprovalError('Could not send the approval response. It was not allowed.');
+        return;
+      }
+      approvalInFlightRef.current.add(approvalId);
+      setApprovalInFlight(new Set(approvalInFlightRef.current));
+      setApprovalError(null);
+    };
+    const keyStorage = pairing.info.keyStorage;
+    return <MainScreen phase={connectionPhase} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval}/>;
   }
   return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{pairing.kind === 'paired' ? <><span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairing.info.fingerprint}>{pairing.info.fingerprint}</span><Button onPress={() => setReconnect((current) => current + 1)}>Reconnect</Button>{!browserMode ? <Button onPress={() => { void unpairClient(pairingApi).then(setPairing); }}>Unpair</Button> : null}</> : null}{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header>{browserMode && pairing.kind === 'paired' && pairing.info.keyStorage === 'noble-fallback' ? <p role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}<section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
 }
