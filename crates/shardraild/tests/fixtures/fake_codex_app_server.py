@@ -50,15 +50,35 @@ def request(message_id, method, params):
 
 def thread_result(params):
     reviewer = "auto_review" if MODE == "bad-reviewer" else "user"
-    sandbox = {"type": "dangerFullAccess"} if MODE == "bad-sandbox" else {"type": "workspaceWrite"}
+    cwd = params.get("cwd") or "/"
+    if MODE == "bad-sandbox":
+        sandbox = {"type": "dangerFullAccess"}
+    elif MODE == "readonly-network":
+        sandbox = {"type": "readOnly", "networkAccess": True}
+    else:
+        sandbox = {"type": "workspaceWrite"}
     result = {
         "approvalPolicy": params.get("approvalPolicy") or "on-request",
         "approvalsReviewer": reviewer,
-        "cwd": params.get("cwd") or "/",
+        "cwd": cwd,
         "model": "fake",
         "modelProvider": "fake",
         "sandbox": sandbox,
-        "thread": {"id": "thread-1"},
+        "thread": {
+            "cliVersion": "0.160.0",
+            "createdAt": 0,
+            "cwd": cwd,
+            "ephemeral": True,
+            "id": "thread-1",
+            "modelProvider": "fake",
+            "preview": "",
+            "projectId": None,
+            "sessionId": "session-1",
+            "source": "appServer",
+            "status": {"type": "idle"},
+            "turns": [],
+            "updatedAt": 0,
+        },
     }
     if MODE == "omit-reviewer":
         result.pop("approvalsReviewer", None)
@@ -109,7 +129,15 @@ def main():
             return
         method = message.get("method")
         if method == "initialize" and "id" in message:
-            reply(message["id"], {"userAgent": "fake-codex/0.160.0"})
+            reply(
+                message["id"],
+                {
+                    "codexHome": "/tmp/fake-codex-home",
+                    "platformFamily": "unix",
+                    "platformOs": "macos",
+                    "userAgent": "fake-codex/0.160.0",
+                },
+            )
             continue
         if method == "initialized":
             continue
@@ -122,7 +150,12 @@ def main():
             turns += 1
             turn_id = f"turn-{turns}"
             params = message.get("params") or {}
+            if MODE == "slow-turn":
+                time.sleep(2)
             reply(message["id"], turn_result(turn_id))
+            if MODE == "slow-turn":
+                complete(turn_id, "completed")
+                continue
             if MODE == "crash":
                 log({"direction": "exit", "reason": "crash"})
                 os._exit(1)

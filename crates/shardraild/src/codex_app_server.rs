@@ -72,12 +72,13 @@ pub(crate) enum SessionCommand {
 }
 
 pub(crate) fn config_override_allowed(value: &str) -> bool {
-    !value.is_empty()
-        && !value.contains(['\n', '\r'])
-        && !value.contains("experimentalApi")
-        && value
-            .split_once('=')
-            .is_some_and(|(key, _value)| !key.is_empty())
+    if value.is_empty() || value.contains(['\n', '\r', '\0']) {
+        return false;
+    }
+    let Some((key, raw_value)) = value.split_once('=') else {
+        return false;
+    };
+    !raw_value.is_empty() && matches!(key, "model" | "model_reasoning_effort")
 }
 
 pub(crate) fn command_arguments(extra: &[String]) -> Vec<String> {
@@ -157,6 +158,10 @@ impl ConfirmedSandbox {
     }
 }
 
+fn sandbox_network_closed(object: &serde_json::Map<String, Value>) -> bool {
+    matches!(object.get("networkAccess"), None | Some(Value::Bool(false)))
+}
+
 pub(crate) fn confirmed_sandbox(value: Option<&Value>) -> Option<ConfirmedSandbox> {
     match value {
         Some(Value::String(text)) if text == "workspace-write" => {
@@ -164,9 +169,9 @@ pub(crate) fn confirmed_sandbox(value: Option<&Value>) -> Option<ConfirmedSandbo
         }
         Some(Value::String(text)) if text == "read-only" => Some(ConfirmedSandbox::ReadOnly),
         Some(Value::Object(object)) => match object.get("type").and_then(Value::as_str) {
-            Some("readOnly") => Some(ConfirmedSandbox::ReadOnly),
+            Some("readOnly") if sandbox_network_closed(object) => Some(ConfirmedSandbox::ReadOnly),
             Some("workspaceWrite")
-                if object.get("networkAccess").and_then(Value::as_bool) != Some(true)
+                if sandbox_network_closed(object)
                     && object
                         .get("writableRoots")
                         .and_then(Value::as_array)
@@ -265,11 +270,12 @@ pub(crate) async fn start_session(
     let (approval_tx, approval_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = oneshot::channel();
+    let session_tx = command_tx.clone();
     daemon
         .turn_commands
         .lock()
         .await
-        .insert(session_id, command_tx);
+        .insert(session_id, command_tx.clone());
     daemon
         .codex_status
         .lock()
@@ -283,6 +289,7 @@ pub(crate) async fn start_session(
             session_id,
             approval_tx,
             approval_rx,
+            command_tx,
             command_rx,
             ready_tx,
         )
@@ -302,9 +309,29 @@ pub(crate) async fn start_session(
             .lock()
             .await
             .insert(session_id, status.clone());
-        daemon.turn_commands.lock().await.remove(&session_id);
+        remove_turn_command(&daemon, session_id, &session_tx).await;
     }
     status
+}
+
+async fn remove_turn_command(
+    daemon: &Daemon,
+    session_id: Uuid,
+    sender: &mpsc::UnboundedSender<SessionCommand>,
+) {
+    let mut commands = daemon.turn_commands.lock().await;
+    if commands
+        .get(&session_id)
+        .is_some_and(|current| current.same_channel(sender))
+    {
+        commands.remove(&session_id);
+    }
+}
+
+enum TurnDispatch {
+    Wait(oneshot::Receiver<Result<i64, String>>),
+    Accept(i64),
+    Reject(String),
 }
 
 pub(crate) async fn handle_turn_command(
@@ -312,61 +339,72 @@ pub(crate) async fn handle_turn_command(
     outbound: &mpsc::Sender<Vec<u8>>,
     request: &shardrail_protocol::CommandRequest,
 ) -> io::Result<()> {
+    let dispatch = dispatch_turn(daemon, request).await?;
+    match dispatch {
+        TurnDispatch::Reject(error) => reject(outbound, request.command_id, &error).await,
+        TurnDispatch::Accept(event_id) => {
+            accept(daemon, outbound, request.command_id, event_id).await
+        }
+        TurnDispatch::Wait(done_rx) => {
+            match tokio::time::timeout(Duration::from_secs(20), done_rx).await {
+                Ok(Ok(Ok(event_id))) => {
+                    accept(daemon, outbound, request.command_id, event_id).await
+                }
+                Ok(Ok(Err(error))) => reject(outbound, request.command_id, &error).await,
+                _ => reject(outbound, request.command_id, "codex turn command failed").await,
+            }
+        }
+    }
+}
+
+async fn dispatch_turn(
+    daemon: &Arc<Daemon>,
+    request: &shardrail_protocol::CommandRequest,
+) -> io::Result<TurnDispatch> {
     let _guard = daemon.command_lock.lock().await;
     let session_id = match request.payload.get("session_id").and_then(Value::as_str) {
-        Some(text) => Uuid::parse_str(text).map_err(|_| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                "turn command session_id is invalid",
-            )
-        })?,
+        Some(text) => match Uuid::parse_str(text) {
+            Ok(session_id) => session_id,
+            Err(_) => {
+                return Ok(TurnDispatch::Reject(
+                    "turn command session_id is invalid".into(),
+                ));
+            }
+        },
         None => {
-            return reject(
-                outbound,
-                request.command_id,
-                "turn command requires session_id",
-            )
-            .await;
+            return Ok(TurnDispatch::Reject(
+                "turn command requires session_id".into(),
+            ));
         }
     };
     let prompt = if request.kind == "turn.start" {
         match request.payload.get("prompt").and_then(Value::as_str) {
             Some(text) if !text.is_empty() => Some(text.to_owned()),
             _ => {
-                return reject(
-                    outbound,
-                    request.command_id,
-                    "turn.start requires prompt text",
-                )
-                .await;
+                return Ok(TurnDispatch::Reject(
+                    "turn.start requires prompt text".into(),
+                ));
             }
         }
     } else {
         None
     };
     if let Some(event_id) = applied_command(daemon, session_id, request.command_id).await? {
-        return accept(daemon, outbound, request.command_id, event_id).await;
+        return Ok(TurnDispatch::Accept(event_id));
     }
     let status = daemon.codex_status.lock().await.get(&session_id).cloned();
-    match status {
-        Some(CodexStatus::Ready) => {}
-        Some(CodexStatus::RoutingRejected(reason)) => {
-            return reject(outbound, request.command_id, &reason).await;
-        }
-        Some(CodexStatus::Failed(error)) => {
-            return reject(outbound, request.command_id, &error).await;
-        }
-        _ => {
-            return reject(outbound, request.command_id, "codex session is not ready").await;
-        }
+    let rejection = match status {
+        Some(CodexStatus::Ready) => None,
+        Some(CodexStatus::RoutingRejected(reason)) => Some(reason),
+        Some(CodexStatus::Failed(error)) => Some(error),
+        _ => Some("codex session is not ready".into()),
+    };
+    if let Some(error) = rejection {
+        return Ok(TurnDispatch::Reject(error));
     }
-    let sender = daemon
-        .turn_commands
-        .lock()
-        .await
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "codex session is not running"))?;
+    let Some(sender) = daemon.turn_commands.lock().await.get(&session_id).cloned() else {
+        return Ok(TurnDispatch::Reject("codex session is not running".into()));
+    };
     let (done_tx, done_rx) = oneshot::channel();
     let command = if request.kind == "turn.start" {
         SessionCommand::StartTurn {
@@ -381,13 +419,10 @@ pub(crate) async fn handle_turn_command(
         }
     };
     if sender.send(command).is_err() {
-        return reject(outbound, request.command_id, "codex session is not running").await;
+        return Ok(TurnDispatch::Reject("codex session is not running".into()));
     }
-    match tokio::time::timeout(Duration::from_secs(20), done_rx).await {
-        Ok(Ok(Ok(event_id))) => accept(daemon, outbound, request.command_id, event_id).await,
-        Ok(Ok(Err(error))) => reject(outbound, request.command_id, &error).await,
-        _ => reject(outbound, request.command_id, "codex turn command failed").await,
-    }
+    drop(_guard);
+    Ok(TurnDispatch::Wait(done_rx))
 }
 
 async fn applied_command(
@@ -448,12 +483,17 @@ async fn reject(outbound: &mpsc::Sender<Vec<u8>>, command_id: Uuid, error: &str)
     .await
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the task keeps its command sender so a later retry is not removed with it"
+)]
 async fn run_codex_session(
     daemon: Arc<Daemon>,
     config: CodexConfig,
     session_id: Uuid,
     approval_tx: mpsc::UnboundedSender<ProviderCommand>,
     approval_rx: mpsc::UnboundedReceiver<ProviderCommand>,
+    command_tx: mpsc::UnboundedSender<SessionCommand>,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     ready_tx: oneshot::Sender<CodexStatus>,
 ) {
@@ -520,6 +560,8 @@ async fn run_codex_session(
         approval_by_item: HashMap::new(),
         items: HashMap::new(),
         sandbox: ConfirmedSandbox::WorkspaceWrite,
+        #[cfg(test)]
+        fail_command_lookup: false,
     };
     crate::daemon_log::log(
         "INFO",
@@ -573,7 +615,7 @@ async fn run_codex_session(
         }
     }
     session.release_approvals().await;
-    daemon.turn_commands.lock().await.remove(&session_id);
+    remove_turn_command(&daemon, session_id, &command_tx).await;
     crate::daemon_log::log(
         "INFO",
         "codex",
@@ -675,6 +717,8 @@ struct CodexRun {
     approval_by_item: HashMap<String, Uuid>,
     items: HashMap<String, Value>,
     sandbox: ConfirmedSandbox,
+    #[cfg(test)]
+    fail_command_lookup: bool,
 }
 
 impl CodexRun {
@@ -739,6 +783,7 @@ impl CodexRun {
         let event_id = match self.command_event_id(command_id).await {
             Ok(event_id) => event_id,
             Err(error) => {
+                self.finish_turn(TurnOutcome::Interrupted, "error").await;
                 let _ = done.send(Err(error));
                 return;
             }
@@ -1533,6 +1578,10 @@ impl CodexRun {
     }
 
     async fn command_event_id(&self, command_id: Uuid) -> Result<i64, String> {
+        #[cfg(test)]
+        if self.fail_command_lookup {
+            return Err("turn event was not committed".into());
+        }
         let journal = self.daemon.journal.lock().await;
         let events = journal
             .events_for_session(self.session_id)
@@ -1616,6 +1665,19 @@ fn nonempty(value: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn ack_still_pending(state: Option<ApprovalState>) -> bool {
+    !matches!(
+        state,
+        Some(
+            ApprovalState::Allowed
+                | ApprovalState::Denied
+                | ApprovalState::Expired
+                | ApprovalState::Withdrawn
+                | ApprovalState::DeliveredUnconfirmed
+        )
+    )
+}
+
 fn spawn_ack(daemon: Arc<Daemon>, session_id: Uuid, approval_id: Uuid) {
     tokio::spawn(async move {
         for _ in 0..20 {
@@ -1631,6 +1693,21 @@ fn spawn_ack(daemon: Arc<Daemon>, session_id: Uuid, approval_id: Uuid) {
                 }
                 Err(shardrail_coordinator::CoordinatorError::InvalidApproval) => {
                     drop(coordinator);
+                    let state = daemon
+                        .journal
+                        .lock()
+                        .await
+                        .load_approvals(session_id)
+                        .ok()
+                        .and_then(|approvals| {
+                            approvals
+                                .into_iter()
+                                .find(|approval| approval.id == approval_id)
+                                .map(|approval| approval.state)
+                        });
+                    if !ack_still_pending(state) {
+                        return;
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Err(_) => return,
@@ -1717,6 +1794,18 @@ mod tests {
         bad["sandbox"] = json!({"type": "workspaceWrite", "networkAccess": true});
         assert!(thread_routing_accepted(&bad, workdir).is_err());
         bad = ok.clone();
+        bad["sandbox"] = json!({"type": "readOnly", "networkAccess": true});
+        assert!(thread_routing_accepted(&bad, workdir).is_err());
+        bad = ok.clone();
+        bad["sandbox"] = json!({"type": "readOnly", "networkAccess": "restricted"});
+        assert!(thread_routing_accepted(&bad, workdir).is_err());
+        bad = ok.clone();
+        bad["sandbox"] = json!({"type": "readOnly", "networkAccess": false});
+        assert_eq!(
+            thread_routing_accepted(&bad, workdir).unwrap(),
+            ConfirmedSandbox::ReadOnly
+        );
+        bad = ok.clone();
         bad["approvalPolicy"] = json!("never");
         assert!(thread_routing_accepted(&bad, workdir).is_err());
         bad = ok.clone();
@@ -1727,10 +1816,113 @@ mod tests {
     #[test]
     fn experimental_config_overrides_are_rejected() {
         assert!(config_override_allowed("model_reasoning_effort=\"low\""));
+        assert!(config_override_allowed("model=\"gpt-5.4-mini\""));
         assert!(!config_override_allowed(
             "capabilities.experimentalApi=true"
         ));
+        assert!(!config_override_allowed("mcp_servers.other.enabled=true"));
+        assert!(!config_override_allowed("features.js_repl=true"));
+        assert!(!config_override_allowed(
+            "sandbox_mode=\"danger-full-access\""
+        ));
         assert!(!config_override_allowed("model\n=oops"));
         assert!(!config_override_allowed("no-equals"));
+        assert!(!config_override_allowed("model="));
+    }
+
+    #[test]
+    fn acknowledgement_retries_stop_once_the_approval_is_terminal() {
+        assert!(ack_still_pending(None));
+        assert!(ack_still_pending(Some(ApprovalState::Pending)));
+        assert!(ack_still_pending(Some(ApprovalState::Responding)));
+        assert!(ack_still_pending(Some(ApprovalState::RespondedUnacked)));
+        assert!(!ack_still_pending(Some(ApprovalState::Allowed)));
+        assert!(!ack_still_pending(Some(ApprovalState::Denied)));
+        assert!(!ack_still_pending(Some(ApprovalState::Expired)));
+        assert!(!ack_still_pending(Some(ApprovalState::Withdrawn)));
+        assert!(!ack_still_pending(Some(
+            ApprovalState::DeliveredUnconfirmed
+        )));
+    }
+
+    #[tokio::test]
+    async fn missing_turn_event_rolls_the_turn_back_to_idle() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = shardrail_coordinator::DaemonDataDir::open(directory.path()).unwrap();
+        let session_id = Uuid::now_v7();
+        let journal_path = data.journal_path();
+        let mut coordinator = shardrail_coordinator::Coordinator::open(
+            shardrail_journal::Journal::open(&journal_path).unwrap(),
+            session_id,
+        )
+        .unwrap();
+        coordinator
+            .transition(0, "process_started", json!({}), || Ok::<(), io::Error>(()))
+            .unwrap();
+        let (event_generation, _) = tokio::sync::watch::channel(0);
+        let daemon = Arc::new(crate::Daemon {
+            data,
+            journal: tokio::sync::Mutex::new(
+                shardrail_journal::Journal::open(&journal_path).unwrap(),
+            ),
+            event_generation,
+            command_lock: tokio::sync::Mutex::new(()),
+            host_key: ed25519_dalek::SigningKey::from_bytes(&[0xab; 32]),
+            fake_acp_path: None,
+            fake_acp_no_reject: false,
+            fake_acp_disconnect_after_permission: false,
+            approval_timeout_secs: 30,
+            test_write_ahead_delay_ms: 0,
+            approvals: tokio::sync::Mutex::new(HashMap::new()),
+            sessions: tokio::sync::Mutex::new(HashMap::from([(
+                session_id,
+                Arc::new(tokio::sync::Mutex::new(coordinator)),
+            )])),
+            codex: None,
+            codex_status: tokio::sync::Mutex::new(HashMap::new()),
+            turn_commands: tokio::sync::Mutex::new(HashMap::new()),
+        });
+        let (writer, _writer_rx) = mpsc::unbounded_channel();
+        let (approval_tx, _approval_rx) = mpsc::unbounded_channel();
+        let mut run = CodexRun {
+            daemon,
+            session_id,
+            workdir: directory.path().display().to_string(),
+            writer,
+            approval_tx,
+            routes: Arc::new(StdMutex::new(HashMap::new())),
+            thread_id: Some("thread-1".into()),
+            turn_id: None,
+            turns_allowed: true,
+            turn_open: false,
+            process_marked: true,
+            interrupt_when_turn_known: false,
+            next_id: 1,
+            pending: HashMap::new(),
+            approval_by_rpc: HashMap::new(),
+            approval_by_item: HashMap::new(),
+            items: HashMap::new(),
+            sandbox: ConfirmedSandbox::WorkspaceWrite,
+            fail_command_lookup: true,
+        };
+        let (done_tx, done_rx) = oneshot::channel();
+        run.start_turn(Uuid::now_v7(), "first".into(), done_tx)
+            .await;
+        let error = done_rx.await.unwrap().unwrap_err();
+        assert!(error.contains("not committed"), "{error}");
+        assert!(!run.turn_open);
+        assert_eq!(run.turn_state().await, Some(TurnState::Idle));
+
+        run.fail_command_lookup = false;
+        let (done_tx, _done_rx) = oneshot::channel();
+        run.start_turn(Uuid::now_v7(), "second".into(), done_tx)
+            .await;
+        assert!(run.turn_open);
+        assert_eq!(run.turn_state().await, Some(TurnState::Running));
+        assert!(
+            run.pending
+                .values()
+                .any(|pending| matches!(pending, PendingRpc::TurnStart { .. }))
+        );
     }
 }

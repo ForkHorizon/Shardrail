@@ -477,6 +477,7 @@ fn codex_streams_approvals_redacts_and_interrupts() {
             .iter()
             .any(|entry| entry.to_string().contains("acceptForSession"))
     );
+    assert_codex_trace(&trace);
     drop(stream);
     drop(limited_stream);
 }
@@ -577,7 +578,16 @@ fn codex_unknown_request_is_refused() {
     assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
     let refused = next_event(&mut reader, "provider_request_refused");
     assert_eq!(refused["payload"]["method"], "item/tool/requestUserInput");
-    let trace = trace_messages(&dirs.trace);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut trace = trace_messages(&dirs.trace);
+    while Instant::now() < deadline
+        && !trace
+            .iter()
+            .any(|entry| entry["direction"] == "in" && entry["message"]["error"]["code"] == -32601)
+    {
+        thread::sleep(Duration::from_millis(20));
+        trace = trace_messages(&dirs.trace);
+    }
     let error = trace
         .iter()
         .find(|entry| entry["direction"] == "in" && entry["message"]["error"]["code"] == -32601);
@@ -729,4 +739,406 @@ fn codex_daemon_exit_kills_the_child_group() {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(!alive, "codex child {child_pid} survived daemon exit");
+}
+
+#[test]
+fn codex_readonly_network_echo_blocks_turns() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "readonly-network", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let rejected = next_event(&mut reader, "approval_routing_rejected");
+    assert!(
+        rejected["payload"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("sandbox")
+    );
+    let session_id = rejected["session_id"].as_str().unwrap().to_owned();
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "hi"}),
+    );
+    let reply = command_reply(&mut reader);
+    assert_eq!(reply["kind"], "command_rejected");
+    let trace = trace_messages(&dirs.trace);
+    let echoed = trace.iter().find(|entry| {
+        entry["direction"] == "out" && entry["message"]["result"]["sandbox"]["type"] == "readOnly"
+    });
+    let echoed = echoed.expect("missing readOnly echo");
+    assert_eq!(
+        echoed["message"]["result"]["sandbox"]["networkAccess"],
+        true
+    );
+    assert_valid("v2/ThreadStartResponse.json", &echoed["message"]["result"]);
+}
+
+#[test]
+fn codex_mcp_config_override_is_refused() {
+    let data = tempfile::tempdir().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(data.path())
+        .arg("--no-file-log")
+        .arg("--codex-app-server")
+        .arg(fake_program())
+        .arg("--codex-workdir")
+        .arg(data.path())
+        .arg("--codex-config")
+        .arg("mcp_servers.other.enabled=true")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+}
+
+#[test]
+fn codex_invalid_turn_session_rejects_without_dropping_or_stalling() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "slow-turn", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    let other = add_client(dirs.data.path(), "full");
+    let (mut other_stream, mut other_reader) = handshake(dirs.data.path(), &other);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = journal_events(dirs.data.path())
+        .into_iter()
+        .find(|event| event.kind == "session_created")
+        .unwrap()
+        .session_id;
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "slow"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if trace_messages(&dirs.trace)
+            .iter()
+            .any(|entry| entry["direction"] == "in" && entry["message"]["method"] == "turn/start")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let started = Instant::now();
+    send_command(
+        &mut other_stream,
+        "turn.start",
+        json!({"session_id": "not-a-uuid", "prompt": "nope"}),
+    );
+    let rejected = command_reply(&mut other_reader);
+    assert!(
+        started.elapsed() < Duration::from_millis(800),
+        "invalid turn command stalled for {:?}",
+        started.elapsed()
+    );
+    assert_eq!(rejected["kind"], "command_rejected");
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("session_id is invalid")
+    );
+    send_command(
+        &mut other_stream,
+        "turn.interrupt",
+        json!({"session_id": "still-not-a-uuid"}),
+    );
+    let still_open = command_reply(&mut other_reader);
+    assert_eq!(still_open["kind"], "command_rejected");
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+}
+
+#[test]
+fn failed_codex_start_retry_stays_rejected() {
+    let dirs = codex_dirs();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
+        .arg("--data-dir")
+        .arg(dirs.data.path())
+        .arg("--no-file-log")
+        .arg("--codex-app-server")
+        .arg("/usr/bin/false")
+        .arg("--codex-workdir")
+        .arg(dirs.work.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _daemon = DaemonGuard(command.spawn().unwrap());
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    let command_id = send_command(&mut stream, "session.create", json!({}));
+    let first = command_reply(&mut reader);
+    assert_eq!(first["kind"], "command_rejected");
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"request","request":{
+            "command_id": command_id, "kind": "session.create", "expected_state": null,
+            "expected_turn_id": null, "payload": {}
+        }})
+    )
+    .unwrap();
+    let second = command_reply(&mut reader);
+    assert_eq!(second["kind"], "command_rejected");
+    let created = journal_events(dirs.data.path())
+        .into_iter()
+        .filter(|event| event.kind == "session_created")
+        .count();
+    assert_eq!(created, 1);
+}
+
+#[test]
+fn pinned_turn_schema_rejects_a_start_without_thread_id() {
+    let missing = json!({"input": [{"type": "text", "text": "hi"}]});
+    assert!(validate_schema("v2/TurnStartParams.json", &missing).is_err());
+    let present = json!({
+        "threadId": "thread-1",
+        "input": [{"type": "text", "text": "hi"}],
+        "approvalsReviewer": "user",
+        "approvalPolicy": "on-request",
+        "cwd": "/tmp/work",
+        "sandboxPolicy": {"type": "workspaceWrite"}
+    });
+    assert_valid("v2/TurnStartParams.json", &present);
+    let networked = json!({"type": "readOnly", "networkAccess": true});
+    let response = load_schema("v2/ThreadStartResponse.json");
+    validate(
+        &response["definitions"]["SandboxPolicy"],
+        &networked,
+        &response,
+        0,
+    )
+    .expect("readOnly networkAccess true is a legal sandbox echo");
+}
+
+fn schema_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-app-server-0.160.0")
+}
+
+fn load_schema(name: &str) -> Value {
+    let path = schema_root().join(name);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {path:?}: {error}"))
+}
+
+fn assert_valid(name: &str, instance: &Value) {
+    validate_schema(name, instance)
+        .unwrap_or_else(|error| panic!("{name} rejected {instance}: {error}"));
+}
+
+fn validate_schema(name: &str, instance: &Value) -> Result<(), String> {
+    let schema = load_schema(name);
+    validate(&schema, instance, &schema, 0)
+}
+
+fn assert_codex_trace(trace: &[Value]) {
+    let mut methods = std::collections::HashMap::<String, String>::new();
+    for entry in trace {
+        let message = &entry["message"];
+        let direction = entry["direction"].as_str().unwrap_or("");
+        if direction == "in" {
+            if let (Some(method), Some(id)) = (
+                message.get("method").and_then(Value::as_str),
+                message.get("id"),
+            ) {
+                methods.insert(id.to_string(), method.to_owned());
+                match method {
+                    "initialize" => assert_valid("v1/InitializeParams.json", &message["params"]),
+                    "thread/start" => assert_valid("v2/ThreadStartParams.json", &message["params"]),
+                    "turn/start" => assert_valid("v2/TurnStartParams.json", &message["params"]),
+                    "turn/interrupt" => {
+                        assert_valid("v2/TurnInterruptParams.json", &message["params"]);
+                    }
+                    _ => {}
+                }
+            }
+            if message
+                .get("result")
+                .and_then(|value| value.get("decision"))
+                .is_some()
+            {
+                let result = &message["result"];
+                let command =
+                    validate_schema("CommandExecutionRequestApprovalResponse.json", result);
+                let file = validate_schema("FileChangeRequestApprovalResponse.json", result);
+                assert!(
+                    command.is_ok() || file.is_ok(),
+                    "approval result {result} command={command:?} file={file:?}"
+                );
+            }
+        }
+        if direction == "out" {
+            if let Some(method) = message.get("method").and_then(Value::as_str) {
+                match method {
+                    "item/agentMessage/delta" => {
+                        assert_valid("v2/AgentMessageDeltaNotification.json", &message["params"]);
+                    }
+                    "turn/completed" => {
+                        assert_valid("v2/TurnCompletedNotification.json", &message["params"]);
+                    }
+                    "item/commandExecution/requestApproval" => {
+                        assert_valid(
+                            "CommandExecutionRequestApprovalParams.json",
+                            &message["params"],
+                        );
+                    }
+                    "item/fileChange/requestApproval" => {
+                        assert_valid("FileChangeRequestApprovalParams.json", &message["params"]);
+                    }
+                    _ => {}
+                }
+            }
+            if message.get("result").is_some()
+                && message.get("error").is_none()
+                && let Some(method) = message
+                    .get("id")
+                    .and_then(|id| methods.get(&id.to_string()))
+            {
+                match method.as_str() {
+                    "initialize" => {
+                        assert_valid("v1/InitializeResponse.json", &message["result"]);
+                    }
+                    "thread/start" => {
+                        assert_valid("v2/ThreadStartResponse.json", &message["result"]);
+                    }
+                    "turn/start" => assert_valid("v2/TurnStartResponse.json", &message["result"]),
+                    "turn/interrupt" => {
+                        assert_valid("v2/TurnInterruptResponse.json", &message["result"]);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for method in ["initialize", "thread/start", "turn/start", "turn/interrupt"] {
+        assert!(
+            methods.values().any(|seen| seen == method),
+            "trace never sent {method}"
+        );
+    }
+}
+
+fn validate(schema: &Value, instance: &Value, root: &Value, depth: usize) -> Result<(), String> {
+    if depth > 64 {
+        return Err("schema nesting is too deep".into());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return validate(resolve_ref(root, reference)?, instance, root, depth + 1);
+    }
+    if let Some(branches) = schema.get("allOf").and_then(Value::as_array) {
+        for branch in branches {
+            validate(branch, instance, root, depth + 1)?;
+        }
+    }
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array)
+        && !branches
+            .iter()
+            .any(|branch| validate(branch, instance, root, depth + 1).is_ok())
+    {
+        return Err(format!("no anyOf branch matched {instance}"));
+    }
+    if let Some(branches) = schema.get("oneOf").and_then(Value::as_array) {
+        let matches = branches
+            .iter()
+            .filter(|branch| validate(branch, instance, root, depth + 1).is_ok())
+            .count();
+        if matches != 1 {
+            return Err(format!("oneOf matched {matches} branches for {instance}"));
+        }
+    }
+    if let Some(kinds) = schema.get("type")
+        && !type_matches(kinds, instance)
+    {
+        return Err(format!("type {kinds} rejected {instance}"));
+    }
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
+        && !enum_values.iter().any(|item| item == instance)
+    {
+        return Err(format!("enum rejected {instance}"));
+    }
+    if let Some(min) = schema.get("minLength").and_then(Value::as_u64)
+        && instance
+            .as_str()
+            .is_some_and(|text| text.len() < min as usize)
+    {
+        return Err("minLength rejected the string".into());
+    }
+    if let Some(object) = instance.as_object() {
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (key, value) in object {
+                if let Some(property) = properties.get(key) {
+                    validate(property, value, root, depth + 1)
+                        .map_err(|error| format!("{key}: {error}"))?;
+                } else {
+                    match schema.get("additionalProperties") {
+                        Some(Value::Bool(false)) => {
+                            return Err(format!("unexpected property {key}"));
+                        }
+                        Some(extra) if extra.is_object() => {
+                            validate(extra, value, root, depth + 1)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        } else if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
+            && !object.is_empty()
+        {
+            return Err("unexpected properties".into());
+        }
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for key in required {
+                let key = key.as_str().unwrap_or("");
+                if !object.contains_key(key) {
+                    return Err(format!("missing required property {key}"));
+                }
+            }
+        }
+    }
+    if let (Some(items), Some(values)) = (schema.get("items"), instance.as_array()) {
+        for value in values {
+            validate(items, value, root, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_ref<'a>(root: &'a Value, reference: &str) -> Result<&'a Value, String> {
+    let path = reference
+        .strip_prefix("#/")
+        .ok_or_else(|| format!("unsupported schema ref {reference}"))?;
+    let mut cursor = root;
+    for part in path.split('/') {
+        let part = part.replace("~1", "/").replace("~0", "~");
+        cursor = cursor
+            .get(&part)
+            .ok_or_else(|| format!("missing schema ref {reference}"))?;
+    }
+    Ok(cursor)
+}
+
+fn type_matches(kinds: &Value, instance: &Value) -> bool {
+    let mut names = Vec::new();
+    if let Some(list) = kinds.as_array() {
+        names.extend(list.iter().filter_map(Value::as_str));
+    } else if let Some(name) = kinds.as_str() {
+        names.push(name);
+    }
+    names.into_iter().any(|kind| match kind {
+        "object" => instance.is_object(),
+        "array" => instance.is_array(),
+        "string" => instance.is_string(),
+        "boolean" => instance.is_boolean(),
+        "integer" => instance.as_i64().is_some() || instance.as_u64().is_some(),
+        "number" => instance.is_number(),
+        "null" => instance.is_null(),
+        _ => false,
+    })
 }

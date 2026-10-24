@@ -853,7 +853,7 @@ fn codex_config(args: &Args) -> Result<Option<codex_app_server::CodexConfig>, io
         if !codex_app_server::config_override_allowed(item) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "codex config override must be a single-line KEY=VALUE and cannot enable the experimental API",
+                "codex config override must be model or model_reasoning_effort as a single-line KEY=VALUE",
             ));
         }
     }
@@ -2315,7 +2315,26 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 .await
                 .created_session_for_command(client.client_id, request.command_id)
                 .map_err(io::Error::other)?;
-            if let Some((_session_id, event_id)) = existing {
+            if let Some((session_id, event_id)) = existing {
+                if let Some(config) = daemon.codex.clone()
+                    && codex_start_incomplete(&daemon, session_id).await?
+                {
+                    let status =
+                        codex_app_server::start_session(Arc::clone(&daemon), config, session_id)
+                            .await;
+                    if let codex_app_server::CodexStatus::Failed(error) = status {
+                        write_frame(
+                            &outbound,
+                            &DaemonFrame::CommandRejected {
+                                command_id: request.command_id,
+                                error,
+                            },
+                        )
+                        .await?;
+                        push_events(&outbound, &daemon, &mut cursor).await?;
+                        continue;
+                    }
+                }
                 let receipt = daemon
                     .journal
                     .lock()
@@ -2409,6 +2428,19 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             push_events(&outbound, &daemon, &mut cursor).await?;
         }
     }
+}
+
+async fn codex_start_incomplete(daemon: &Daemon, session_id: Uuid) -> io::Result<bool> {
+    let journal = daemon.journal.lock().await;
+    let events = journal
+        .events_for_session(session_id)
+        .map_err(io::Error::other)?;
+    Ok(!events.iter().any(|event| {
+        matches!(
+            event.kind.as_str(),
+            "process_started" | "approval_routing_rejected"
+        )
+    }))
 }
 
 async fn push_events(
