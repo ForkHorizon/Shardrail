@@ -53,7 +53,7 @@ for events in "${sizes[@]}"; do
         temp="$(mktemp -d "${TMPDIR:-/tmp}/shardrail-swift-b4.XXXXXX")"
         result="$results/b4-$name.json"
         rm -f "$result"
-        SHARDRAIL_FAKE_ACP_STREAM_EVENTS="$chunks" "$daemon" --data-dir "$temp" --fake-acp-path "$fake" >"$results/b4-daemon-$name.log" 2>&1 & daemon_pid=$!
+        SHARDRAIL_FAKE_ACP_STREAM_EVENTS="$chunks" "$daemon" --data-dir "$temp" --no-file-log --fake-acp-path "$fake" >"$results/b4-daemon-$name.log" 2>&1 & daemon_pid=$!
         ready=0
         for _ in $(seq 1 200); do [[ -S "$temp/shardraild.sock" ]] && { ready=1; break; }; sleep 0.05; done
         if [[ "$ready" != 1 ]]; then kill_tree "$daemon_pid"; wait "$daemon_pid" 2>/dev/null || true; daemon_pid=""; rm -rf "$temp"; temp=""; printf '{"error":"daemon socket startup timed out","stack":"swift-appkit"}\n' >"$result"; failed=1; continue; fi
