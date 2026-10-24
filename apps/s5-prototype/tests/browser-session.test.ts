@@ -68,6 +68,7 @@ test('resumes from the last cursor without replaying events or sending an approv
   assert.deepEqual(delivered.map((event) => event.cursor), [1, 2, 4, 3, 5]);
   assert.equal(statuses.at(-1), 'connected');
   assert.equal(session.resolveApproval('approval-1', 'allow_once'), 'sent');
+  assert.equal(session.request({ command_id: 'cmd-1', kind: 'turn.interrupt', payload: { session_id: 'session-a' }, expected_state: null, expected_turn_id: null }), 'sent');
   assert.deepEqual(sent, [{ approval_id: 'approval-1', option_id: 'allow_once' }]);
   online = false;
   session.setOnline(false);
@@ -206,6 +207,7 @@ function openSocket(onResolve: (request: { approval_id: string; option_id: strin
     onFrame(listener) { frames.add(listener); return () => frames.delete(listener); },
     onError(listener) { errors.add(listener); return () => errors.delete(listener); },
     resolveApproval(request) { onResolve(request); },
+    request() {},
     close() { errors.forEach((listener) => listener(new Error('daemon WebSocket closed'))); },
     emit(frame) { frames.forEach((listener) => listener(frame)); },
     fail(error) { errors.forEach((listener) => listener(error)); },

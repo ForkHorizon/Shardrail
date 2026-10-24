@@ -1,5 +1,5 @@
 import type { BrowserKeyRecord } from '@shardrail/client/browser';
-import type { DaemonFrame } from '@shardrail/contracts';
+import type { CommandRequest, DaemonFrame } from '@shardrail/contracts';
 import type { JournalEvent } from './session-model';
 
 export type ConnectionPhase = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'key-changed';
@@ -11,6 +11,7 @@ export interface SessionSocket {
   onFrame(listener: (frame: DaemonFrame) => void): () => void;
   onError(listener: (error: Error) => void): () => void;
   resolveApproval(request: { approval_id: string; option_id: string }): void;
+  request(request: CommandRequest): void;
   close(): void;
 }
 
@@ -33,6 +34,7 @@ export interface BrowserSession {
   stop(): void;
   setOnline(online: boolean): void;
   resolveApproval(approvalId: string, optionId: string): 'sent' | 'blocked';
+  request(request: CommandRequest): 'sent' | 'blocked';
 }
 
 export function reconnectDelayMs(attempt: number) {
@@ -206,6 +208,15 @@ export function createBrowserSession(options: BrowserSessionOptions): BrowserSes
       if (stopped || phase !== 'connected' || !active || !approvalId || !optionId) return 'blocked';
       try {
         active.resolveApproval({ approval_id: approvalId, option_id: optionId });
+        return 'sent';
+      } catch {
+        return 'blocked';
+      }
+    },
+    request(request) {
+      if (stopped || phase !== 'connected' || !active) return 'blocked';
+      try {
+        active.request(request);
         return 'sent';
       } catch {
         return 'blocked';

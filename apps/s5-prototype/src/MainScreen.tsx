@@ -9,13 +9,16 @@ import { UntrustedMarkdown } from './UntrustedMarkdown';
 
 const checklist = checklistSummary();
 
-export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, onReconnect, onResolveApproval }: {
+export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, onReconnect, onResolveApproval, onSendPrompt, onInterrupt }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
   approvalInFlight: ReadonlySet<string>;
   approvalError: string | null;
+  promptError: string | null;
   onReconnect: () => void;
   onResolveApproval: (approvalId: string, optionId: string) => void;
+  onSendPrompt: (sessionId: string, prompt: string) => void;
+  onInterrupt: (sessionId: string) => void;
 }) {
   const events = useSessionJournalEvents();
   const sessions = useMemo(() => sessionSummaries(events), [events]);
@@ -51,6 +54,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
       <section className="session-detail" aria-labelledby="events-heading">
         <h2 id="events-heading">{selected ? `Events for ${selected.id}` : 'Events'}</h2>
         {selected ? <SessionTranscript key={selected.id} sessionId={selected.id} items={items}/> : <p>Select a session.</p>}
+        {selected ? <PromptBox sessionId={selected.id} error={promptError} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
         {selected ? <VerificationChecklist/> : null}
         {selected ? <Approvals cards={approvals} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval}/> : null}
       </section>
@@ -91,6 +95,25 @@ function SessionEvent({ event }: { event: TranscriptItem }) {
     <div className="meta"><b>{event.kind}</b><span>{event.cursorLabel}</span>{iso ? <time dateTime={iso}>{new Date(event.occurredAtMs).toLocaleTimeString()}</time> : null}</div>
     {event.markdown !== null ? <div className="body"><UntrustedMarkdown source={event.markdown}/></div> : <pre className="body">{event.plain}</pre>}
   </article>;
+}
+
+function PromptBox({ sessionId, error, onSend, onInterrupt }: {
+  sessionId: string;
+  error: string | null;
+  onSend: (sessionId: string, prompt: string) => void;
+  onInterrupt: (sessionId: string) => void;
+}) {
+  const [text, setText] = useState('');
+  return <section className="prompt" aria-labelledby="prompt-heading">
+    <h2 id="prompt-heading">Prompt</h2>
+    {error ? <p role="alert">{error}</p> : null}
+    <label htmlFor="session-prompt">Prompt</label>
+    <textarea id="session-prompt" value={text} onChange={(event) => setText(event.currentTarget.value)}/>
+    <div className="controls">
+      <Button isDisabled={text.trim() === ''} onPress={() => { const prompt = text.trim(); if (!prompt) return; onSend(sessionId, prompt); setText(''); }}>Send prompt</Button>
+      <Button onPress={() => onInterrupt(sessionId)}>Interrupt</Button>
+    </div>
+  </section>;
 }
 
 function VerificationChecklist() {
