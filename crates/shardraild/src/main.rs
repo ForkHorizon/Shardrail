@@ -190,6 +190,11 @@ async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
             task.abort();
         }
     }
+    drop(approvals);
+    // Chunk wakes can run before approval acknowledgement and process exit.
+    daemon
+        .event_generation
+        .send_modify(|generation| *generation += 1);
 }
 
 async fn run_fake_acp_inner(
@@ -349,13 +354,16 @@ async fn run_fake_acp_inner(
         .as_str()
         .unwrap_or("unknown")
         .to_owned();
-    let details = json!({
+    let mut details = json!({
         "approval_id": approval_id,
         "approval_kind": kind,
         "tool_call_id": params["toolCall"]["toolCallId"],
         "options": options.iter().zip(provider_options.iter()).map(|(raw, option)| json!({"option_id":option.id,"name":raw["name"],"decision":option.decision,"class":option.class})).collect::<Vec<_>>(),
         "agent_description": {"title":params["toolCall"]["title"],"description":params["description"],"reason":params["reason"]},
     });
+    if let Some(object) = details.as_object_mut() {
+        object.extend(disclosed_action(params));
+    }
     daemon
         .journal
         .lock()
@@ -440,6 +448,12 @@ async fn run_fake_acp_inner(
                 break;
             }
         }
+        daemon
+            .event_generation
+            .send_modify(|generation| *generation += 1);
+        // The fixture waits on stdin after the prompt reply. Close it so the
+        // process can exit and the terminal lifecycle events can be journaled.
+        drop(input);
     }
     let _ = child.wait().await?;
     let coordinator = daemon
@@ -527,6 +541,78 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
             daemon_log::log("ERROR", "approval", "expiry failed closed");
         }
     }
+}
+
+fn disclosed_action(params: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let mut action = serde_json::Map::new();
+    let tool = &params["toolCall"];
+    if let Some(command) =
+        nonempty_text(&tool["command"]).or_else(|| nonempty_text(&params["command"]))
+    {
+        action.insert("command".into(), json!(command));
+    }
+    if let Some(argv) = string_list(&tool["argv"]).or_else(|| string_list(&tool["args"])) {
+        action.insert("argv".into(), serde_json::Value::Array(argv));
+    }
+    if let Some(raw_input) = disclosed_json(&tool["rawInput"]) {
+        action.insert("raw_input".into(), raw_input);
+    }
+    if let Some(cwd) = nonempty_text(&tool["cwd"]).or_else(|| nonempty_text(&params["cwd"])) {
+        action.insert("cwd".into(), json!(cwd));
+    }
+    if let Some(locations) = disclosed_json(&tool["locations"]) {
+        action.insert("locations".into(), locations);
+    }
+    if let Some(changes) =
+        disclosed_json(&tool["changes"]).or_else(|| disclosed_json(&params["changes"]))
+    {
+        action.insert("changes".into(), changes);
+    }
+    if let Some(network) =
+        nonempty_text(&tool["network"]).or_else(|| nonempty_text(&params["network"]))
+    {
+        action.insert("network".into(), json!(network));
+    }
+    if let Some(sandbox) =
+        nonempty_text(&tool["sandbox"]).or_else(|| nonempty_text(&params["sandbox"]))
+    {
+        action.insert("sandbox".into(), json!(sandbox));
+    }
+    action
+}
+
+fn nonempty_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn string_list(value: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let items = value.as_array()?;
+    if items.is_empty()
+        || !items
+            .iter()
+            .all(|item| item.as_str().is_some_and(|text| !text.is_empty()))
+    {
+        return None;
+    }
+    Some(items.clone())
+}
+
+fn disclosed_json(value: &serde_json::Value) -> Option<serde_json::Value> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(text) = value.as_str() {
+        return (!text.is_empty()).then(|| value.clone());
+    }
+    if value.as_array().is_some_and(Vec::is_empty)
+        || value.as_object().is_some_and(|object| object.is_empty())
+    {
+        return None;
+    }
+    Some(value.clone())
 }
 
 fn classify_option(kind: &str) -> OptionClass {
@@ -2359,6 +2445,42 @@ mod tests {
             code,
             public_key,
         }
+    }
+
+    #[test]
+    fn disclosed_action_keeps_machine_fields_and_drops_agent_text() {
+        let params = serde_json::json!({
+            "cwd": "/tmp/work",
+            "toolCall": {
+                "title": "Run tests (safe)",
+                "command": "curl",
+                "argv": ["curl", "https://example.test"],
+                "rawInput": {"cmd": "curl"},
+                "sandbox": "workspace-write"
+            }
+        });
+        let action = disclosed_action(&params);
+        assert_eq!(
+            action.get("command").and_then(|value| value.as_str()),
+            Some("curl")
+        );
+        assert_eq!(
+            action.get("cwd").and_then(|value| value.as_str()),
+            Some("/tmp/work")
+        );
+        assert_eq!(
+            action.get("sandbox").and_then(|value| value.as_str()),
+            Some("workspace-write")
+        );
+        assert!(action.get("title").is_none());
+        assert_eq!(
+            action
+                .get("argv")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(disclosed_action(&serde_json::json!({"toolCall": {"title": "Run fixture command", "kind": "execute"}})).is_empty());
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 type State = { baseUrl: string; dataDir: string; clientId: string; publicKey: string; privateKey: string; hostPublicKey: string; hostFingerprint: string; daemonPid: number; assetsDir: string; browserPort: string };
 const stateFile = process.env.SHARDRAIL_E2E_STATE ?? join(tmpdir(), 'shardrail-browser-e2e-state.json');
@@ -22,7 +22,8 @@ async function stopDaemon(pid: number) {
 
 async function startDaemon() {
   const binary = process.env.SHARDRAILD_BIN ?? '../../target/debug/shardraild';
-  const daemon = spawn(binary, ['--data-dir', state.dataDir, '--no-file-log', '--browser-listen', `127.0.0.1:${state.browserPort}`, '--browser-assets-dir', state.assetsDir], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const fakeAcp = process.env.SHARDRAIL_FAKE_ACP_BIN ?? join(dirname(binary), 'shardrail-fake-acp');
+  const daemon = spawn(binary, ['--data-dir', state.dataDir, '--no-file-log', '--browser-listen', `127.0.0.1:${state.browserPort}`, '--browser-assets-dir', state.assetsDir, '--fake-acp-path', fakeAcp], { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   try {
     await new Promise<void>((resolve, reject) => {

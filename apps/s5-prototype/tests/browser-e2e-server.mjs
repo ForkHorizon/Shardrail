@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const binary = resolve(process.env.SHARDRAILD_BIN ?? '../../target/debug/shardraild');
+const fakeAcp = resolve(process.env.SHARDRAIL_FAKE_ACP_BIN ?? join(dirname(binary), 'shardrail-fake-acp'));
 const stateFile = process.env.SHARDRAIL_E2E_STATE;
 if (!stateFile) throw new Error('SHARDRAIL_E2E_STATE is required');
 const dataDir = await mkdtemp(join(tmpdir(), 'shardrail-browser-e2e-'));
@@ -26,6 +27,7 @@ const daemon = spawn(binary, [
   '--no-file-log',
   '--browser-listen', '127.0.0.1:0',
   '--browser-assets-dir', dist,
+  '--fake-acp-path', fakeAcp,
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
 let stopping = false;
 let stderr = '';

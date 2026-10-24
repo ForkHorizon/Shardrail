@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { measureAfterPaint } from './metrics-utils';
+import { ingestJournalEvents, type JournalEvent } from './session-model';
 import { hashContent } from './streaming-view';
 
 export type EventRow = { id: number; agent: number; kind: 'message' | 'tool' | 'approval'; text: string; contentHash: string; contentVersion: number; command: string; cwd: string; at: number };
@@ -60,6 +61,14 @@ export function setDaemonWindow(start: number, total: number, values: { cursor: 
   notify();
 }
 let windowVersion = 0;
+let sessionEvents: JournalEvent[] = [];
+const sessionCursors = new Set<number>();
+let pendingJournal: JournalEvent[] = [];
+const pendingCursors = new Set<number>();
+let journalEpoch: string | null = null;
+let journalGeneration = 0;
+export const sessionJournalEvents = () => sessionEvents;
+export const useSessionJournalEvents = () => { useSyncExternalStore(subscribe, () => revision, () => revision); return sessionEvents; };
 export function applyPendingUpdates(current: EventRow[], indexById: Map<number, number>, updates: EventRow[]) {
   if (!updates.length) return current;
   const next = [...current];
@@ -82,6 +91,12 @@ export function reset(count: number, streams: number, seedRows = true) {
   liveTail = true;
   rowIndexById = new Map(rows.map((row, index) => [row.id, index]));
   pending = new Map();
+  sessionEvents = [];
+  sessionCursors.clear();
+  pendingJournal = [];
+  pendingCursors.clear();
+  journalEpoch = null;
+  journalGeneration += 1;
   receivedAt.clear();
   scheduledLatency.clear();
   activeMessageByAgent.clear();
@@ -92,10 +107,29 @@ export function reset(count: number, streams: number, seedRows = true) {
   generatedTokens = 0;
   notify();
 }
+export function observeJournalEpoch(epoch: string) {
+  if (epoch.length === 0 || epoch === journalEpoch) return false;
+  const previous = journalEpoch;
+  journalEpoch = epoch;
+  if (previous === null) return false;
+  journalGeneration += 1;
+  sessionEvents = [];
+  sessionCursors.clear();
+  pendingJournal = [];
+  pendingCursors.clear();
+  pending = new Map();
+  if (raf !== 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(raf);
+  raf = 0;
+  notify();
+  return true;
+}
 export function setDaemonClockMapping(offsetMs: number, uncertaintyMs: number) { pageClockOffsetMs = offsetMs; pageClockUncertaintyMs = uncertaintyMs; }
 export function setDaemonAgentCount(count: number) { daemonAgentCount = Math.max(1, count); }
 export function daemonClockMapping() { return { offsetMs: pageClockOffsetMs, uncertaintyMs: pageClockUncertaintyMs }; }
-export function applyDaemonEvent(cursor: number, event: { session_id: string; kind: string; payload: unknown }, receiptWallClockMs: number | null | undefined) {
+export function applyDaemonEvent(cursor: number, event: { session_id: string; kind: string; payload: unknown; occurred_at_ms?: number }, receiptWallClockMs: number | null | undefined) {
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || sessionCursors.has(cursor) || pendingCursors.has(cursor)) return 1_000_000_000 + cursor;
+  pendingCursors.add(cursor);
+  pendingJournal.push({ cursor, sessionId: event.session_id, kind: event.kind, occurredAtMs: event.occurred_at_ms ?? 0, payload: event.payload });
   if (event.kind === 'agent_message_chunk') daemonAgentChunkCount++;
   const agent = daemonAgents.get(event.session_id) ?? daemonAgentNext++ % Math.max(1, daemonAgentCount);
   daemonAgents.set(event.session_id, agent);
@@ -112,10 +146,21 @@ export function applyDaemonEvent(cursor: number, event: { session_id: string; ki
     }
   }
   pending.set(id, row);
+  const scheduledGeneration = journalGeneration;
   if (!raf) raf = requestAnimationFrame(() => {
+    raf = 0;
+    if (scheduledGeneration !== journalGeneration) return;
+    const journal = pendingJournal;
+    pendingJournal = [];
+    pendingCursors.clear();
+    if (journal.length) {
+      sessionEvents = ingestJournalEvents(sessionEvents, journal).events as JournalEvent[];
+      for (const item of journal) sessionCursors.add(item.cursor);
+    }
     rows = applyPendingUpdates(rows, rowIndexById, [...pending.values()]);
     rowTotal = rows.length;
-    pending = new Map(); raf = 0; notify();
+    pending = new Map();
+    notify();
   });
   return id;
 }

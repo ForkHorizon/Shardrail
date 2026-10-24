@@ -309,6 +309,21 @@ fn read_json(reader: &mut BufReader<UnixStream>) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+fn try_read_json(reader: &mut BufReader<UnixStream>) -> Option<Value> {
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => None,
+        Ok(_) => Some(serde_json::from_str(&line).unwrap()),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            None
+        }
+        Err(error) => panic!("read failed: {error}"),
+    }
+}
+
 fn handshake(
     path: &Path,
     epoch: Option<Uuid>,
@@ -1124,6 +1139,9 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
         "Run fixture command"
     );
     assert!(approval.get("title").is_none());
+    assert!(approval.get("command").is_none());
+    assert!(approval.get("argv").is_none());
+    assert!(approval.get("cwd").is_none());
     let _ = next_approval(&mut limited_reader);
     let approval_id = approval["approval_id"].clone();
 
@@ -1263,6 +1281,45 @@ fn limited_client_can_choose_once_option() {
         );
         thread::sleep(Duration::from_millis(10));
     }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn fake_agent_terminal_events_reach_a_live_client() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    send_resolution(&mut stream, &approval["approval_id"], "allow_once");
+    assert_eq!(read_json(&mut reader)["kind"], "approval_resolved");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut kinds = Vec::new();
+    while Instant::now() < deadline {
+        match try_read_json(&mut reader) {
+            Some(frame) => {
+                if frame["kind"] == "durable_event" {
+                    kinds.push(frame["event"]["kind"].as_str().unwrap().to_owned());
+                }
+                if kinds.iter().any(|kind| kind == "process_exited")
+                    && kinds.iter().any(|kind| kind == "allowed")
+                {
+                    break;
+                }
+            }
+            None => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    assert!(
+        kinds.iter().any(|kind| kind == "allowed"),
+        "live client missed allowed: {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| kind == "process_exited"),
+        "live client missed process_exited: {kinds:?}"
+    );
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
