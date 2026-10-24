@@ -190,19 +190,25 @@ impl Logger {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let mut total = 0;
-        for index in (1..FILE_COUNT).rev() {
+        // Index 1 is the newest rotated file. Drop oldest generations until the
+        // rotated files leave a full active file of room under the total cap.
+        let budget = FILE_LIMIT * (FILE_COUNT - 1) as u64;
+        let mut generations = Vec::new();
+        for index in 1..FILE_COUNT {
             let path = directory.join(format!("shardraild.log.{index}"));
             match fs::metadata(&path) {
-                Ok(metadata) => {
-                    total += metadata.len();
-                    if total > FILE_LIMIT * (FILE_COUNT - 1) as u64 {
-                        fs::remove_file(path)?;
-                    }
-                }
+                Ok(metadata) => generations.push((path, metadata.len())),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
+        }
+        let mut total = generations.iter().map(|(_, len)| *len).sum::<u64>();
+        while total > budget {
+            let Some((path, len)) = generations.pop() else {
+                break;
+            };
+            fs::remove_file(path)?;
+            total = total.saturating_sub(len);
         }
         Ok(())
     }
@@ -684,10 +690,16 @@ mod tests {
         )
         .unwrap();
         logger.log("INFO", "test", "cap marker");
+        let active = fs::read_to_string(dir.path().join("shardraild.log")).unwrap();
+        assert!(active.contains("cap marker"));
+        let rotated = fs::read(dir.path().join("shardraild.log.1")).unwrap();
+        assert!(rotated.starts_with(b"xxxx"));
+        assert!(!dir.path().join("shardraild.log.2").exists());
         let total = fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().metadata().unwrap().len())
             .sum::<u64>();
         assert!(total <= FILE_LIMIT * FILE_COUNT as u64);
+        assert!(total >= FILE_LIMIT);
     }
 }
