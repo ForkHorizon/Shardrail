@@ -23,7 +23,7 @@ async function stopDaemon(pid: number) {
 async function startDaemon() {
   const binary = process.env.SHARDRAILD_BIN ?? '../../target/debug/shardraild';
   const fakeAcp = process.env.SHARDRAIL_FAKE_ACP_BIN ?? join(dirname(binary), 'shardrail-fake-acp');
-  const daemon = spawn(binary, ['--data-dir', state.dataDir, '--browser-listen', `127.0.0.1:${state.browserPort}`, '--browser-assets-dir', state.assetsDir, '--fake-acp-path', fakeAcp], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const daemon = spawn(binary, ['--data-dir', state.dataDir, '--no-file-log', '--browser-listen', `127.0.0.1:${state.browserPort}`, '--browser-assets-dir', state.assetsDir, '--fake-acp-path', fakeAcp], { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   try {
     await new Promise<void>((resolve, reject) => {
