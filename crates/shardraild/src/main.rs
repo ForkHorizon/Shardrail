@@ -180,6 +180,11 @@ async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
             task.abort();
         }
     }
+    drop(approvals);
+    // Chunk wakes can run before approval acknowledgement and process exit.
+    daemon
+        .event_generation
+        .send_modify(|generation| *generation += 1);
 }
 
 async fn run_fake_acp_inner(
@@ -430,6 +435,9 @@ async fn run_fake_acp_inner(
                 break;
             }
         }
+        // The fixture waits on stdin after the prompt reply. Close it so the
+        // process can exit and the terminal lifecycle events can be journaled.
+        drop(input);
     }
     let _ = child.wait().await?;
     let coordinator = daemon
