@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import { test, expect, type Page } from '@playwright/test';
 import { connect } from '@shardrail/client';
 import { execFileSync, spawn } from 'node:child_process';
@@ -100,7 +101,7 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await deny.click();
   const approval = page.getByRole('article', { name: /Approval/ });
   await expect(approval).toContainText(/responded_unacked|denied/);
-  await expect(approval).not.toContainText(/\ballowed\b/);
+  await expect(approval).not.toContainText(/\ballowed\b/, { useInnerText: true });
   await expect(option).toContainText(/exited/i, { timeout: 15_000 });
 
   let previous = -1;
@@ -131,4 +132,51 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('heading', { name: /Events for / })).toBeVisible();
   await expect.poll(() => eventCount(page)).toBeGreaterThan(settled);
+});
+
+test('allow once stays pending until a second confirmation and the journal, and a dropped socket does not allow', async ({ page }) => {
+  await pair(page);
+  const sessionId = await createSession();
+  const option = page.getByRole('option', { name: new RegExp(sessionId) });
+  await option.focus();
+  const approval = page.getByRole('article', { name: /Approval/ });
+  await expect(approval).toContainText('action not disclosed by provider');
+  await expect(page.getByRole('status').filter({ hasText: 'approvals not protected' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible();
+  const allow = page.getByRole('button', { name: 'Allow once' });
+  await expect(allow).toBeEnabled();
+  await allow.click();
+  await expect(approval).toContainText('pending');
+  await expect(approval).not.toContainText(/\ballowed\b/, { useInnerText: true });
+  await page.getByRole('button', { name: 'Confirm allow once' }).click();
+  await expect(approval).toContainText(/\ballowed\b/, { timeout: 15_000, useInnerText: true });
+
+  const blockedId = await createSession();
+  await page.getByRole('option', { name: new RegExp(blockedId) }).focus();
+  await expect(page.getByRole('heading', { name: `Events for ${blockedId}` })).toBeVisible();
+  const blocked = page.getByRole('article', { name: /Approval/ });
+  await expect(blocked.getByRole('button', { name: 'Allow once' })).toBeEnabled();
+  await stopDaemon(state.daemonPid);
+  await expect(page.getByText('Reconnecting · browser WebSocket')).toBeVisible();
+  await blocked.getByRole('button', { name: 'Allow once' }).click();
+  await blocked.getByRole('button', { name: 'Confirm allow once' }).click();
+  await expect(page.getByRole('alert')).toContainText(/not allowed|not confirmed/);
+  await expect(blocked).not.toContainText(/\ballowed\b/, { useInnerText: true });
+  await startDaemon();
+  await page.getByRole('button', { name: 'Reconnect' }).click();
+  await expect(page.getByText('Connected · browser WebSocket')).toBeVisible({ timeout: 15_000 });
+  await expect(blocked).toContainText(/withdrawn/, { timeout: 15_000 });
+  await expect(blocked).not.toContainText(/\ballowed\b/, { useInnerText: true });
+  await expect(blocked.getByRole('button', { name: 'Allow once' })).toHaveCount(0);
+  await expect(blocked.getByRole('button', { name: 'Confirm allow once' })).toHaveCount(0);
+});
+
+test('the paired main screen has no axe violations', async ({ page }) => {
+  await pair(page);
+  const sessionId = await createSession();
+  await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
+  await expect(page.getByText('fake streamed response 0')).toHaveCount(1);
+  await expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible();
+  const violations = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
+  expect(violations, violations.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);
 });

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { daemonReceiptToRafMs, getRows, getRowStart, markDaemonRowsCommitted, reset, rowCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, subscribe } from '../src/store';
 import { coalesceChannelFrame, hashContent, liveTailWindowSize, markdownCacheKey, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from '../src/streaming-view';
-import { UntrustedMarkdown } from '../src/UntrustedMarkdown';
+import { confirmAgentLink, isConfirmableAgentLink, UntrustedMarkdown } from '../src/UntrustedMarkdown';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -62,6 +62,20 @@ describe('S5 streaming view', () => {
     expect(sameMarkdownVersion({ rowId: 12, contentHash: hash, contentVersion: 0, source: 'same markdown' }, { rowId: 12, contentHash: hash, contentVersion: 0, source: 'same markdown' })).toBe(true);
     expect(sameMarkdownVersion({ rowId: 12, contentHash: hash, contentVersion: 0, source: 'same markdown' }, { rowId: 12, contentHash: hash, contentVersion: 0, source: 'changed' })).toBe(false);
     expect(sameMarkdownVersion({ rowId: 12, contentHash: hash, contentVersion: 0, source: 'same markdown' }, { rowId: 12, contentHash: hash, contentVersion: 1, source: 'same markdown' })).toBe(false);
+  });
+
+  it('confirms http links and blocks aux clicks that skip confirmation', () => {
+    expect(isConfirmableAgentLink('https://example.com/path')).toBe(true);
+    expect(isConfirmableAgentLink('javascript:alert(1)')).toBe(false);
+    expect(isConfirmableAgentLink('/relative')).toBe(false);
+    let opened = '';
+    const event = { preventDefault() { opened = 'prevented'; } };
+    confirmAgentLink(event, 'https://example.com/a', () => false, (url) => { opened = url; });
+    expect(opened).toBe('prevented');
+    confirmAgentLink({ preventDefault() {} }, 'https://example.com/a', () => true, (url) => { opened = url; });
+    expect(opened).toBe('https://example.com/a');
+    confirmAgentLink({ preventDefault() {} }, 'javascript:alert(1)', () => true, (url) => { opened = url; });
+    expect(opened).toBe('https://example.com/a');
   });
 
   it('keeps hostile HTML, script URLs, and remote images sanitized', () => {
