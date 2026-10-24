@@ -33,7 +33,7 @@ for events in "${event_sizes[@]}"; do
         name="$temperature-$events-$streams-r$repetition"
         : >"$results_dir/b4-$name.json"
         temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/shardrail-b4.XXXXXX")
-        SHARDRAIL_FAKE_ACP_STREAM_EVENTS="$chunks" "$daemon_bin" --data-dir "$temp_dir" --fake-acp-path "$fake_bin" >"$results_dir/b4-daemon-$name.log" 2>&1 &
+        SHARDRAIL_FAKE_ACP_STREAM_EVENTS="$chunks" "$daemon_bin" --data-dir "$temp_dir" --no-file-log --fake-acp-path "$fake_bin" >"$results_dir/b4-daemon-$name.log" 2>&1 &
         daemon_pid=$!
         ps -Ao pid=,command= | awk '/com\.apple\.WebKit\.(WebContent|Networking|GPU)( |$)/ { print $1 }' >"$temp_dir/webkit-before.txt"
         S5_CLIENT_DATA_DIR="$temp_dir" S5_SHARDRAIL_DATA_DIR="$temp_dir" SHARDRAIL_DAEMON="$daemon_bin" S5_BENCH_QUERY="events=$events&streams=$streams&duration=6000&autostart=0&autobench=1&run=$name&temperature=$temperature&b4=1" "$app" >"$results_dir/b4-app-$name.log" 2>&1 &

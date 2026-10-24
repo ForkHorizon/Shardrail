@@ -23,6 +23,7 @@ if (!hostPublicKey || !hostFingerprint) throw new Error('shardraild did not repo
 const dist = resolve(process.env.SHARDRAIL_E2E_ASSETS_DIR ?? 'dist');
 const daemon = spawn(binary, [
   '--data-dir', dataDir,
+  '--no-file-log',
   '--browser-listen', '127.0.0.1:0',
   '--browser-assets-dir', dist,
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
