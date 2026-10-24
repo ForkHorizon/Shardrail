@@ -1,6 +1,6 @@
 # 18 — Browser-First Roadmap
 
-**Owner direction D66 (2026-10-23):** Phase 1 targets the React UI in a normal browser connected to the local daemon. Tauri, mobile and other platforms are later ports of the same UI. This plan covers only the local loopback browser path; it does not add remote browser access.
+**Owner direction D66 (2026-10-23):** Phase 1 targets the React UI in a normal browser connected to the local daemon. Tauri, mobile and other platforms are later ports of the same UI. **D67 (2026-10-24)** adds multi-machine and phone-browser access as later product scope; it does not change the current local Phase 1.
 
 ## Sequence
 
@@ -9,6 +9,8 @@
 3. **S2, S5 and S9-lite.** Continue the already authorized core spikes. Reuse S5 measurements; record B4 as deferred debt, not a gate to starting the product slice.
 4. **P1a browser slice.** Deliver the daemon, journal, Codex adapter and the primary inbox/session UI over the browser connection. Keep the existing honest approval banner/checklist and provider-reported diffs/files. Tauri shell work remains a later desktop port.
 5. **Later ports.** Add the Tauri shell around the same React UI when desktop-specific features are needed; mobile and other platforms remain at their existing later phase gates.
+6. **Later multi-machine step (D67):** run the same daemon on the M1 MacBook home server and reach it first through the existing SSH stdio bridge from the laptop/browser client. This is later than the current local Phase 1 and belongs with P2/E2.2.
+7. **Later hub candidate (D67):** evaluate a hub/relay on Daliys's purchased server, with outbound authenticated daemon connections and phone/laptop browsers connecting to it. This is a candidate requiring design and a security spike before commitment; it does not exist in the current design. Phone browser via hub is one candidate under D28 alongside PWA via mesh VPN/SSH.
 
 ## Reuse and new work
 

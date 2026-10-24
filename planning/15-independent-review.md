@@ -233,7 +233,7 @@
 | §5 budgets / measurement load | addressed | 07 gates (P1a: B4, B7; B1/B3 observed), measurement note |
 | §6.1–6.3 P1a′, deferrals, spikes | addressed | 10 §1–§3 |
 | §6.4 providers in P1 | addressed — owner 2026-10-19: Hermes not in Phase 1 (D48); Claude terms resolved by D29/D45, placement per S4 | 10 P1c/P1d, 12 D48, 13 §1a |
-| §6.5 delivery-table and badge simplification; cutting mobile/browser/federation/F15 from v1 | deferred | needs owner scope decision; 05 §5/§7 and 01 scope unchanged |
+| §6.5 delivery-table and badge simplification; cutting mobile/browser/federation/F15 from v1 | owner scope decision recorded (D66/D67) | Browser is Phase 1 (D66); multi-host and phone access are later product scope, with M1 via SSH first and hub only a candidate (D67); P2/P3 remain in 10 |
 | §6.6 doc freshness | addressed | 13 tensions, 00 next steps |
 | §7 U13 recommendation | **resolved by owner (2026-10-18): Rust**; C#/.NET and Go rejected, no dual prototype | 12 D1 (owner-approved), 13 §1a, 02 §8 |
 | §7 U8 recommendation | **resolved by owner (2026-10-18): React 19 + TS strict + Vite SPA + React Aria + TanStack Virtual; retained under D49 on 2026-10-23 after W4-m Tauri/Swift comparison**; delivery-path work comes next | 12 D3/D49, 13 §1a, 02 §8, 08 §6, 16 |

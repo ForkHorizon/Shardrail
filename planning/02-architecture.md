@@ -99,6 +99,8 @@ Escalating a cancel to process termination on a shared process requires user con
 - On shared multi-user Linux hosts, prefer the SSH bridge over browser loopback access.
 - **Multi-host:** the client holds one connection per host and federates sessions keyed by `(host_id, session_id)` with a cursor per host. There is no daemon-to-daemon replication. The attention inbox is a client view.
 - **Mobile:** decided at the start of the mobile phase (D28): candidates are a PWA through a user-managed mesh VPN or SSH, with Web Push for approval notifications, a Tauri Android shell, or a small Kotlin WebView shell.
+- **Later multi-machine direction (D67):** first add the same daemon on the M1 home server and connect from the laptop/browser through the existing SSH stdio bridge. A hub/relay on Daliys's purchased server is a **candidate**, not a committed design: each daemon would make an outbound authenticated connection; browsers would connect to the hub; the hub would forward opaque traffic while the existing transcript-bound Ed25519 handshake and daemon host-key pinning remain end to end. SSH remains supported as a direct transport. See 06 §13 for security requirements and open questions.
+- **Browser assets (D68 candidate):** recommendation is to embed the built UI assets in `shardraild` so they match the daemon version, while retaining the explicit assets-path flag as a developer override. This is not yet owner-confirmed.
 
 ## 7. Data ownership
 
@@ -113,6 +115,8 @@ Escalating a cancel to process termination on a shared process requires user con
 The daemon never copies provider home directories into its database. After a crash it asks the provider (`thread/resume`, `session/resume`/`session/load`) rather than replaying from its own copy; its own history is for display when the provider is gone.
 
 Data dirs: macOS `~/Library/Application Support/Shardrail/`; Linux `$XDG_DATA_HOME/shardrail/`. Nothing is written into provider directories except what providers write themselves.
+
+**Install and logs (D68, owner-agreed 2026-10-24):** install the macOS desktop app in a normal app location (for example `/Applications/Shardrail.app`) and the daemon in a standard bin/Homebrew prefix; data stays under `~/Library/Application Support/Shardrail/`, logs under `~/Library/Logs/Shardrail/`. Linux uses the XDG equivalents. The current browser-first daemon has no file-log setup and only accepts browser assets through `--browser-assets-dir`; implementation follow-up is in 10 §4.
 
 ## 8. Technology choices
 
