@@ -10,7 +10,7 @@
 4. **P1a browser slice.** Deliver the daemon, journal, Codex adapter and the primary inbox/session UI over the browser connection. Keep the existing honest approval banner/checklist and provider-reported diffs/files. Tauri shell work remains a later desktop port.
 5. **Later ports.** Add the Tauri shell around the same React UI when desktop-specific features are needed; mobile and other platforms remain at their existing later phase gates.
 6. **Later multi-machine step (D67):** run the same daemon on the M1 MacBook home server and reach it first through the existing SSH stdio bridge from the laptop/browser client. This is later than the current local Phase 1 and belongs with P2/E2.2.
-7. **Later hub candidate (D67):** evaluate a hub/relay on Daliys's purchased server, with outbound authenticated daemon connections and phone/laptop browsers connecting to it. This is a candidate requiring design and a security spike before commitment; it does not exist in the current design. Phone browser via hub is one candidate under D28 alongside PWA via mesh VPN/SSH.
+7. **Later hub candidate (D67, D69):** evaluate a hub/relay on Daliys's purchased server, with outbound daemon connections and phone/laptop browsers connecting to it. D69 resolves payload confidentiality: relayed traffic uses end-to-end AEAD and hub-stored history is encrypted blobs only. Hub-visible metadata remains open and needs a design/security spike before commitment; it does not exist in the current design. Phone browser via hub is one candidate under D28 alongside PWA via mesh VPN/SSH.
 
 ## Reuse and new work
 
