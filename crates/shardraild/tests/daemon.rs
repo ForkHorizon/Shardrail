@@ -56,16 +56,48 @@ fn start_daemon(path: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(path)
+        .arg("--no-file-log")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap()
 }
 
+#[test]
+fn daemon_startup_writes_to_log_directory_override() {
+    let data = tempdir().unwrap();
+    let logs = tempdir().unwrap();
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(data.path())
+        .arg("--log-dir")
+        .arg(logs.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let log_path = logs.path().join("shardraild.log");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut contents = String::new();
+    while !contents.contains("shardraild listening at") && Instant::now() < deadline {
+        contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+        thread::sleep(Duration::from_millis(10));
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    contents = std::fs::read_to_string(log_path).unwrap();
+    assert!(contents.contains(" INFO daemon shardraild listening at"));
+    assert!(contents.contains("(host "));
+    assert!(contents.contains(", epoch "));
+    assert!(!contents.contains("host [REDACTED]"));
+    assert!(!contents.contains("epoch [REDACTED]"));
+}
+
 fn start_browser_daemon(path: &Path, port: u16) -> Child {
     Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(path)
+        .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -224,6 +256,7 @@ fn start_fake_daemon_with(
         command.arg("--fake-acp-no-reject");
     }
     command
+        .arg("--no-file-log")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -234,6 +267,7 @@ fn start_disconnect_after_approval_daemon(path: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(path)
+        .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -486,6 +520,7 @@ fn concurrent_client_additions_preserve_every_registration() {
             let child = Command::new(env!("CARGO_BIN_EXE_shardraild"))
                 .arg("--data-dir")
                 .arg(dir.path())
+                .arg("--no-file-log")
                 .args([
                     "client",
                     "add",
@@ -1001,6 +1036,7 @@ fn fake_agent_stream_chunks_are_durable_events_with_receipt_timestamps() {
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1037,6 +1073,7 @@ fn journal_symlink_is_refused_without_touching_target() {
     let status = Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--no-file-log")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -1059,6 +1096,7 @@ fn symlinked_data_directory_is_rejected_without_chmodding_its_target() {
     let status = Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(&link)
+        .arg("--no-file-log")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -1236,6 +1274,7 @@ fn early_provider_exit_finishes_the_turn_and_process_lifecycle() {
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg("/usr/bin/false")
         .stdout(Stdio::null())

@@ -124,7 +124,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     const clientId = values.client_id;
     assert.ok(clientId);
     const privateKey = new Uint8Array(await readFile(join(data, `client-${clientId}.key`)));
-    const daemon = spawn(daemonBin, ["--data-dir", data, "--fake-acp-path", fakeBin], { stdio: ["ignore", "ignore", "pipe"] });
+    const daemon = spawn(daemonBin, ["--data-dir", data, "--no-file-log", "--fake-acp-path", fakeBin], { stdio: ["ignore", "ignore", "pipe"] });
     const daemonExit = once(daemon, "exit");
     children.push(daemon);
     await new Promise<void>((resolveSocket, reject) => {

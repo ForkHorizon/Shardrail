@@ -34,6 +34,8 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use uuid::Uuid;
 
+mod daemon_log;
+
 const PROTOCOL_VERSION: u32 = 1;
 const CLIENT_QUEUE_CAPACITY: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,6 +45,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 struct Args {
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    #[arg(long, value_name = "DIR")]
+    log_dir: Option<PathBuf>,
+    #[arg(long)]
+    no_file_log: bool,
     #[arg(long)]
     fake_acp_path: Option<PathBuf>,
     #[arg(long)]
@@ -150,7 +156,11 @@ async fn resolve_approval(
 
 async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
     if let Err(error) = run_fake_acp_inner(Arc::clone(&daemon), path, session_id).await {
-        eprintln!("fake ACP session {session_id} ended: {error}");
+        daemon_log::log(
+            "WARN",
+            "fake_acp",
+            &format!("session {session_id} ended: {:?}", error.kind()),
+        );
         if let Some(coordinator) = daemon.sessions.lock().await.get(&session_id).cloned() {
             let mut coordinator = coordinator.lock().await;
             let _ = coordinator.turn_finished(
@@ -510,11 +520,11 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
         Ok(()) => {
             approvals.remove(&approval_id);
         }
-        Err(error) => {
+        Err(_error) => {
             if let Some(provider) = entry.provider.take() {
                 let _ = provider.send(ProviderCommand::cancel());
             }
-            eprintln!("approval expiry failed closed: {error}");
+            daemon_log::log("ERROR", "approval", "expiry failed closed");
         }
     }
 }
@@ -729,6 +739,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         None => {
+            daemon_log::init(daemon_log::configured_dir(args.log_dir, args.no_file_log));
             run(
                 path,
                 args.fake_acp_path,
@@ -794,13 +805,14 @@ async fn run(
         approvals: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
     });
-    eprintln!(
-        "shardraild listening at {} (host {host_id}, epoch {epoch})",
-        socket.display()
-    );
+    daemon_log::log("INFO", "daemon", &startup_message(&socket, host_id, epoch));
     if let Some(listener) = browser_listener {
         let address = listener.local_addr()?;
-        eprintln!("browser WebSocket listening at ws://{address}/ws");
+        daemon_log::log(
+            "INFO",
+            "browser",
+            &format!("WebSocket listening at ws://{address}/ws"),
+        );
         let daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
             loop {
@@ -809,7 +821,7 @@ async fn run(
                         let daemon = Arc::clone(&daemon);
                         let browser_assets_dir = browser.assets_dir.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = serve_browser_connection(
+                            if let Err(_error) = serve_browser_connection(
                                 stream,
                                 daemon,
                                 address.port(),
@@ -817,11 +829,19 @@ async fn run(
                             )
                             .await
                             {
-                                eprintln!("browser client connection ended: {error}");
+                                daemon_log::log(
+                                    "WARN",
+                                    "browser",
+                                    &format!("client connection ended: {:?}", _error.kind()),
+                                );
                             }
                         });
                     }
-                    Err(error) => eprintln!("browser listener accept failed: {error}"),
+                    Err(error) => daemon_log::log(
+                        "ERROR",
+                        "browser",
+                        &format!("listener accept failed: {:?}", error.kind()),
+                    ),
                 }
             }
         });
@@ -831,7 +851,11 @@ async fn run(
         let daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
             if let Err(error) = serve_client(stream, daemon).await {
-                eprintln!("client connection ended: {error}");
+                daemon_log::log(
+                    "WARN",
+                    "client",
+                    &format!("connection ended: {:?}", error.kind()),
+                );
             }
         });
     }
@@ -1380,6 +1404,13 @@ fn default_data_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("shardrail")
     }
+}
+
+fn startup_message(socket: &Path, host_id: Uuid, epoch: Uuid) -> String {
+    format!(
+        "shardraild listening at {} (host {host_id}, epoch {epoch})",
+        socket.display()
+    )
 }
 
 fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
