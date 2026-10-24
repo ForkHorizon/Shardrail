@@ -61,6 +61,10 @@ test('approval cards expose once options only and follow the daemon state', () =
   assert.equal(pending[0]?.actionDisclosed, false);
   assert.equal(pending[0]?.command, null);
   assert.equal(pending[0]?.cwd, null);
+  const cwdOnly = approvalsForSession([event(5, 'session-a', 'approval_requested', {
+    approval_id: 'approval-cwd-only', cwd: '/tmp/work', options: [],
+  })], 'session-a');
+  assert.equal(cwdOnly[0]?.actionDisclosed, false);
   const responding = approvalsForSession([
     requested,
     event(5, 'session-a', 'approval_responding', { approval_id: 'approval-1', decision: 'deny', option_id: 'reject_once' }),

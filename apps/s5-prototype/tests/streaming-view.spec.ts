@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { daemonReceiptToRafMs, getRows, getRowStart, markDaemonRowsCommitted, reset, rowCount, setDaemonClockMapping, setDaemonTotal, setDaemonWindow, subscribe } from '../src/store';
-import { coalesceChannelFrame, hashContent, liveTailWindowSize, markdownCacheKey, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from '../src/streaming-view';
+import { coalesceChannelFrame, hashContent, isNearLiveTail, liveTailWindowSize, markdownCacheKey, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from '../src/streaming-view';
 import { confirmAgentLink, isConfirmableAgentLink, UntrustedMarkdown } from '../src/UntrustedMarkdown';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -44,6 +44,8 @@ describe('S5 streaming view', () => {
   });
 
   it('selects bounded ranges and follows the live tail', () => {
+    expect(isNearLiveTail(1_000, 500, 470)).toBe(true);
+    expect(isNearLiveTail(1_000, 500, 450)).toBe(false);
     expect(rangeForWindow(50_000, 120, 40, false)).toEqual({ start: 120, limit: 40 });
     expect(rangeForWindow(50_000, 120, 14, false)).toEqual({ start: 120, limit: 32 });
     expect(rangeForWindow(50_000, 0, 40, true)).toEqual({ start: 49_960, limit: 40 });

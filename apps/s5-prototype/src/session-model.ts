@@ -360,7 +360,7 @@ function disclosedAction(payload: Record<string, unknown> | null) {
     changes,
     network,
     sandbox,
-    actionDisclosed: Boolean(command || argv || rawInput || cwd || locations || changes || network),
+    actionDisclosed: Boolean(command || argv || rawInput || locations || changes || network),
   };
 }
 

@@ -3,6 +3,7 @@ import { Button, ListBox, ListBoxItem } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, revealHiddenCharacters, sessionSummaries, transcriptItems, type TranscriptItem } from './session-model';
 import { connectionStatusLabel, type ConnectionPhase } from './browser-session';
+import { isNearLiveTail } from './streaming-view';
 import { useSessionJournalEvents } from './store';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 
@@ -73,12 +74,10 @@ function SessionTranscript({ sessionId, items }: { sessionId: string; items: rea
   virtualizerRef.current = virtualizer;
   const virtualItems = virtualizer.getVirtualItems();
   useLayoutEffect(() => {
-    followTail.current = true;
-    if (parent.current) parent.current.scrollTop = 0;
-    if (items.length > 0) virtualizerRef.current.scrollToIndex(items.length - 1, { align: 'end' });
+    if (followTail.current && items.length > 0) virtualizerRef.current.scrollToIndex(items.length - 1, { align: 'end' });
   }, [sessionId, items.length]);
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable transcript needs keyboard focus
-  return <div ref={parent} className="transcript" role="region" aria-label="Session events" tabIndex={0} onScroll={() => { const el = parent.current; if (!el) return; followTail.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
+  return <div ref={parent} className="transcript" role="region" aria-label="Session events" tabIndex={0} onScroll={() => { const el = parent.current; if (!el) return; followTail.current = isNearLiveTail(el.scrollHeight, el.scrollTop, el.clientHeight); }}>
     {items.length === 0 ? <p>No events yet.</p> : <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((item) => {
       const event = items[item.index];
       return event ? <div key={event.key} data-index={item.index} ref={virtualizer.measureElement} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}><SessionEvent event={event}/></div> : null;
@@ -159,4 +158,3 @@ function DisclosedAction({ card }: { card: ReturnType<typeof approvalsForSession
     {card.network ? <p>Network <span className="session-id">{revealHiddenCharacters(card.network)}</span></p> : null}
   </>;
 }
-

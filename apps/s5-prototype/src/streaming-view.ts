@@ -3,6 +3,10 @@ export function rangeForWindow(total: number, start: number, limit: number, foll
   return { start: followTail ? Math.max(0, total - size) : Math.max(0, Math.min(start, total)), limit: size };
 }
 
+export function isNearLiveTail(scrollHeight: number, scrollTop: number, clientHeight: number) {
+  return scrollHeight - scrollTop - clientHeight < 48;
+}
+
 export function liveTailWindowSize(isB4: boolean) { return isB4 ? 128 : 32; }
 export function transcriptOverscan(isB4: boolean) { return isB4 ? 32 : 8; }
 
