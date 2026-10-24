@@ -15,7 +15,7 @@ import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type Pa
 import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
 import { connectBrowser, openBrowserKeyStore } from '@shardrail/client/browser';
 import { createBrowserSession, isKeyChangedError, type BrowserSession, type ConnectionPhase } from './browser-session';
-import { approvalIdFromPayload, reduceApprovalFlight, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
+import { approvalIdFromPayload, clearPromptOnAccept, controlFailureTarget, reduceApprovalFlight, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
 import { MainScreen } from './MainScreen';
 import './style.css';
 
@@ -128,6 +128,8 @@ function App() {
   const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected'), [pairing, setPairing] = useState<PairingState>({ kind: 'loading' }), [pairingBusy, setPairingBusy] = useState(false), [enrollmentCode, setEnrollmentCode] = useState(''), [fallbackAcknowledged, setFallbackAcknowledged] = useState(false), [reconnect, setReconnect] = useState(0), [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>('connecting'), [approvalInFlight, setApprovalInFlight] = useState<ReadonlySet<string>>(() => new Set()), [approvalError, setApprovalError] = useState<string | null>(null), [promptError, setPromptError] = useState<string | null>(null);
   const browserSession = useRef<BrowserSession | null>(null);
   const approvalFlightRef = useRef<ApprovalFlight>({ inFlight: new Set(), error: null });
+  const pendingPromptRef = useRef<{ commandId: string; sessionId: string } | null>(null);
+  const [promptClear, setPromptClear] = useState<{ commandId: string; sessionId: string } | null>(null);
   const publishApprovalFlight = (action: ApprovalFlightAction) => {
     const next = reduceApprovalFlight(approvalFlightRef.current, action);
     if (next === approvalFlightRef.current) return;
@@ -184,10 +186,19 @@ function App() {
           },
           onControl: (frame) => {
             if (frame.kind === 'approval_resolved') publishApprovalFlight({ type: 'resolved', approvalId: frame.approval_id });
-            if (frame.kind === 'command_accepted') setPromptError(null);
-            if (frame.kind === 'error' || frame.kind === 'command_rejected') {
-              if (approvalFlightRef.current.inFlight.size > 0) publishApprovalFlight({ type: 'rejected' });
-              else setPromptError(frame.error);
+            if (frame.kind === 'command_accepted') {
+              const pending = pendingPromptRef.current;
+              if (clearPromptOnAccept(pending?.commandId ?? null, frame.command_id) && pending) {
+                setPromptClear(pending);
+                pendingPromptRef.current = null;
+              }
+              setPromptError(null);
+            }
+            const failure = controlFailureTarget(frame.kind, approvalFlightRef.current.inFlight.size);
+            if (failure === 'approval') publishApprovalFlight({ type: 'rejected' });
+            if (failure === 'prompt' && (frame.kind === 'error' || frame.kind === 'command_rejected')) {
+              if (frame.kind === 'command_rejected' && pendingPromptRef.current?.commandId === frame.command_id) pendingPromptRef.current = null;
+              setPromptError(frame.error);
             }
           },
         });
@@ -441,17 +452,21 @@ function App() {
       publishApprovalFlight(result === 'sent' ? { type: 'sent', approvalId } : { type: 'blocked' });
     };
     const sendCommand = (kind: 'turn.start' | 'turn.interrupt', payload: Record<string, unknown>, blocked: string) => {
+      const commandId = crypto.randomUUID();
       const result = browserSession.current?.request({
-        command_id: crypto.randomUUID(),
+        command_id: commandId,
         kind,
         payload,
         expected_state: null,
         expected_turn_id: null,
       }) ?? 'blocked';
+      if (kind === 'turn.start' && result === 'sent' && typeof payload.session_id === 'string') {
+        pendingPromptRef.current = { commandId, sessionId: payload.session_id };
+      }
       setPromptError(result === 'sent' ? null : blocked);
     };
     const keyStorage = pairing.info.keyStorage;
-    return <MainScreen phase={connectionPhase} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} promptError={promptError} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval} onSendPrompt={(sessionId, prompt) => sendCommand('turn.start', { session_id: sessionId, prompt }, 'Not connected. The prompt was not sent.')} onInterrupt={(sessionId) => sendCommand('turn.interrupt', { session_id: sessionId }, 'Not connected. Interrupt was not sent.')}/>;
+    return <MainScreen phase={connectionPhase} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} promptError={promptError} promptClear={promptClear} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval} onSendPrompt={(sessionId, prompt) => sendCommand('turn.start', { session_id: sessionId, prompt }, 'Not connected. The prompt was not sent.')} onInterrupt={(sessionId) => sendCommand('turn.interrupt', { session_id: sessionId }, 'Not connected. Interrupt was not sent.')}/>;
   }
   return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{pairing.kind === 'paired' ? <><span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairing.info.fingerprint}>{pairing.info.fingerprint}</span><Button onPress={() => setReconnect((current) => current + 1)}>Reconnect</Button>{!browserMode ? <Button onPress={() => { void unpairClient(pairingApi).then(setPairing); }}>Unpair</Button> : null}</> : null}{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header>{browserMode && pairing.kind === 'paired' && pairing.info.keyStorage === 'noble-fallback' ? <p role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}<section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
 }

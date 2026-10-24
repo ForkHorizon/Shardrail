@@ -1,7 +1,7 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, ListBox, ListBoxItem } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, revealHiddenCharacters, sessionSummaries, transcriptItems, type TranscriptItem } from './session-model';
+import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, promptClearApplies, revealHiddenCharacters, sessionSummaries, transcriptItems, type TranscriptItem } from './session-model';
 import { connectionStatusLabel, type ConnectionPhase } from './browser-session';
 import { isNearLiveTail } from './streaming-view';
 import { useSessionJournalEvents } from './store';
@@ -9,12 +9,13 @@ import { UntrustedMarkdown } from './UntrustedMarkdown';
 
 const checklist = checklistSummary();
 
-export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, onReconnect, onResolveApproval, onSendPrompt, onInterrupt }: {
+export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, onReconnect, onResolveApproval, onSendPrompt, onInterrupt }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
   approvalInFlight: ReadonlySet<string>;
   approvalError: string | null;
   promptError: string | null;
+  promptClear: { commandId: string; sessionId: string } | null;
   onReconnect: () => void;
   onResolveApproval: (approvalId: string, optionId: string) => void;
   onSendPrompt: (sessionId: string, prompt: string) => void;
@@ -54,7 +55,8 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
       <section className="session-detail" aria-labelledby="events-heading">
         <h2 id="events-heading">{selected ? `Events for ${selected.id}` : 'Events'}</h2>
         {selected ? <SessionTranscript key={selected.id} sessionId={selected.id} items={items}/> : <p>Select a session.</p>}
-        {selected ? <PromptBox sessionId={selected.id} error={promptError} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
+        {/* The prompt key has to differ from the transcript key. Two siblings with the same key leave the previous transcript mounted. */}
+        {selected ? <PromptBox key={`prompt-${selected.id}`} sessionId={selected.id} error={promptError} promptClear={promptClear} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
         {selected ? <VerificationChecklist/> : null}
         {selected ? <Approvals cards={approvals} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval}/> : null}
       </section>
@@ -97,20 +99,24 @@ function SessionEvent({ event }: { event: TranscriptItem }) {
   </article>;
 }
 
-function PromptBox({ sessionId, error, onSend, onInterrupt }: {
+function PromptBox({ sessionId, error, promptClear, onSend, onInterrupt }: {
   sessionId: string;
   error: string | null;
+  promptClear: { commandId: string; sessionId: string } | null;
   onSend: (sessionId: string, prompt: string) => void;
   onInterrupt: (sessionId: string) => void;
 }) {
   const [text, setText] = useState('');
+  useEffect(() => {
+    if (promptClearApplies(promptClear?.sessionId ?? null, sessionId)) setText('');
+  }, [promptClear, sessionId]);
   return <section className="prompt" aria-labelledby="prompt-heading">
     <h2 id="prompt-heading">Prompt</h2>
     {error ? <p role="alert">{error}</p> : null}
     <label htmlFor="session-prompt">Prompt</label>
     <textarea id="session-prompt" value={text} onChange={(event) => setText(event.currentTarget.value)}/>
     <div className="controls">
-      <Button isDisabled={text.trim() === ''} onPress={() => { const prompt = text.trim(); if (!prompt) return; onSend(sessionId, prompt); setText(''); }}>Send prompt</Button>
+      <Button isDisabled={text.trim() === ''} onPress={() => { const prompt = text.trim(); if (!prompt) return; onSend(sessionId, prompt); }}>Send prompt</Button>
       <Button onPress={() => onInterrupt(sessionId)}>Interrupt</Button>
     </div>
   </section>;
