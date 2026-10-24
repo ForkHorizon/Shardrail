@@ -1101,6 +1101,9 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
         "Run fixture command"
     );
     assert!(approval.get("title").is_none());
+    assert!(approval.get("command").is_none());
+    assert!(approval.get("argv").is_none());
+    assert!(approval.get("cwd").is_none());
     let _ = next_approval(&mut limited_reader);
     let approval_id = approval["approval_id"].clone();
 
