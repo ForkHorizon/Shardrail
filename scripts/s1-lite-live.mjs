@@ -12,10 +12,10 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, turn1Failure } from './s1-lite-guard.mjs';
 
 const TEST_REPO = '/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo';
 const SHARDRAIL = '/Users/daliys/Daliys/Shardrail';
-const INITIAL_COMMIT = '1bb8838';
 const HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const TURN_WAIT_MS = 8 * 60 * 1000;
 const worktree = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -78,10 +78,10 @@ async function main() {
   }, HARD_TIMEOUT_MS);
 
   try {
-    const repo = assertTestRepo();
+    const testRepo = assertTestRepo();
     resultDir = prepareResultDir(process.env.S1_RESULT_DIR);
     const statusBefore = { shardrail: porcelain(SHARDRAIL), worktree: porcelain(worktree) };
-    resetTestRepo(repo);
+    resetTestRepo(testRepo);
     mark('repo_reset_ms');
     ensureS5Dependencies();
     ensureClientDependencies();
@@ -96,7 +96,7 @@ async function main() {
       '--data-dir', dataDir,
       '--no-file-log',
       '--codex-app-server', codexProgram(),
-      '--codex-workdir', repo,
+      '--codex-workdir', testRepo.repo,
       '--codex-config', 'model_reasoning_effort="low"',
       '--browser-listen', '127.0.0.1:0',
       '--browser-assets-dir', assetsDir,
@@ -179,17 +179,16 @@ async function main() {
       timings,
       token_usage: usage.map(summarizeEvent),
       test_repo: {
-        status: git(repo, ['status', '--porcelain']),
-        diff_stat: git(repo, ['diff', '--stat']),
+        status: git(testRepo.repo, ['status', '--porcelain']),
+        diff_stat: git(testRepo.repo, ['diff', '--stat']),
       },
+      allow_once: turn1.allowed ? 'observed' : 'not observed',
       shardrail_git_status_unchanged: shardrailUnchanged,
     };
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
-    if (!turn1.allowed) throw new Error('turn 1 never received an allow-once decision');
-    if (turn1.outcome !== 'completed' && turn1.outcome !== 'Provider') {
-      throw new Error(`turn 1 ended as ${turn1.outcome}, expected completed`);
-    }
+    const turnFailure = turn1Failure({ ...turn1, finished: true });
+    if (turnFailure) throw new Error(turnFailure);
     console.log(`S1-lite result written to ${resultDir}`);
     clearTimeout(hardTimer);
     await shutdown(0);
@@ -204,27 +203,21 @@ async function main() {
 }
 
 function assertTestRepo() {
-  const repo = realpathSync(TEST_REPO);
-  if (repo === realpathSync(SHARDRAIL) || repo === realpathSync(worktree)) {
-    throw new Error('refusing to reset the Shardrail checkout');
-  }
-  if (git(repo, ['remote']).trim()) throw new Error('refusing to reset a test repo that has a remote');
-  if (git(repo, ['rev-parse', '--is-inside-work-tree']).trim() !== 'true') {
-    throw new Error('s1-testrepo is not a git work tree');
-  }
-  const common = realpathSync(resolve(repo, git(repo, ['rev-parse', '--git-common-dir']).trim()));
-  const shardrailCommon = realpathSync(resolve(SHARDRAIL, git(SHARDRAIL, ['rev-parse', '--git-common-dir']).trim()));
-  if (common === shardrailCommon) throw new Error('s1-testrepo shares the Shardrail git directory');
-  return repo;
+  return assertRepoIdentity({
+    testRepo: TEST_REPO,
+    shardrail: SHARDRAIL,
+    worktree,
+    commitPrefix: INITIAL_COMMIT_PREFIX,
+    git: (cwd, args) => git(cwd, args),
+  });
 }
 
-function resetTestRepo(repo) {
-  const reset = spawnSync('git', ['-C', repo, 'reset', '--hard', INITIAL_COMMIT], { encoding: 'utf8' });
+function resetTestRepo(identity) {
+  const reset = spawnSync('git', ['-C', identity.repo, 'reset', '--hard', identity.commit], { encoding: 'utf8' });
   if (reset.status !== 0) throw new Error(reset.stderr || 'git reset failed');
-  const clean = spawnSync('git', ['-C', repo, 'clean', '-fdx'], { encoding: 'utf8' });
+  const clean = spawnSync('git', ['-C', identity.repo, 'clean', '-fdx'], { encoding: 'utf8' });
   if (clean.status !== 0) throw new Error(clean.stderr || 'git clean failed');
-  const head = git(repo, ['rev-parse', 'HEAD']);
-  if (!head.startsWith(INITIAL_COMMIT)) throw new Error(`HEAD is ${head.trim()}, expected ${INITIAL_COMMIT}`);
+  assertHeadIsCommit(git(identity.repo, ['rev-parse', 'HEAD']), identity.commit);
 }
 
 function prepareResultDir(path) {
