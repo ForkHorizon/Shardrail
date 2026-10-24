@@ -155,8 +155,12 @@ async fn resolve_approval(
 }
 
 async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
-    if let Err(_error) = run_fake_acp_inner(Arc::clone(&daemon), path, session_id).await {
-        daemon_log::log("WARN", "fake_acp", &format!("session {session_id} ended"));
+    if let Err(error) = run_fake_acp_inner(Arc::clone(&daemon), path, session_id).await {
+        daemon_log::log(
+            "WARN",
+            "fake_acp",
+            &format!("session {session_id} ended: {:?}", error.kind()),
+        );
         if let Some(coordinator) = daemon.sessions.lock().await.get(&session_id).cloned() {
             let mut coordinator = coordinator.lock().await;
             let _ = coordinator.turn_finished(
@@ -825,11 +829,19 @@ async fn run(
                             )
                             .await
                             {
-                                daemon_log::log("WARN", "browser", "client connection ended");
+                                daemon_log::log(
+                                    "WARN",
+                                    "browser",
+                                    &format!("client connection ended: {:?}", _error.kind()),
+                                );
                             }
                         });
                     }
-                    Err(_error) => daemon_log::log("ERROR", "browser", "listener accept failed"),
+                    Err(error) => daemon_log::log(
+                        "ERROR",
+                        "browser",
+                        &format!("listener accept failed: {:?}", error.kind()),
+                    ),
                 }
             }
         });
@@ -838,8 +850,12 @@ async fn run(
         let (stream, _) = listener.accept().await?;
         let daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
-            if let Err(_error) = serve_client(stream, daemon).await {
-                daemon_log::log("WARN", "client", "connection ended");
+            if let Err(error) = serve_client(stream, daemon).await {
+                daemon_log::log(
+                    "WARN",
+                    "client",
+                    &format!("connection ended: {:?}", error.kind()),
+                );
             }
         });
     }

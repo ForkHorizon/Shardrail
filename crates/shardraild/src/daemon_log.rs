@@ -38,6 +38,7 @@ fn selected_dir(
         Platform::Macos => home.map(|home| home.join("Library/Logs/Shardrail")),
         Platform::Linux if service => None,
         Platform::Linux => xdg_state_home
+            .filter(|path| path.is_absolute())
             .map(Path::to_path_buf)
             .or_else(|| home.map(|home| home.join(".local/state")))
             .map(|state| state.join("shardrail/logs")),
@@ -46,16 +47,36 @@ fn selected_dir(
 }
 
 pub fn configured_dir(override_dir: Option<PathBuf>, disabled: bool) -> Option<PathBuf> {
-    if disabled {
-        return None;
-    }
     let env_override = std::env::var_os("SHARDRAIL_LOG_DIR").map(PathBuf::from);
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let xdg = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
     let service =
         std::env::var_os("JOURNAL_STREAM").is_some() || std::env::var_os("INVOCATION_ID").is_some();
-    selected_dir(
+    configured_dir_from(
         platform(),
+        override_dir,
+        env_override,
+        home,
+        xdg,
+        service,
+        disabled,
+    )
+}
+
+fn configured_dir_from(
+    platform: Platform,
+    override_dir: Option<PathBuf>,
+    env_override: Option<PathBuf>,
+    home: Option<PathBuf>,
+    xdg: Option<PathBuf>,
+    service: bool,
+    disabled: bool,
+) -> Option<PathBuf> {
+    if disabled {
+        return None;
+    }
+    selected_dir(
+        platform,
         override_dir.or(env_override),
         home.as_deref(),
         xdg.as_deref(),
@@ -75,6 +96,8 @@ struct State {
 
 impl Logger {
     pub fn new(directory: Option<PathBuf>) -> Self {
+        let directory = directory
+            .map(|path| absolute_directory(path, &std::env::current_dir().unwrap_or_default()));
         let logger = Self {
             state: Mutex::new(State {
                 directory: directory.clone(),
@@ -167,7 +190,29 @@ impl Logger {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+        let mut total = 0;
+        for index in (1..FILE_COUNT).rev() {
+            let path = directory.join(format!("shardraild.log.{index}"));
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    total += metadata.len();
+                    if total > FILE_LIMIT * (FILE_COUNT - 1) as u64 {
+                        fs::remove_file(path)?;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
+    }
+}
+
+fn absolute_directory(path: PathBuf, current_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        current_dir.join(path)
     }
 }
 
@@ -203,24 +248,52 @@ fn open_log(directory: &Path) -> io::Result<File> {
     )
     .map_err(io::Error::from)?;
     #[cfg(unix)]
+    {
+        let metadata = nix::sys::stat::fstat(&directory_fd).map_err(io::Error::from)?;
+        if !nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode)
+            .contains(nix::sys::stat::SFlag::S_IFDIR)
+            || metadata.st_uid != nix::unistd::geteuid().as_raw()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "log directory must be owned by the current user",
+            ));
+        }
+    }
+    #[cfg(unix)]
     nix::sys::stat::fchmod(
         &directory_fd,
         nix::sys::stat::Mode::from_bits_truncate(0o700),
     )
     .map_err(io::Error::from)?;
     #[cfg(unix)]
-    let file = File::from(
-        nix::fcntl::open(
-            &directory.join("shardraild.log"),
-            nix::fcntl::OFlag::O_WRONLY
-                | nix::fcntl::OFlag::O_APPEND
-                | nix::fcntl::OFlag::O_CREAT
-                | nix::fcntl::OFlag::O_NOFOLLOW
-                | nix::fcntl::OFlag::O_CLOEXEC,
-            nix::sys::stat::Mode::from_bits_truncate(0o600),
-        )
-        .map_err(io::Error::from)?,
-    );
+    let file_fd = nix::fcntl::openat(
+        &directory_fd,
+        "shardraild.log",
+        nix::fcntl::OFlag::O_WRONLY
+            | nix::fcntl::OFlag::O_APPEND
+            | nix::fcntl::OFlag::O_CREAT
+            | nix::fcntl::OFlag::O_NOFOLLOW
+            | nix::fcntl::OFlag::O_CLOEXEC
+            | nix::fcntl::OFlag::O_NONBLOCK,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+    )
+    .map_err(io::Error::from)?;
+    #[cfg(unix)]
+    let file = {
+        let metadata = nix::sys::stat::fstat(&file_fd).map_err(io::Error::from)?;
+        if !nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode)
+            .contains(nix::sys::stat::SFlag::S_IFREG)
+            || metadata.st_uid != nix::unistd::geteuid().as_raw()
+            || metadata.st_nlink != 1
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "log must be an owner-owned regular file without hard links",
+            ));
+        }
+        File::from(file_fd)
+    };
     #[cfg(not(unix))]
     let file = File::options()
         .create(true)
@@ -244,25 +317,32 @@ fn redact(message: &str) -> String {
     if [
         "enrollment_code",
         "enrollment code",
-        "private_key",
-        "private-key",
-        "private key",
-        "privatekey",
-        "authorization",
-        "bearer",
-        "api_key",
-        "api-key",
-        "signature",
-        "nonce",
-        "token",
-        "secret",
-        "auth",
-        "credential",
-        "password",
-        "cookie",
-        "prompt",
-        "tool_output",
-        "tool-output",
+        "private_key=",
+        "private_key:",
+        "private-key=",
+        "private-key:",
+        "private key=",
+        "privatekey=",
+        "authorization:",
+        "authorization=",
+        "bearer ",
+        "api_key=",
+        "api_key:",
+        "api-key=",
+        "api-key:",
+        "signature=",
+        "nonce=",
+        "token=",
+        "access_token=",
+        "secret=",
+        "auth=",
+        "credential=",
+        "password=",
+        "cookie=",
+        "prompt=",
+        "tool_output=",
+        "tool-output=",
+        "enrollment code ",
         "sk-live-",
         "sk-ant-",
         "ghp_",
@@ -279,10 +359,10 @@ fn redact(message: &str) -> String {
     let mut output = String::with_capacity(message.len());
     let mut token = String::new();
     for ch in message.chars().chain(std::iter::once(' ')) {
-        if ch.is_ascii_alphanumeric() || "_+=/-".contains(ch) {
+        if ch.is_ascii_alphanumeric() || "_+=-".contains(ch) {
             token.push(ch);
         } else {
-            if token.len() >= 32 && entropy(&token) >= 3.0 {
+            if token.len() >= 32 && entropy(&token) >= 3.0 && !is_uuid(&token) {
                 output.push_str("[REDACTED]");
             } else {
                 output.push_str(&token);
@@ -292,6 +372,17 @@ fn redact(message: &str) -> String {
         }
     }
     output.trim_end().to_owned()
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && [8, 13, 18, 23]
+            .iter()
+            .all(|index| value.as_bytes()[*index] == b'-')
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
 }
 
 fn entropy(value: &str) -> f64 {
@@ -357,6 +448,18 @@ mod tests {
             Some(home.join(".local/state/shardrail/logs"))
         );
         assert_eq!(
+            selected_dir(
+                Platform::Linux,
+                None,
+                Some(home),
+                Some(Path::new("relative")),
+                false
+            ),
+            Some(home.join(".local/state/shardrail/logs"))
+        );
+        assert_eq!(selected_dir(Platform::Macos, None, None, None, false), None);
+        assert_eq!(selected_dir(Platform::Linux, None, None, None, false), None);
+        assert_eq!(
             selected_dir(Platform::Linux, None, Some(home), Some(xdg), true),
             None
         );
@@ -371,6 +474,42 @@ mod tests {
             Some(PathBuf::from("/tmp/logs"))
         );
         assert_eq!(configured_dir(None, true), None);
+        assert_eq!(
+            configured_dir_from(
+                Platform::Macos,
+                None,
+                Some(PathBuf::from("/env")),
+                None,
+                None,
+                false,
+                false
+            ),
+            Some(PathBuf::from("/env"))
+        );
+        assert_eq!(
+            configured_dir_from(
+                Platform::Linux,
+                None,
+                None,
+                Some(home.to_path_buf()),
+                None,
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            configured_dir_from(
+                Platform::Linux,
+                None,
+                None,
+                Some(home.to_path_buf()),
+                None,
+                false,
+                true
+            ),
+            None
+        );
     }
 
     #[test]
@@ -389,6 +528,14 @@ mod tests {
         )
         .unwrap();
         logger.log("INFO", "test", "rotation boundary");
+        assert_eq!(
+            &fs::read(dir.path().join("shardraild.log.1")).unwrap()[..4],
+            b"xxxx"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("shardraild.log.4")).unwrap(),
+            "rotated"
+        );
         let files = fs::read_dir(dir.path())
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
@@ -430,14 +577,26 @@ mod tests {
             "auth=short-value",
             "prompt=private body",
             "tool_output=private body",
+            "authorization=secret-material",
         ] {
             logger.log("WARN", "test", sensitive);
         }
+        let host = "c3c783db-5e04-4b53-8d09-b6b80153beba";
+        logger.log(
+            "INFO",
+            "daemon",
+            &format!("client authenticated; host {host}"),
+        );
+        logger.log("WARN", "client", "invalid signature on hello");
         let contents = fs::read_to_string(dir.path().join("shardraild.log")).unwrap();
         assert!(!contents.contains("123456"));
         assert!(!contents.contains(key));
         assert!(!contents.contains("short-value"));
         assert!(!contents.contains("private body"));
+        assert!(!contents.contains("secret-material"));
+        assert!(contents.contains(host));
+        assert!(contents.contains("client authenticated"));
+        assert!(contents.contains("invalid signature on hello"));
     }
 
     #[test]
@@ -472,5 +631,63 @@ mod tests {
         drop(state);
         #[cfg(unix)]
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_fifo_and_hard_link_without_blocking_or_modifying_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo_dir = dir.path().join("fifo");
+        fs::create_dir(&fifo_dir).unwrap();
+        nix::unistd::mkfifo(
+            fifo_dir.join("shardraild.log").as_path(),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let logger = Logger::new(Some(fifo_dir));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(logger.state.lock().unwrap().failed);
+
+        let link_dir = dir.path().join("link");
+        fs::create_dir(&link_dir).unwrap();
+        let sentinel = dir.path().join("sentinel");
+        fs::write(&sentinel, "unchanged").unwrap();
+        fs::hard_link(&sentinel, link_dir.join("shardraild.log")).unwrap();
+        let mode = fs::metadata(&sentinel).unwrap().permissions().mode() & 0o777;
+        let logger = Logger::new(Some(link_dir));
+        assert!(logger.state.lock().unwrap().failed);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"unchanged");
+        assert_eq!(
+            fs::metadata(&sentinel).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+
+    #[test]
+    fn stores_relative_log_directory_as_absolute_and_drops_oversized_old_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            absolute_directory(PathBuf::from("logs"), dir.path()),
+            dir.path().join("logs")
+        );
+
+        let logger = Logger::new(Some(dir.path().into()));
+        fs::write(
+            dir.path().join("shardraild.log"),
+            vec![b'x'; FILE_LIMIT as usize],
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("shardraild.log.1"),
+            vec![b'y'; (FILE_LIMIT * FILE_COUNT as u64) as usize],
+        )
+        .unwrap();
+        logger.log("INFO", "test", "cap marker");
+        let total = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum::<u64>();
+        assert!(total <= FILE_LIMIT * FILE_COUNT as u64);
     }
 }

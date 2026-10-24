@@ -80,5 +80,5 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
 
 ### W7-b daemon logs (2026-10-24)
 
-- `shardraild` writes private rotating logs to `~/Library/Logs/Shardrail` on macOS and the proposed XDG state path on Linux. CLI/environment overrides and `--no-file-log` support tests and service use. Operational messages reach both the file and stderr; user-facing enrollment output remains stdout.
+- `shardraild` writes private rotating logs to `~/Library/Logs/Shardrail` on macOS and the proposed XDG state path on Linux. CLI/environment overrides and `--no-file-log` support tests and service use. Operational messages reach both the file and stderr; user-facing enrollment output remains stdout. Log paths are anchored before macOS data-directory pinning; unsafe FIFO/hard-linked log files fail closed, and oversized existing generations are pruned to the total cap.
 - **Pending owner confirmation:** Linux's proposed `$XDG_STATE_HOME/shardrail/logs` or `~/.local/state/shardrail/logs` destination. `JOURNAL_STREAM` / `INVOCATION_ID` detection skips file logging for systemd services. Rotation, limits and best-effort redaction are documented in [daemon-logs.md](daemon-logs.md).

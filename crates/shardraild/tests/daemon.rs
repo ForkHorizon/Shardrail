@@ -87,6 +87,10 @@ fn daemon_startup_writes_to_log_directory_override() {
     daemon.wait().unwrap();
     contents = std::fs::read_to_string(log_path).unwrap();
     assert!(contents.contains(" INFO daemon shardraild listening at"));
+    assert!(contents.contains("(host "));
+    assert!(contents.contains(", epoch "));
+    assert!(!contents.contains("host [REDACTED]"));
+    assert!(!contents.contains("epoch [REDACTED]"));
 }
 
 fn start_browser_daemon(path: &Path, port: u16) -> Child {
