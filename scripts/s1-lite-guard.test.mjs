@@ -163,6 +163,13 @@ test('journaled commands, approvals, items, and paths must stay out of Codex and
   assert.deepEqual(hits[1].markers, ['/.codex/']);
   assert.deepEqual(hits[2].markers, ['/.agents/']);
   assert.deepEqual(hits[3].markers, ['~/.agents', '/.agents/']);
+  assert.deepEqual(codexHomePathHits([
+    { event_id: 'warn', kind: 'provider_notice', payload: { method: 'configWarning', params: { summary: 'user (/Users/owner/.codex/config.toml): `x` is ignored.' } } },
+    { event_id: 'warn2', kind: 'provider_notice', payload: { method: 'warning', params: { message: 'Codex is ignoring 1 unrecognized configuration setting.\n  user (/Users/owner/.codex/config.toml): `x` is ignored.' } } },
+  ]), []);
+  assert.equal(codexHomePathHits([
+    { event_id: 'other', kind: 'provider_notice', payload: { method: 'item/started', params: { path: '/Users/owner/.codex/skills/a' } } },
+  ]).length, 1);
 });
 
 test('the live script gates on the env and resets only through the guard', () => {

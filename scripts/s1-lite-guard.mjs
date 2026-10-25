@@ -73,9 +73,20 @@ export function assertHeadIsCommit(head, commit) {
 
 const CODEX_HOME_MARKERS = ['~/.codex', '/.codex/', '~/.agents', '/.agents/'];
 
+// Codex's own config-load warning (sent as configWarning and again as a thread warning)
+// names the config file it parsed at startup. That is not the model reading ~/.codex, so
+// it is the one notice left out of the check.
+function isCodexConfigWarning(event) {
+  if (event?.kind !== 'provider_notice') return false;
+  const method = event?.payload?.method;
+  if (method === 'configWarning') return true;
+  return method === 'warning' && /unrecognized configuration setting/.test(String(event?.payload?.params?.message ?? ''));
+}
+
 export function codexHomePathHits(events) {
   const hits = [];
   for (const event of Array.isArray(events) ? events : []) {
+    if (isCodexConfigWarning(event)) continue;
     const markers = CODEX_HOME_MARKERS.filter((marker) => JSON.stringify(event).includes(marker));
     if (markers.length) hits.push({ event_id: event?.event_id ?? null, kind: event?.kind ?? null, markers });
   }

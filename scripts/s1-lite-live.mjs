@@ -344,18 +344,25 @@ async function createSessionInBrowser(page) {
   const option = page.locator('.session-list [role="option"]').filter({ hasText: /[0-9a-f]{8}-[0-9a-f-]{27}/ });
   const alert = page.locator('.new-session [role="alert"]');
   const deadline = Date.now() + 120_000;
+  const rejection = async () => {
+    if (!(await alert.count())) return null;
+    const text = (await alert.innerText()).trim();
+    return text ? `browser New session was rejected: ${text}` : null;
+  };
   while (Date.now() < deadline) {
+    const early = await rejection();
+    if (early) throw new Error(early);
     if (await option.count()) {
       const sessionId = (await option.first().innerText()).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0];
       if (sessionId) {
+        // A rejection can land just after the list updates; give it a moment to show.
+        await page.waitForTimeout(1_000);
+        const late = await rejection();
+        if (late) throw new Error(late);
         await option.first().focus();
         await page.getByRole('heading', { name: `Events for ${sessionId}` }).waitFor();
         return sessionId;
       }
-    }
-    if (await alert.count()) {
-      const text = (await alert.innerText()).trim();
-      if (text) throw new Error(text);
     }
     await page.waitForTimeout(200);
   }
