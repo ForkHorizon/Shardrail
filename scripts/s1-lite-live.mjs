@@ -138,8 +138,14 @@ async function main() {
 
     await sendPrompt(page, 'Add a function `sub(a, b)` to calc.py and a unittest for it, then run `python3 -m unittest`.');
     mark('turn1_sent_ms');
-    const turn1 = await driveTurn1(page, frames, sessionId);
+    let turn1 = await driveTurn1(page, frames, sessionId);
     mark('turn1_done_ms');
+    if (!turn1.allowed) {
+      // Codex often stops after a denial. Ask once more and allow each request once.
+      const retry = await driveAllowTurn(page, frames, sessionId);
+      mark('turn1b_done_ms');
+      turn1 = { decisions: [...turn1.decisions, ...retry.decisions], allowed: retry.allowed, outcome: retry.outcome };
+    }
 
     const chunksBefore = countEvents(frames, sessionId, 'agent_message_chunk');
     await sendPrompt(page, 'Explain calc.py in detail, step by step');
@@ -185,10 +191,12 @@ async function main() {
         diff_stat: git(testRepo.repo, ['diff', '--stat']),
       },
       allow_once: turn1.allowed ? 'observed' : 'not observed',
+      routing_rejected: events.filter((event) => event.kind === 'approval_routing_rejected').map(summarizeEvent),
       shardrail_git_status_unchanged: shardrailUnchanged,
     };
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
+    if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');
     const turnFailure = turn1Failure({ ...turn1, finished: true });
     if (turnFailure) throw new Error(turnFailure);
     console.log(`S1-lite result written to ${resultDir}`);
@@ -345,6 +353,7 @@ async function sendPrompt(page, prompt) {
 }
 
 async function driveTurn1(page, frames, sessionId) {
+  const finishedBefore = countEvents(frames, sessionId, 'turn_finished');
   const decisions = [];
   const pending = page.locator('article[aria-label^="Approval "]').filter({ has: page.getByRole('button', { name: 'Deny' }) });
   const first = pending.first();
@@ -353,30 +362,48 @@ async function driveTurn1(page, frames, sessionId) {
   await first.getByRole('button', { name: 'Deny' }).click();
   decisions.push({ decision: 'deny', approval: deniedLabel });
   await page.locator(`article[aria-label="${deniedLabel}"]`).getByRole('button', { name: 'Deny' }).waitFor({ state: 'detached', timeout: 60_000 });
+  return allowUntilFinished(page, frames, sessionId, finishedBefore, decisions, new Set([deniedLabel]));
+}
 
-  let allowed = false;
-  const allowCard = page.locator('article[aria-label^="Approval "]').filter({ has: page.getByRole('button', { name: 'Allow once' }) });
+function maxAllows() {
+  return 8;
+}
+
+async function driveAllowTurn(page, frames, sessionId) {
+  const finishedBefore = countEvents(frames, sessionId, 'turn_finished');
+  await sendPrompt(page, 'Go ahead now: add `sub(a, b)` to calc.py and a unittest for it, then run `python3 -m unittest`.');
+  return allowUntilFinished(page, frames, sessionId, finishedBefore, [], new Set());
+}
+
+// Allows each new approval card once (up to MAX_ALLOWS, then denies) until the turn finishes.
+async function allowUntilFinished(page, frames, sessionId, finishedBefore, decisions, seen) {
+  const cards = page.locator('article[aria-label^="Approval "]').filter({ has: page.getByRole('button', { name: 'Allow once' }) });
   const deadline = Date.now() + TURN_WAIT_MS;
-  while (!allowed && Date.now() < deadline) {
-    const card = allowCard.first();
-    if (await card.count()) {
-      const allowLabel = await card.getAttribute('aria-label');
-      if (allowLabel && allowLabel !== deniedLabel) {
-        await card.getByRole('button', { name: 'Allow once' }).click();
-        const confirm = page.getByRole('button', { name: 'Confirm allow once' });
-        if (await confirm.isVisible().catch(() => false)) await confirm.click();
-        decisions.push({ decision: 'allow_once', approval: allowLabel });
-        allowed = true;
-        break;
+  while (Date.now() < deadline && countEvents(frames, sessionId, 'turn_finished') <= finishedBefore) {
+    const total = await cards.count();
+    for (let index = 0; index < total; index++) {
+      const card = cards.nth(index);
+      const label = await card.getAttribute('aria-label').catch(() => null);
+      if (!label || seen.has(label)) continue;
+      if (!(await card.getByRole('button', { name: 'Allow once' }).isEnabled().catch(() => false))) continue;
+      seen.add(label);
+      if (decisions.filter((item) => item.decision === 'allow_once').length >= maxAllows()) {
+        await card.getByRole('button', { name: 'Deny' }).click();
+        decisions.push({ decision: 'deny', approval: label, reason: 'allow cap reached' });
+        continue;
       }
+      await card.getByRole('button', { name: 'Allow once' }).click();
+      const confirm = page.getByRole('button', { name: 'Confirm allow once' });
+      if (await confirm.isVisible().catch(() => false)) await confirm.click();
+      decisions.push({ decision: 'allow_once', approval: label });
     }
-    if (frames.some((frame) => turnFinished(frame, sessionId)) && !(await card.count())) break;
     await new Promise((resolveWait) => setTimeout(resolveWait, 200));
   }
-  const finished = await waitForEvent(frames, (frame) => turnFinished(frame, sessionId), TURN_WAIT_MS, 'turn 1 completion');
+  if (countEvents(frames, sessionId, 'turn_finished') <= finishedBefore) throw new Error('turn did not finish');
+  const finished = frames.filter((frame) => turnFinished(frame, sessionId)).at(-1);
   return {
     decisions,
-    allowed,
+    allowed: decisions.some((item) => item.decision === 'allow_once'),
     outcome: finished.event.payload?.provider_status ?? finished.event.payload?.session_snapshot?.last_turn_outcome ?? null,
   };
 }
