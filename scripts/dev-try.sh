@@ -4,8 +4,28 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+common=$(git -C "$ROOT" rev-parse --git-common-dir) || {
+  echo "cannot resolve the Shardrail checkout" >&2
+  exit 1
+}
+case "$common" in
+  /*) ;;
+  *) common=$ROOT/$common ;;
+esac
+SHARDRAIL=$(CDPATH= cd -- "$(dirname -- "$common")" && pwd -P) || {
+  echo "cannot resolve the Shardrail checkout" >&2
+  exit 1
+}
+case "$SHARDRAIL" in
+  /System/Volumes/Data/*)
+    logical=/${SHARDRAIL#/System/Volumes/Data/}
+    if [ -d "$logical" ]; then
+      SHARDRAIL=$logical
+    fi
+    ;;
+esac
 PORT=${SHARDRAIL_TRY_PORT:-9731}
-WORKDIR=${SHARDRAIL_SESSION_WORKDIR:-/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo}
+WORKDIR=${SHARDRAIL_SESSION_WORKDIR:-$SHARDRAIL/spikes/s1-testrepo}
 CODEX=${SHARDRAIL_TRY_CODEX:-}
 SKIP_BUILD=0
 DRY_RUN=0
@@ -97,6 +117,9 @@ DATA=
 DAEMON_PID=
 
 cleanup() {
+  # Closing the write end makes --exit-with-stdin stop the daemon. TERM is the
+  # backup when the signal is one this script can still catch.
+  exec 3>&- 2>/dev/null || true
   if [ -n "$DAEMON_PID" ]; then
     kill -TERM "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
@@ -113,7 +136,7 @@ on_signal() {
   exit 130
 }
 
-trap on_signal INT TERM
+trap on_signal INT TERM HUP
 trap cleanup EXIT
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
@@ -134,7 +157,7 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "DATA=\$(mktemp -d)"
-  echo "\"$BIN\" --data-dir \"\$DATA\" --no-file-log --codex-app-server \"$CODEX\" --session-workdir \"$WORKDIR\" --codex-config 'model_reasoning_effort=\"low\"' --browser-listen 127.0.0.1:$PORT --browser-assets-dir \"$ASSETS\""
+  echo "\"$BIN\" --data-dir \"\$DATA\" --no-file-log --exit-with-stdin --codex-app-server \"$CODEX\" --session-workdir \"$WORKDIR\" --codex-config 'model_reasoning_effort=\"low\"' --browser-listen 127.0.0.1:$PORT --browser-assets-dir \"$ASSETS\""
   echo "\"$BIN\" --data-dir \"\$DATA\" client enroll --label browser --allow-session-create"
   echo "prints url=http://127.0.0.1:$PORT/ and enrollment_code. Does not open a browser."
   exit 0
@@ -150,16 +173,24 @@ if [ ! -d "$ASSETS" ]; then
 fi
 
 DATA=$(mktemp -d "${TMPDIR:-/tmp}/shardrail-try.XXXXXX")
+mkfifo "$DATA/parent.stdin"
+# Hold the write end. The daemon does not inherit it, so the pipe reaches EOF
+# when this script exits, including after SIGKILL or a closed terminal.
+exec 3<>"$DATA/parent.stdin"
+export SHARDRAIL_DEV_TRY_MARK=$DATA
 "$BIN" \
   --data-dir "$DATA" \
   --no-file-log \
+  --exit-with-stdin \
   --codex-app-server "$CODEX" \
   --session-workdir "$WORKDIR" \
   --codex-config 'model_reasoning_effort="low"' \
   --browser-listen "127.0.0.1:$PORT" \
   --browser-assets-dir "$ASSETS" \
+  <"$DATA/parent.stdin" 3>&- \
   >"$DATA/daemon.stdout" 2>"$DATA/daemon.stderr" &
 DAEMON_PID=$!
+printf '%s\n' "$DAEMON_PID" >"$DATA/daemon.pid"
 
 ready=0
 i=0
@@ -198,6 +229,7 @@ echo "Open this URL and enter the enrollment code. This script does not open a b
 echo "url=http://127.0.0.1:$PORT/"
 echo "enrollment_code=$CODE"
 echo "data_dir=$DATA"
+echo "daemon_pid=$DAEMON_PID"
 
 wait "$DAEMON_PID" || true
 DAEMON_PID=

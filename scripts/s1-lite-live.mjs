@@ -14,11 +14,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, turn1Failure } from './s1-lite-guard.mjs';
 
-const TEST_REPO = '/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo';
-const SHARDRAIL = '/Users/daliys/Daliys/Shardrail';
 const HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const TURN_WAIT_MS = 8 * 60 * 1000;
 const worktree = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SHARDRAIL = shardrailCheckout(worktree);
+const TEST_REPO = join(SHARDRAIL, 'spikes', 's1-testrepo');
 const s5Dir = join(worktree, 'apps/s5-prototype');
 
 if (!process.execArgv.includes('--experimental-strip-types')) {
@@ -178,6 +178,9 @@ async function main() {
       ...codexHomePathHits(events),
       ...codexHomePathHits(extensionLog.map((line) => ({ kind: 'daemon_log', payload: { line } }))),
     ];
+    const mcpStartup = events.filter((event) => JSON.stringify(event).includes('mcpServer/startupStatus/updated'));
+    const mcpNotices = events.filter((event) => event.kind === 'provider_notice' && String(event.payload?.method ?? '').startsWith('mcpServer'));
+    const mcpServers = verifiedExtensions.map((event) => event.payload?.mcp_servers);
     const refused = events.filter((event) => event.kind === 'provider_request_refused');
     const usage = events.filter((event) => JSON.stringify(event.payload ?? {}).toLowerCase().includes('token'));
     const statusAfter = { shardrail: porcelain(SHARDRAIL), worktree: porcelain(worktree) };
@@ -206,6 +209,7 @@ async function main() {
         verified: verifiedExtensions.map(summarizeEvent),
         rejected: rejectedExtensions.map(summarizeEvent),
         log: extensionLog,
+        mcp_servers: mcpServers,
       },
       codex_home_paths: codexHomeHits,
       shardrail_git_status_unchanged: shardrailUnchanged,
@@ -216,6 +220,8 @@ async function main() {
     if (codexHomeHits.length) throw new Error(`journal references ${[...new Set(codexHomeHits.flatMap((hit) => hit.markers))].join(', ')}: ${JSON.stringify(codexHomeHits)}`);
     if (rejectedExtensions.length) throw new Error('codex extensions were rejected');
     if (!verifiedExtensions.length) throw new Error('codex extension verification was not journaled');
+    if (mcpStartup.length || mcpNotices.length) throw new Error('mcp server activity was journaled');
+    if (!mcpServers.length || mcpServers.some((count) => count !== 0)) throw new Error(`mcp servers were not verified off: ${JSON.stringify(mcpServers)}`);
     const turnFailure = turn1Failure({ ...turn1, finished: true });
     if (turnFailure) throw new Error(turnFailure);
     console.log(`S1-lite result written to ${resultDir}`);
@@ -257,6 +263,20 @@ function prepareResultDir(path) {
   const real = realpathSync(absolute);
   if (absolute === allowed && real !== allowed) throw new Error('S1_RESULT_DIR must not resolve through a symlink');
   return assertResultDirectory(real, { shardrail: roots[0], worktree: roots[1], allowedResultDir: allowed });
+}
+
+function shardrailCheckout(start) {
+  const output = spawnSync('git', ['-C', start, 'rev-parse', '--git-common-dir'], { encoding: 'utf8' });
+  if (output.status !== 0) throw new Error(output.stderr || 'git rev-parse --git-common-dir failed');
+  const reported = output.stdout.trim();
+  const gitDir = reported.startsWith('/') ? reported : resolve(start, reported);
+  let root = dirname(realpathSync(gitDir));
+  const prefix = '/System/Volumes/Data/';
+  if (root.startsWith(prefix)) {
+    const logical = `/${root.slice(prefix.length)}`;
+    if (existsSync(logical)) root = logical;
+  }
+  return root;
 }
 
 function porcelain(cwd) {

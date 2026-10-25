@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -41,6 +41,7 @@ test('dev-try prints an enrollment code and removes its data dir', async () => {
   const port = await freePort();
   const child = spawn('sh', [script, '--skip-build', '--codex', fake, '--port', String(port), '--workdir', workdir], {
     cwd: root,
+    detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -87,7 +88,7 @@ test('dev-try prints an enrollment code and removes its data dir', async () => {
     });
     assert.equal(stillBusy, false);
   } finally {
-    if (child.exitCode === null) child.kill('SIGKILL');
+    await stopGroup(child);
     await rm(workdir, { recursive: true, force: true });
     if (madeDist) await rm(dist, { recursive: true, force: true });
   }
@@ -103,7 +104,9 @@ test('dev-try dry-run prints the commands and does not enroll', async () => {
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /shardraild/);
+  assert.match(result.stdout, /--exit-with-stdin/);
   assert.match(result.stdout, /--allow-session-create/);
+  assert.doesNotMatch(readFileSync(script, 'utf8'), /\/Users\/daliys/);
   assert.match(result.stdout, /model_reasoning_effort/);
   assert.match(result.stdout, new RegExp(`127\\.0\\.0\\.1:${port}`));
   assert.doesNotMatch(result.stdout, /enrollment_code=[0-9a-f]{64}/);
@@ -134,3 +137,127 @@ test('dev-try refuses a dry-run when codex is missing or the port is busy', asyn
     await new Promise((resolveClose) => holder.close(() => resolveClose()));
   }
 });
+
+function stopGroup(child) {
+  if (child.pid) {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+  try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  return new Promise((resolveExit) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolveExit();
+    else child.once('exit', () => resolveExit());
+  });
+}
+
+function processLines(marker) {
+  const result = spawnSync('ps', ['-axeww', '-o', 'pid=,command='], { encoding: 'utf8' });
+  return (result.stdout || '').split('\n').filter((line) => line.includes(marker));
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function launchTry() {
+  assert.equal(existsSync(binary), true, 'build shardraild before this test');
+  await chmod(fake, 0o755);
+  const madeDist = await ensureAssets();
+  const workdir = await mkdtemp(join(tmpdir(), 'shardrail-try-work-'));
+  const port = await freePort();
+  const child = spawn('sh', [script, '--skip-build', '--codex', fake, '--port', String(port), '--workdir', workdir], {
+    cwd: root,
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return { child, workdir, port, madeDist, text: () => ({ stdout, stderr }) };
+}
+
+async function waitReady(session) {
+  return new Promise((resolveReady, reject) => {
+    const timer = setTimeout(() => {
+      const { stdout, stderr } = session.text();
+      reject(new Error(`timed out\n${stdout}\n${stderr}`));
+    }, 20_000);
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolveReady(value);
+    };
+    const check = () => {
+      const { stdout } = session.text();
+      const code = stdout.match(/enrollment_code=([0-9a-f]{64})/);
+      const dataDir = stdout.match(/data_dir=(\S+)/)?.[1];
+      const daemonPid = stdout.match(/daemon_pid=(\d+)/)?.[1];
+      if (code && dataDir && daemonPid) finish(null, { code: code[1], dataDir, daemonPid });
+    };
+    session.child.stdout.on('data', check);
+    session.child.once('exit', (status) => {
+      const { stdout, stderr } = session.text();
+      finish(new Error(`exited ${status}\n${stdout}\n${stderr}`));
+    });
+    check();
+  });
+}
+
+async function waitGone(marker, pids) {
+  const deadline = Date.now() + 8_000;
+  let lines = [];
+  while (Date.now() < deadline) {
+    lines = processLines(marker);
+    if (lines.length === 0 && pids.every((pid) => !pidAlive(pid))) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error(`still running for ${marker}: ${lines.join(' | ')}`);
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
+  test(`dev-try ${signal} stops the daemon and the fake codex child`, async () => {
+    const session = await launchTry();
+    let dataDir = '';
+    try {
+      const ready = await waitReady(session);
+      dataDir = ready.dataDir;
+      assert.equal(existsSync(dataDir), true);
+      assert.equal(pidAlive(ready.daemonPid), true);
+      process.kill(session.child.pid, signal);
+      await new Promise((resolveExit, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${signal} did not stop the script`)), 5_000);
+        if (session.child.exitCode !== null || session.child.signalCode !== null) {
+          clearTimeout(timer);
+          resolveExit();
+          return;
+        }
+        session.child.once('exit', () => {
+          clearTimeout(timer);
+          resolveExit();
+        });
+      });
+      await waitGone(dataDir, [ready.daemonPid, String(session.child.pid)]);
+      if (signal !== 'SIGKILL') {
+        for (let attempt = 0; attempt < 50 && existsSync(dataDir); attempt += 1) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+        }
+        assert.equal(existsSync(dataDir), false, `data dir was left behind: ${dataDir}`);
+      }
+    } finally {
+      await stopGroup(session.child);
+      await rm(session.workdir, { recursive: true, force: true });
+      if (dataDir) await rm(dataDir, { recursive: true, force: true });
+      if (session.madeDist) await rm(dist, { recursive: true, force: true });
+    }
+  });
+}

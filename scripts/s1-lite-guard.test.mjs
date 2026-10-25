@@ -186,6 +186,9 @@ test('the live script gates on the env and resets only through the guard', () =>
   assert.match(source, /--allow-session-create/);
   assert.match(source, /New session/);
   assert.match(source, /codexHomePathHits\(/);
+  assert.match(source, /mcpServer\/startupStatus\/updated/);
+  assert.match(source, /rev-parse', '--git-common-dir'/);
+  assert.doesNotMatch(source, /\/Users\/daliys/);
   const guardAt = source.indexOf('assertRepoIdentity(');
   const resetAt = source.indexOf("'reset', '--hard'");
   assert.ok(guardAt > 0 && resetAt > guardAt);
