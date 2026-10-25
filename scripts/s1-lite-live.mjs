@@ -12,7 +12,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, turn1Failure } from './s1-lite-guard.mjs';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, turn1Failure } from './s1-lite-guard.mjs';
 
 const TEST_REPO = '/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo';
 const SHARDRAIL = '/Users/daliys/Daliys/Shardrail';
@@ -222,13 +222,12 @@ function resetTestRepo(identity) {
 
 function prepareResultDir(path) {
   const absolute = resolve(path);
+  const roots = [realpathSync(SHARDRAIL), realpathSync(worktree)];
+  const allowed = join(roots[0], 'spikes/reviews19/live-1');
   spawnSync('mkdir', ['-p', absolute], { stdio: 'inherit' });
   const real = realpathSync(absolute);
-  const roots = [realpathSync(SHARDRAIL), realpathSync(worktree)];
-  if (roots.some((root) => real === root || real.startsWith(`${root}/`))) {
-    throw new Error('S1_RESULT_DIR must be outside the Shardrail checkouts');
-  }
-  return real;
+  if (absolute === allowed && real !== allowed) throw new Error('S1_RESULT_DIR must not resolve through a symlink');
+  return assertResultDirectory(real, { shardrail: roots[0], worktree: roots[1], allowedResultDir: allowed });
 }
 
 function porcelain(cwd) {

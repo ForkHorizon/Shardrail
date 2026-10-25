@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { assertHeadIsCommit, assertRepoIdentity, turn1Failure } from './s1-lite-guard.mjs';
+import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, turn1Failure } from './s1-lite-guard.mjs';
 
 const FULL = '1bb8838aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -131,6 +131,14 @@ test('a remote, a shared git dir, and the Shardrail checkout are refused', () =>
 test('HEAD after reset must be the verified full hash', () => {
   assert.doesNotThrow(() => assertHeadIsCommit(`${FULL}\n`, FULL));
   assert.throws(() => assertHeadIsCommit('1bb8838deadbeef', FULL), /expected 1bb8838a/);
+});
+
+test('result directory allows only the designated ignored live report under Shardrail', () => {
+  const roots = { shardrail: '/shardrail', worktree: '/worktree', allowedResultDir: '/shardrail/spikes/reviews19/live-1' };
+  assert.equal(assertResultDirectory(roots.allowedResultDir, roots), roots.allowedResultDir);
+  assert.equal(assertResultDirectory('/tmp/s1-live', roots), '/tmp/s1-live');
+  assert.throws(() => assertResultDirectory('/shardrail/spikes/reviews19/live-2', roots), /outside the Shardrail checkouts/);
+  assert.throws(() => assertResultDirectory('/worktree/live', roots), /outside the Shardrail checkouts/);
 });
 
 test('turn 1 can finish after a denial without a second approval', () => {

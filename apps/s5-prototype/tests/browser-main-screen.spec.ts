@@ -195,7 +195,7 @@ test('a prompt draft stays on its session and survives a rejected send', async (
   await expect(page.locator('#session-prompt')).toHaveValue('');
   await page.locator('#session-prompt').fill('keep this prompt');
   await page.getByRole('button', { name: 'Send prompt' }).click();
-  await expect(page.locator('.prompt').getByRole('alert')).toContainText('codex session is not ready');
+  await expect(page.locator('.prompt').getByRole('alert')).toContainText('limited clients cannot create sessions');
   await expect(page.locator('#session-prompt')).toHaveValue('keep this prompt');
   await page.getByRole('button', { name: 'Interrupt' }).click();
   await expect(page.locator('#session-prompt')).toHaveValue('keep this prompt');

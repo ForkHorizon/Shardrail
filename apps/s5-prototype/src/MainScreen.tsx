@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, ListBox, ListBoxItem } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, promptClearApplies, revealHiddenCharacters, sessionSummaries, transcriptItems, type TranscriptItem } from './session-model';
@@ -56,7 +56,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
         <h2 id="events-heading">{selected ? `Events for ${selected.id}` : 'Events'}</h2>
         {selected ? <SessionTranscript key={selected.id} sessionId={selected.id} items={items}/> : <p>Select a session.</p>}
         {/* The prompt key has to differ from the transcript key. Two siblings with the same key leave the previous transcript mounted. */}
-        {selected ? <PromptBox key={`prompt-${selected.id}`} sessionId={selected.id} error={promptError} promptClear={promptClear} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
+        {selected ? <PromptBox key={`prompt-${selected.id}-${promptClear && promptClearApplies(promptClear.sessionId, selected.id) ? promptClear.commandId : ''}`} sessionId={selected.id} error={promptError} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
         {selected ? <VerificationChecklist/> : null}
         {selected ? <Approvals cards={approvals} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval}/> : null}
       </section>
@@ -99,17 +99,13 @@ function SessionEvent({ event }: { event: TranscriptItem }) {
   </article>;
 }
 
-function PromptBox({ sessionId, error, promptClear, onSend, onInterrupt }: {
+function PromptBox({ sessionId, error, onSend, onInterrupt }: {
   sessionId: string;
   error: string | null;
-  promptClear: { commandId: string; sessionId: string } | null;
   onSend: (sessionId: string, prompt: string) => void;
   onInterrupt: (sessionId: string) => void;
 }) {
   const [text, setText] = useState('');
-  useEffect(() => {
-    if (promptClearApplies(promptClear?.sessionId ?? null, sessionId)) setText('');
-  }, [promptClear, sessionId]);
   return <section className="prompt" aria-labelledby="prompt-heading">
     <h2 id="prompt-heading">Prompt</h2>
     {error ? <p role="alert">{error}</p> : null}

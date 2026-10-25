@@ -4,6 +4,13 @@ import { spawnSync } from 'node:child_process';
 
 export const INITIAL_COMMIT_PREFIX = '1bb8838';
 
+export function assertResultDirectory(resultDir, { shardrail, worktree, allowedResultDir }) {
+  if ([shardrail, worktree].some((root) => resultDir === root || resultDir.startsWith(`${root}/`)) && resultDir !== allowedResultDir) {
+    throw new Error('S1_RESULT_DIR must be outside the Shardrail checkouts');
+  }
+  return resultDir;
+}
+
 export function gitOutput(cwd, args, spawn = spawnSync) {
   const result = spawn('git', ['-C', cwd, ...args], { encoding: 'utf8' });
   if (result.status !== 0) {
