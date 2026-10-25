@@ -213,7 +213,7 @@ async function main() {
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
     if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');
-    if (codexHomeHits.length) throw new Error(`journal references ${[...new Set(codexHomeHits.flatMap((hit) => hit.markers))].join(', ')}`);
+    if (codexHomeHits.length) throw new Error(`journal references ${[...new Set(codexHomeHits.flatMap((hit) => hit.markers))].join(', ')}: ${JSON.stringify(codexHomeHits)}`);
     if (rejectedExtensions.length) throw new Error('codex extensions were rejected');
     if (!verifiedExtensions.length) throw new Error('codex extension verification was not journaled');
     const turnFailure = turn1Failure({ ...turn1, finished: true });

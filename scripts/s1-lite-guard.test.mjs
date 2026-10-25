@@ -167,6 +167,12 @@ test('journaled commands, approvals, items, and paths must stay out of Codex and
     { event_id: 'warn', kind: 'provider_notice', payload: { method: 'configWarning', params: { summary: 'user (/Users/owner/.codex/config.toml): `x` is ignored.' } } },
     { event_id: 'warn2', kind: 'provider_notice', payload: { method: 'warning', params: { message: 'Codex is ignoring 1 unrecognized configuration setting.\n  user (/Users/owner/.codex/config.toml): `x` is ignored.' } } },
   ]), []);
+  assert.deepEqual(codexHomePathHits([
+    { event_id: 'rollout', kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { path: '/Users/owner/.codex/sessions/2026/10/25/rollout-2026-10-25T20-25-22-abc.jsonl', cwd: '/tmp/repo' } } } },
+  ]), []);
+  assert.equal(codexHomePathHits([
+    { event_id: 'rollout-cwd', kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { path: '/Users/owner/.codex/sessions/2026/10/25/rollout-x.jsonl', cwd: '/Users/owner/.codex/skills' } } } },
+  ]).length, 1);
   assert.equal(codexHomePathHits([
     { event_id: 'other', kind: 'provider_notice', payload: { method: 'item/started', params: { path: '/Users/owner/.codex/skills/a' } } },
   ]).length, 1);
