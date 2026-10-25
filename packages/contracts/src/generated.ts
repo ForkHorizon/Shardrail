@@ -79,6 +79,11 @@ export type DaemonFrame =
       cursor: number;
       kind: "resync_required";
       [k: string]: unknown;
+    }
+  | {
+      kind: "session_workdirs";
+      workdirs: string[];
+      [k: string]: unknown;
     };
 export type SessionLifecycle = "open" | "closing" | "closed" | "purging" | "purged";
 
@@ -93,6 +98,8 @@ export interface ContractSchema {
   event: DurableEvent;
   option_class: OptionClass;
   server_hello: ServerHello;
+  session_create_audit: SessionCreateAudit;
+  session_create_request: SessionCreateRequest;
   session_lifecycle: SessionLifecycle;
   [k: string]: unknown;
 }
@@ -155,5 +162,25 @@ export interface ServerHello {
   resync_required: boolean;
   scope: ClientScope;
   signature: string;
+  [k: string]: unknown;
+}
+/**
+ * Durable record of one `session.create` attempt. Denied attempts use a nil session id.
+ */
+export interface SessionCreateAudit {
+  capability: string;
+  client_id: string;
+  client_label: string;
+  outcome: string;
+  reason?: string | null;
+  scope: ClientScope;
+  workdir?: string | null;
+  [k: string]: unknown;
+}
+/**
+ * Optional `session.create` payload. A missing `workdir` uses the daemon default.
+ */
+export interface SessionCreateRequest {
+  workdir?: string | null;
   [k: string]: unknown;
 }

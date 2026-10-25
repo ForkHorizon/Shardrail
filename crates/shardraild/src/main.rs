@@ -12,6 +12,7 @@ use shardrail_coordinator::{
 use shardrail_journal::Journal;
 use shardrail_protocol::{ApprovalDecision, ApprovalResolutionRequest, DurableEvent, OptionClass};
 use shardrail_protocol::{ClientFrame, ClientHello, ClientScope, DaemonFrame, ServerHello};
+use shardrail_protocol::{CommandRequest, SessionCreateAudit};
 use shardrail_session_core::{Approval, Session};
 use std::collections::HashMap;
 use std::fs;
@@ -36,6 +37,7 @@ use uuid::Uuid;
 
 mod codex_app_server;
 mod daemon_log;
+mod session_workdir;
 
 const PROTOCOL_VERSION: u32 = 1;
 const CLIENT_QUEUE_CAPACITY: usize = 32;
@@ -67,8 +69,11 @@ struct Args {
     /// Codex CLI used as `codex app-server` for one child process per session.
     #[arg(long, value_name = "PATH")]
     codex_app_server: Option<PathBuf>,
-    /// Working directory for Codex threads. Required with `--codex-app-server`.
-    #[arg(long, value_name = "DIR", requires = "codex_app_server")]
+    /// Session workdir allowlist entry. Repeatable. Canonicalized at startup.
+    #[arg(long, value_name = "DIR")]
+    session_workdir: Vec<PathBuf>,
+    /// Working directory for Codex threads. Adds the default allowlist entry.
+    #[arg(long, value_name = "DIR")]
     codex_workdir: Option<PathBuf>,
     /// Extra Codex `-c` override, placed before the mandatory safety overrides.
     #[arg(long = "codex-config", value_name = "KEY=VALUE")]
@@ -737,6 +742,9 @@ enum ClientCommand {
     Enroll {
         #[arg(long, default_value = "browser")]
         label: String,
+        /// Grant this limited client the `session.create` capability.
+        #[arg(long)]
+        allow_session_create: bool,
     },
     Add {
         #[arg(long)]
@@ -764,6 +772,8 @@ struct AuthorizedClient {
     public_key: String,
     label: String,
     scope: ClientScope,
+    #[serde(default)]
+    allow_session_create: bool,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -777,6 +787,8 @@ struct Enrollment {
     expires_at_ms: u128,
     failed_attempts: u8,
     label: String,
+    #[serde(default)]
+    allow_session_create: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -800,6 +812,7 @@ pub(crate) struct Daemon {
     pub(crate) approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
     pub(crate) sessions: Mutex<HashMap<Uuid, Arc<Mutex<Coordinator>>>>,
     pub(crate) codex: Option<codex_app_server::CodexConfig>,
+    pub(crate) session_workdirs: Vec<PathBuf>,
     pub(crate) codex_status: Mutex<HashMap<Uuid, codex_app_server::CodexStatus>>,
     pub(crate) turn_commands:
         Mutex<HashMap<Uuid, mpsc::UnboundedSender<codex_app_server::SessionCommand>>>,
@@ -820,7 +833,10 @@ pub(crate) struct ProviderOption {
     pub(crate) decision: ApprovalDecision,
 }
 
-fn codex_config(args: &Args) -> Result<Option<codex_app_server::CodexConfig>, io::Error> {
+fn codex_config(
+    args: &Args,
+    allowlist: &[PathBuf],
+) -> Result<Option<codex_app_server::CodexConfig>, io::Error> {
     if args.fake_acp_path.is_some() && args.codex_app_server.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -836,19 +852,12 @@ fn codex_config(args: &Args) -> Result<Option<codex_app_server::CodexConfig>, io
     let Some(program) = args.codex_app_server.clone() else {
         return Ok(None);
     };
-    let workdir = args.codex_workdir.clone().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--codex-workdir is required with --codex-app-server",
-        )
-    })?;
-    let workdir = fs::canonicalize(&workdir)?;
-    if !workdir.is_dir() {
+    let Some(workdir) = allowlist.first().cloned() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--codex-workdir must be an existing directory",
+            "--codex-app-server requires --codex-workdir or --session-workdir",
         ));
-    }
+    };
     for item in &args.codex_config {
         if !codex_app_server::config_override_allowed(item) {
             return Err(io::Error::new(
@@ -867,12 +876,7 @@ fn codex_config(args: &Args) -> Result<Option<codex_app_server::CodexConfig>, io
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let codex = if args.command.is_none() {
-        codex_config(&args)?
-    } else {
-        None
-    };
-    let path = args.data_dir.unwrap_or_else(default_data_dir);
+    let path = args.data_dir.clone().unwrap_or_else(default_data_dir);
     match args.command {
         Some(DaemonCommand::Client { command }) => manage_clients(&path, command)?,
         Some(DaemonCommand::Identity) => {
@@ -892,6 +896,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         None => {
+            let session_workdirs = session_workdir::collect_session_workdirs(
+                args.codex_workdir.as_deref(),
+                &args.session_workdir,
+            )?;
+            let codex = codex_config(&args, &session_workdirs)?;
             daemon_log::init(daemon_log::configured_dir(args.log_dir, args.no_file_log));
             run(
                 path,
@@ -905,6 +914,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assets_dir: args.browser_assets_dir,
                 },
                 codex,
+                session_workdirs,
             )
             .await?
         }
@@ -925,6 +935,7 @@ async fn run(
     test_write_ahead_delay_ms: u64,
     browser: BrowserListenerOptions,
     codex: Option<codex_app_server::CodexConfig>,
+    session_workdirs: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -964,11 +975,20 @@ async fn run(
         approvals: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
         codex,
+        session_workdirs: session_workdirs.clone(),
         codex_status: Mutex::new(HashMap::new()),
         turn_commands: Mutex::new(HashMap::new()),
     });
     codex_app_server::install_shutdown_kill();
     daemon_log::log("INFO", "daemon", &startup_message(&socket, host_id, epoch));
+    daemon_log::log(
+        "INFO",
+        "daemon",
+        &format!(
+            "session workdir allowlist: {}",
+            session_workdir::format_allowlist(&session_workdirs)
+        ),
+    );
     if let Some(listener) = browser_listener {
         let address = listener.local_addr()?;
         daemon_log::log(
@@ -1614,29 +1634,30 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
                     encode_hex(&key.verifying_key().to_bytes())
                 }
             };
-            entries.clients.push(AuthorizedClient {
-                client_id: id,
-                public_key: public_key.clone(),
-                label,
-                scope: match scope {
-                    ScopeArg::Full => ClientScope::Full,
-                    ScopeArg::Limited => ClientScope::Limited,
-                },
-            });
-            save_authorized_clients(path, &entries).map_err(|error| {
-                io::Error::new(error.kind(), format!("save client registry: {error}"))
-            })?;
             let client_scope = match scope {
                 ScopeArg::Full => ClientScope::Full,
                 ScopeArg::Limited => ClientScope::Limited,
             };
+            entries.clients.push(AuthorizedClient {
+                client_id: id,
+                public_key: public_key.clone(),
+                label,
+                scope: client_scope,
+                allow_session_create: client_scope == ClientScope::Full,
+            });
+            save_authorized_clients(path, &entries).map_err(|error| {
+                io::Error::new(error.kind(), format!("save client registry: {error}"))
+            })?;
             println!(
                 "client_id={id} public_key={public_key} scope={} host_public_key={}",
                 scope_name(client_scope),
                 encode_hex(&host_key.verifying_key().to_bytes())
             );
         }
-        ClientCommand::Enroll { label } => {
+        ClientCommand::Enroll {
+            label,
+            allow_session_create,
+        } => {
             let mut code = [0u8; 32];
             fs::File::open("/dev/urandom")?.read_exact(&mut code)?;
             let text = encode_hex(&code);
@@ -1647,6 +1668,7 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
                     expires_at_ms: wall_clock_ms() as u128 + 300_000,
                     failed_attempts: 0,
                     label,
+                    allow_session_create,
                 },
             )?;
             println!("enrollment_code={text} expires_in_seconds=300");
@@ -1654,11 +1676,16 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
         ClientCommand::List => {
             for client in entries.clients {
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     client.client_id,
                     client.label,
                     scope_name(client.scope),
-                    client.public_key
+                    client.public_key,
+                    if client.allow_session_create {
+                        "session.create"
+                    } else {
+                        "-"
+                    }
                 );
             }
         }
@@ -1751,6 +1778,7 @@ fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serd
         public_key,
         label: enrollment.label,
         scope: ClientScope::Limited,
+        allow_session_create: enrollment.allow_session_create,
     });
     save_authorized_clients(path, &clients)?;
     let host_key = load_or_create_signing_key(&path.join("host.key"))?;
@@ -2216,6 +2244,19 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         return finish_with_error(outbound, &mut abort_writer, "client proof is invalid").await;
     }
     write_frame(&outbound, &DaemonFrame::Authenticated).await?;
+    if client.scope == ClientScope::Limited && client.allow_session_create {
+        write_frame(
+            &outbound,
+            &DaemonFrame::SessionWorkdirs {
+                workdirs: daemon
+                    .session_workdirs
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            },
+        )
+        .await?;
+    }
     let mut event_generation = daemon.event_generation.subscribe();
     push_events(&outbound, &daemon, &mut cursor).await?;
     let mut lines = read.lines();
@@ -2286,148 +2327,414 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 codex_app_server::handle_turn_command(&daemon, &outbound, &request).await?;
                 continue;
             }
-            if client.scope == ClientScope::Limited {
-                write_frame(
-                    &outbound,
-                    &DaemonFrame::CommandRejected {
-                        command_id: request.command_id,
-                        error: "limited clients cannot create sessions".into(),
-                    },
-                )
-                .await?;
-                continue;
-            }
             if request.kind != "session.create" {
+                let error = if client.scope == ClientScope::Limited {
+                    "limited clients cannot create sessions"
+                } else {
+                    "unsupported command or invalid preconditions"
+                };
                 write_frame(
                     &outbound,
                     &DaemonFrame::CommandRejected {
                         command_id: request.command_id,
-                        error: "unsupported command or invalid preconditions".into(),
+                        error: error.into(),
                     },
                 )
                 .await?;
                 continue;
             }
-            let _command = daemon.command_lock.lock().await;
-            let existing = daemon
-                .journal
-                .lock()
-                .await
-                .created_session_for_command(client.client_id, request.command_id)
-                .map_err(io::Error::other)?;
-            if let Some((session_id, event_id)) = existing {
-                if let Some(config) = daemon.codex.clone()
-                    && codex_start_incomplete(&daemon, session_id).await?
-                {
-                    let status =
-                        codex_app_server::start_session(Arc::clone(&daemon), config, session_id)
-                            .await;
-                    if let codex_app_server::CodexStatus::Failed(error) = status {
-                        write_frame(
-                            &outbound,
-                            &DaemonFrame::CommandRejected {
-                                command_id: request.command_id,
-                                error,
-                            },
-                        )
-                        .await?;
-                        push_events(&outbound, &daemon, &mut cursor).await?;
-                        continue;
-                    }
-                }
-                let receipt = daemon
-                    .journal
-                    .lock()
-                    .await
-                    .event_receipt(event_id)
-                    .map_err(io::Error::other)?;
-                write_frame(
-                    &outbound,
-                    &DaemonFrame::CommandAccepted {
-                        command_id: request.command_id,
-                        receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
-                        receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
-                        cursor: event_id,
-                    },
-                )
-                .await?;
-                push_events(&outbound, &daemon, &mut cursor).await?;
-                continue;
-            }
-            let session_id = Uuid::now_v7();
-            let now_ms = wall_clock_ms();
-            let mut coordinator = Coordinator::open(
-                Journal::open(daemon.data.journal_path()).map_err(io::Error::other)?,
-                session_id,
-            )
-            .map_err(io::Error::other)?;
-            coordinator
-                .transition_session(
-                    now_ms,
-                    "session_created",
-                    json!({"session_id": session_id, "client_id": client.client_id, "command_id": request.command_id}),
-                    Session::default(),
-                    || Ok::<_, io::Error>(()),
-                )
-                .map_err(io::Error::other)?;
-            daemon
-                .event_generation
-                .send_modify(|generation| *generation += 1);
-            daemon
-                .sessions
-                .lock()
-                .await
-                .insert(session_id, Arc::new(Mutex::new(coordinator)));
-            let (event_id, receipt) = {
-                let journal = daemon.journal.lock().await;
-                let event = journal
-                    .events_for_session(session_id)
-                    .map_err(io::Error::other)?
-                    .into_iter()
-                    .last()
-                    .ok_or_else(|| io::Error::other("session creation event was not committed"))?;
-                let event_id = event.event_id;
-                let receipt = journal.event_receipt(event_id).map_err(io::Error::other)?;
-                (event_id, receipt)
-            };
-            if let Some(config) = daemon.codex.clone() {
-                let status =
-                    codex_app_server::start_session(Arc::clone(&daemon), config, session_id).await;
-                if let codex_app_server::CodexStatus::Failed(error) = status {
-                    write_frame(
-                        &outbound,
-                        &DaemonFrame::CommandRejected {
-                            command_id: request.command_id,
-                            error,
-                        },
-                    )
-                    .await?;
-                    push_events(&outbound, &daemon, &mut cursor).await?;
-                    continue;
-                }
-            }
-            write_frame(
-                &outbound,
-                &DaemonFrame::CommandAccepted {
-                    command_id: request.command_id,
-                    receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
-                    receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
-                    cursor: event_id,
-                },
-            )
-            .await?;
-            push_events(&outbound, &daemon, &mut cursor).await?;
-            if daemon.codex.is_none()
-                && let Some(path) = daemon.fake_acp_path.clone()
-            {
-                tokio::spawn(run_fake_acp(Arc::clone(&daemon), path, session_id));
-            }
+            handle_session_create(&daemon, &client, request, &outbound, &mut cursor).await?;
         }
         if let Some(resume_after) = resume_after {
             cursor = resume_after.max(0);
             push_events(&outbound, &daemon, &mut cursor).await?;
         }
     }
+}
+
+enum WorkdirChoice {
+    Unset,
+    Path(PathBuf),
+}
+
+fn capability_name(client: &AuthorizedClient) -> &'static str {
+    if client.scope == ClientScope::Full {
+        "full"
+    } else if client.allow_session_create {
+        "session.create"
+    } else {
+        "none"
+    }
+}
+
+fn requested_workdir(payload: &serde_json::Value) -> Result<Option<&str>, &'static str> {
+    if payload.is_null() {
+        return Ok(None);
+    }
+    let Some(object) = payload.as_object() else {
+        return Err("workdir is invalid");
+    };
+    match object.get("workdir") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => {
+            if text.is_empty() || text.len() > 4096 || text.chars().any(char::is_control) {
+                Err("workdir is invalid")
+            } else {
+                Ok(Some(text.as_str()))
+            }
+        }
+        Some(_) => Err("workdir is invalid"),
+    }
+}
+
+fn audit_workdir_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let text = value?.as_str()?;
+    if text.is_empty() || text.len() > 4096 || text.chars().any(char::is_control) {
+        None
+    } else {
+        Some(text.to_owned())
+    }
+}
+
+fn choose_workdir(
+    client: &AuthorizedClient,
+    payload: &serde_json::Value,
+    allowlist: &[PathBuf],
+) -> Result<WorkdirChoice, &'static str> {
+    match requested_workdir(payload)? {
+        None if client.scope != ClientScope::Full => {
+            Err("limited clients must name an allowlisted workdir")
+        }
+        None => match allowlist.first() {
+            Some(default) => Ok(WorkdirChoice::Path(default.clone())),
+            None => Ok(WorkdirChoice::Unset),
+        },
+        Some(raw) => Ok(WorkdirChoice::Path(
+            session_workdir::accept_requested_workdir(raw, allowlist)?,
+        )),
+    }
+}
+
+async fn record_session_create_audit(
+    daemon: &Daemon,
+    client: &AuthorizedClient,
+    capability: &str,
+    workdir: Option<&str>,
+    outcome: &str,
+    reason: Option<&str>,
+) -> io::Result<()> {
+    daemon_log::log(
+        "INFO",
+        "session",
+        &format!(
+            "client_id={} label={} scope={} capability={} workdir={} outcome={} reason={}",
+            client.client_id,
+            client.label,
+            scope_name(client.scope),
+            capability,
+            workdir.unwrap_or("-"),
+            outcome,
+            reason.unwrap_or("-"),
+        ),
+    );
+    let payload = serde_json::to_value(SessionCreateAudit {
+        client_id: client.client_id,
+        client_label: client.label.clone(),
+        scope: client.scope,
+        capability: capability.to_owned(),
+        workdir: workdir.map(str::to_owned),
+        outcome: outcome.to_owned(),
+        reason: reason.map(str::to_owned),
+    })
+    .map_err(io::Error::other)?;
+    let mut journal = daemon.journal.lock().await;
+    let journal_epoch = journal.journal_epoch().map_err(io::Error::other)?;
+    let host_id = journal.host_id().map_err(io::Error::other)?;
+    journal
+        .append_event(&DurableEvent {
+            event_id: 0,
+            journal_epoch,
+            host_id,
+            session_id: Uuid::nil(),
+            schema_version: 1,
+            kind: "session_create_audit".into(),
+            occurred_at_ms: wall_clock_ms(),
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload,
+        })
+        .map_err(io::Error::other)?;
+    drop(journal);
+    daemon
+        .event_generation
+        .send_modify(|generation| *generation += 1);
+    Ok(())
+}
+
+async fn reject_session_create(
+    daemon: &Daemon,
+    client: &AuthorizedClient,
+    outbound: &mpsc::Sender<Vec<u8>>,
+    command_id: Uuid,
+    workdir: Option<&str>,
+    reason: &str,
+    error: &str,
+) -> io::Result<()> {
+    record_session_create_audit(
+        daemon,
+        client,
+        capability_name(client),
+        workdir,
+        "denied",
+        Some(reason),
+    )
+    .await?;
+    write_frame(
+        outbound,
+        &DaemonFrame::CommandRejected {
+            command_id,
+            error: error.to_owned(),
+        },
+    )
+    .await
+}
+
+async fn saved_session_workdir(daemon: &Daemon, session_id: Uuid) -> io::Result<Option<PathBuf>> {
+    let journal = daemon.journal.lock().await;
+    let events = journal
+        .events_for_session(session_id)
+        .map_err(io::Error::other)?;
+    Ok(events
+        .iter()
+        .find(|event| event.kind == "session_created")
+        .and_then(|event| {
+            event
+                .payload
+                .get("workdir")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        })
+        .filter(|path| {
+            daemon
+                .session_workdirs
+                .iter()
+                .any(|allowed| allowed == path)
+        }))
+}
+
+async fn handle_session_create(
+    daemon: &Arc<Daemon>,
+    client: &AuthorizedClient,
+    request: CommandRequest,
+    outbound: &mpsc::Sender<Vec<u8>>,
+    cursor: &mut i64,
+) -> io::Result<()> {
+    let capability = capability_name(client);
+    if client.scope != ClientScope::Full && !client.allow_session_create {
+        let workdir = audit_workdir_text(request.payload.get("workdir"));
+        return reject_session_create(
+            daemon,
+            client,
+            outbound,
+            request.command_id,
+            workdir.as_deref(),
+            "scope",
+            "limited clients cannot create sessions",
+        )
+        .await;
+    }
+    let choice = match choose_workdir(client, &request.payload, &daemon.session_workdirs) {
+        Ok(choice) => choice,
+        Err(error) => {
+            let workdir = audit_workdir_text(request.payload.get("workdir"));
+            return reject_session_create(
+                daemon,
+                client,
+                outbound,
+                request.command_id,
+                workdir.as_deref(),
+                "workdir",
+                error,
+            )
+            .await;
+        }
+    };
+    let _command = daemon.command_lock.lock().await;
+    let existing = daemon
+        .journal
+        .lock()
+        .await
+        .created_session_for_command(client.client_id, request.command_id)
+        .map_err(io::Error::other)?;
+    if let Some((session_id, event_id)) = existing {
+        if let Some(mut config) = daemon.codex.clone()
+            && codex_start_incomplete(daemon, session_id).await?
+        {
+            if let Some(saved) = saved_session_workdir(daemon, session_id).await? {
+                config.workdir = saved;
+            }
+            let status =
+                codex_app_server::start_session(Arc::clone(daemon), config, session_id).await;
+            if let codex_app_server::CodexStatus::Failed(error) = status {
+                write_frame(
+                    outbound,
+                    &DaemonFrame::CommandRejected {
+                        command_id: request.command_id,
+                        error,
+                    },
+                )
+                .await?;
+                push_events(outbound, daemon, cursor).await?;
+                return Ok(());
+            }
+        }
+        let receipt = daemon
+            .journal
+            .lock()
+            .await
+            .event_receipt(event_id)
+            .map_err(io::Error::other)?;
+        write_frame(
+            outbound,
+            &DaemonFrame::CommandAccepted {
+                command_id: request.command_id,
+                receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
+                receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
+                cursor: event_id,
+            },
+        )
+        .await?;
+        push_events(outbound, daemon, cursor).await?;
+        return Ok(());
+    }
+    let workdir = match choice {
+        WorkdirChoice::Unset if daemon.codex.is_some() => {
+            return reject_session_create(
+                daemon,
+                client,
+                outbound,
+                request.command_id,
+                None,
+                "codex",
+                "codex is not configured",
+            )
+            .await;
+        }
+        WorkdirChoice::Unset => None,
+        WorkdirChoice::Path(path) if daemon.codex.is_none() => {
+            let text = path.display().to_string();
+            return reject_session_create(
+                daemon,
+                client,
+                outbound,
+                request.command_id,
+                Some(&text),
+                "codex",
+                "codex is not configured",
+            )
+            .await;
+        }
+        WorkdirChoice::Path(path) => Some(path),
+    };
+    let workdir_text = workdir.as_ref().map(|path| path.display().to_string());
+    let session_id = Uuid::now_v7();
+    let now_ms = wall_clock_ms();
+    let mut created = json!({
+        "session_id": session_id,
+        "client_id": client.client_id,
+        "command_id": request.command_id,
+    });
+    let audit = serde_json::to_value(SessionCreateAudit {
+        client_id: client.client_id,
+        client_label: client.label.clone(),
+        scope: client.scope,
+        capability: capability.to_owned(),
+        workdir: workdir_text.clone(),
+        outcome: "allowed".to_owned(),
+        reason: None,
+    })
+    .map_err(io::Error::other)?;
+    if let (Some(object), Some(extra)) = (created.as_object_mut(), audit.as_object()) {
+        for (key, value) in extra {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    let mut coordinator = Coordinator::open(
+        Journal::open(daemon.data.journal_path()).map_err(io::Error::other)?,
+        session_id,
+    )
+    .map_err(io::Error::other)?;
+    coordinator
+        .transition_session(
+            now_ms,
+            "session_created",
+            created,
+            Session::default(),
+            || Ok::<_, io::Error>(()),
+        )
+        .map_err(io::Error::other)?;
+    daemon
+        .sessions
+        .lock()
+        .await
+        .insert(session_id, Arc::new(Mutex::new(coordinator)));
+    record_session_create_audit(
+        daemon,
+        client,
+        capability,
+        workdir_text.as_deref(),
+        "allowed",
+        None,
+    )
+    .await?;
+    let (event_id, receipt) = {
+        let journal = daemon.journal.lock().await;
+        let event = journal
+            .events_for_session(session_id)
+            .map_err(io::Error::other)?
+            .into_iter()
+            .last()
+            .ok_or_else(|| io::Error::other("session creation event was not committed"))?;
+        let event_id = event.event_id;
+        let receipt = journal.event_receipt(event_id).map_err(io::Error::other)?;
+        (event_id, receipt)
+    };
+    if let Some(mut config) = daemon.codex.clone() {
+        if let Some(path) = workdir {
+            config.workdir = path;
+        }
+        let status = codex_app_server::start_session(Arc::clone(daemon), config, session_id).await;
+        if let codex_app_server::CodexStatus::Failed(error) = status {
+            write_frame(
+                outbound,
+                &DaemonFrame::CommandRejected {
+                    command_id: request.command_id,
+                    error,
+                },
+            )
+            .await?;
+            push_events(outbound, daemon, cursor).await?;
+            return Ok(());
+        }
+    }
+    write_frame(
+        outbound,
+        &DaemonFrame::CommandAccepted {
+            command_id: request.command_id,
+            receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
+            receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
+            cursor: event_id,
+        },
+    )
+    .await?;
+    push_events(outbound, daemon, cursor).await?;
+    if daemon.codex.is_none()
+        && let Some(path) = daemon.fake_acp_path.clone()
+    {
+        tokio::spawn(run_fake_acp(Arc::clone(daemon), path, session_id));
+    }
+    Ok(())
 }
 
 async fn codex_start_incomplete(daemon: &Daemon, session_id: Uuid) -> io::Result<bool> {
@@ -2562,6 +2869,13 @@ mod tests {
     use super::*;
 
     fn enrollment_fixture(expires_at_ms: u128) -> (tempfile::TempDir, String, String) {
+        enrollment_fixture_with(expires_at_ms, false)
+    }
+
+    fn enrollment_fixture_with(
+        expires_at_ms: u128,
+        allow_session_create: bool,
+    ) -> (tempfile::TempDir, String, String) {
         let directory = tempfile::tempdir().unwrap();
         let (_fd, path) = open_private_data_directory(directory.path()).unwrap();
         let secret = "ab".repeat(32);
@@ -2574,6 +2888,7 @@ mod tests {
                 expires_at_ms,
                 failed_attempts: 0,
                 label: "test browser".into(),
+                allow_session_create,
             },
         )
         .unwrap();
@@ -2722,6 +3037,29 @@ mod tests {
         );
         let clients = load_authorized_clients(directory.path()).unwrap();
         assert_eq!(clients.clients.len(), 1);
+        assert_eq!(clients.clients[0].scope, ClientScope::Limited);
+        assert!(!clients.clients[0].allow_session_create);
+    }
+
+    #[test]
+    fn enrollment_flag_persists_and_old_records_default_off() {
+        let old_client: AuthorizedClient = serde_json::from_str(
+            r#"{"client_id":"00000000-0000-0000-0000-000000000000","public_key":"aa","label":"old","scope":"full"}"#,
+        )
+        .unwrap();
+        assert!(!old_client.allow_session_create);
+        let old_enrollment: Enrollment = serde_json::from_str(
+            r#"{"code_hash":"ab","expires_at_ms":1,"failed_attempts":0,"label":"browser"}"#,
+        )
+        .unwrap();
+        assert!(!old_enrollment.allow_session_create);
+
+        let (directory, code, key) =
+            enrollment_fixture_with(wall_clock_ms() as u128 + 60_000, true);
+        let enrolled = redeem_enrollment(directory.path(), enrollment_request(code, key)).unwrap();
+        assert_eq!(enrolled["scope"], "limited");
+        let clients = load_authorized_clients(directory.path()).unwrap();
+        assert!(clients.clients[0].allow_session_create);
         assert_eq!(clients.clients[0].scope, ClientScope::Limited);
     }
 

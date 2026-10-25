@@ -33,6 +33,12 @@
     "server_hello": {
       "$ref": "#/$defs/ServerHello"
     },
+    "session_create_audit": {
+      "$ref": "#/$defs/SessionCreateAudit"
+    },
+    "session_create_request": {
+      "$ref": "#/$defs/SessionCreateRequest"
+    },
     "session_lifecycle": {
       "$ref": "#/$defs/SessionLifecycle"
     }
@@ -48,7 +54,9 @@
     "server_hello",
     "command_request",
     "client_frame",
-    "daemon_frame"
+    "daemon_frame",
+    "session_create_request",
+    "session_create_audit"
   ],
   "$defs": {
     "ApprovalDecision": {
@@ -433,6 +441,26 @@
             "kind",
             "cursor"
           ]
+        },
+        {
+          "description": "Allowlisted session workdirs. Sent only to a limited client that holds `session.create`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "session_workdirs"
+            },
+            "workdirs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "workdirs"
+          ]
         }
       ]
     },
@@ -554,6 +582,59 @@
         "cursor",
         "resync_required"
       ]
+    },
+    "SessionCreateAudit": {
+      "description": "Durable record of one `session.create` attempt. Denied attempts use a nil session id.",
+      "type": "object",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "client_label": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ClientScope"
+        },
+        "workdir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "client_id",
+        "client_label",
+        "scope",
+        "capability",
+        "outcome"
+      ]
+    },
+    "SessionCreateRequest": {
+      "description": "Optional `session.create` payload. A missing `workdir` uses the daemon default.",
+      "type": "object",
+      "properties": {
+        "workdir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "SessionLifecycle": {
       "type": "string",

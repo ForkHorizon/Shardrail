@@ -87,6 +87,8 @@ pub struct ContractSchema {
     pub command_request: CommandRequest,
     pub client_frame: ClientFrame,
     pub daemon_frame: DaemonFrame,
+    pub session_create_request: SessionCreateRequest,
+    pub session_create_audit: SessionCreateAudit,
 }
 
 /// First frame on a client connection; authentication completes before streaming.
@@ -130,6 +132,24 @@ pub struct CommandRequest {
     pub payload: serde_json::Value,
 }
 
+/// Optional `session.create` payload. A missing `workdir` uses the daemon default.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SessionCreateRequest {
+    pub workdir: Option<String>,
+}
+
+/// Durable record of one `session.create` attempt. Denied attempts use a nil session id.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SessionCreateAudit {
+    pub client_id: Uuid,
+    pub client_label: String,
+    pub scope: ClientScope,
+    pub capability: String,
+    pub workdir: Option<String>,
+    pub outcome: String,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientFrame {
@@ -168,4 +188,47 @@ pub enum DaemonFrame {
     ResyncRequired {
         cursor: i64,
     },
+    /// Allowlisted session workdirs. Sent only to a limited client that holds `session.create`.
+    SessionWorkdirs {
+        workdirs: Vec<String>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_create_audit_and_workdir_frame_round_trip() {
+        let audit = SessionCreateAudit {
+            client_id: Uuid::nil(),
+            client_label: "browser".into(),
+            scope: ClientScope::Limited,
+            capability: "session.create".into(),
+            workdir: Some("/tmp/work".into()),
+            outcome: "denied".into(),
+            reason: Some("workdir".into()),
+        };
+        let text = serde_json::to_string(&audit).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SessionCreateAudit>(&text).unwrap(),
+            audit
+        );
+
+        let request = SessionCreateRequest {
+            workdir: Some("/tmp/work".into()),
+        };
+        let text = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SessionCreateRequest>(&text).unwrap(),
+            request
+        );
+
+        let frame = DaemonFrame::SessionWorkdirs {
+            workdirs: vec!["/tmp/work".into()],
+        };
+        let text = serde_json::to_string(&frame).unwrap();
+        assert!(text.contains("\"kind\":\"session_workdirs\""));
+        assert_eq!(serde_json::from_str::<DaemonFrame>(&text).unwrap(), frame);
+    }
 }
