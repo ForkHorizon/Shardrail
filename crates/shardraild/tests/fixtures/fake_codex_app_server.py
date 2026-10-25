@@ -11,6 +11,8 @@ MODE = os.environ.get("SHARDRAIL_CODEX_FAKE_MODE", "happy")
 TRACE = os.environ.get("SHARDRAIL_CODEX_TRACE")
 ARGV_OUT = os.environ.get("SHARDRAIL_CODEX_ARGV_OUT")
 PID_OUT = os.environ.get("SHARDRAIL_CODEX_PID_OUT")
+HERE = os.path.dirname(os.path.abspath(__file__))
+AUTOWRITE = os.path.join(HERE, "codex-0.160.0-on-request-autowrite.jsonl")
 SECRET = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A"
 
 
@@ -58,7 +60,7 @@ def thread_result(params):
     else:
         sandbox = {"type": "workspaceWrite"}
     result = {
-        "approvalPolicy": params.get("approvalPolicy") or "on-request",
+        "approvalPolicy": "on-request" if MODE == "weak-policy" else (params.get("approvalPolicy") or "untrusted"),
         "approvalsReviewer": reviewer,
         "cwd": cwd,
         "model": "fake",
@@ -194,6 +196,24 @@ def main():
                 return
             if MODE == "bad-turn-reviewer":
                 complete(turn_id, "failed")
+                continue
+            if MODE == "autowrite":
+                # Replays the notification order Codex 0.160.0 produced in the S1-lite
+                # live run under on-request + workspace-write: a patch applied with no
+                # item/fileChange/requestApproval in between.
+                with open(AUTOWRITE, encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.strip():
+                            frame = json.loads(line.replace("TURN_ID", turn_id))
+                            send(frame)
+                while True:
+                    nxt = read_message()
+                    if nxt is None:
+                        return
+                    if nxt.get("method") == "turn/interrupt":
+                        reply(nxt["id"], {})
+                        complete(turn_id, "interrupted")
+                        break
                 continue
             if turns == 1:
                 notify(

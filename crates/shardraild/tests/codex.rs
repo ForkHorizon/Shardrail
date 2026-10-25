@@ -381,7 +381,7 @@ fn codex_streams_approvals_redacts_and_interrupts() {
     let thread = inbound(&trace, "thread/start");
     assert_eq!(thread["params"]["approvalsReviewer"], "user");
     assert_eq!(thread["params"]["sandbox"], "workspace-write");
-    assert_eq!(thread["params"]["approvalPolicy"], "on-request");
+    assert_eq!(thread["params"]["approvalPolicy"], "untrusted");
     let cwd = dirs.work.path().canonicalize().unwrap();
     assert_eq!(thread["params"]["cwd"], cwd.to_string_lossy().into_owned());
 
@@ -467,7 +467,7 @@ fn codex_streams_approvals_redacts_and_interrupts() {
     let trace = trace_messages(&dirs.trace);
     let turn = inbound(&trace, "turn/start");
     assert_eq!(turn["params"]["approvalsReviewer"], "user");
-    assert_eq!(turn["params"]["approvalPolicy"], "on-request");
+    assert_eq!(turn["params"]["approvalPolicy"], "untrusted");
     assert_eq!(turn["params"]["sandboxPolicy"]["type"], "workspaceWrite");
     assert_eq!(turn["params"]["input"][0]["type"], "text");
     let made = decisions(&trace);
@@ -739,6 +739,86 @@ fn codex_daemon_exit_kills_the_child_group() {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(!alive, "codex child {child_pid} survived daemon exit");
+}
+
+#[test]
+fn codex_weaker_policy_echo_blocks_turns() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "weak-policy", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let rejected = next_event(&mut reader, "approval_routing_rejected");
+    assert!(
+        rejected["payload"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("weaker than untrusted")
+    );
+    let session_id = rejected["session_id"].as_str().unwrap().to_owned();
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "hi"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_rejected");
+}
+
+#[test]
+fn codex_file_change_without_approval_fails_closed() {
+    let fixture = schema_root()
+        .parent()
+        .unwrap()
+        .join("codex-0.160.0-on-request-autowrite.jsonl");
+    for line in std::fs::read_to_string(&fixture).unwrap().lines() {
+        let frame: Value = serde_json::from_str(&line.replace("TURN_ID", "turn-1")).unwrap();
+        assert_valid("ServerNotification.json", &frame);
+    }
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "autowrite", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = next_event(&mut reader, "process_started")["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "add sub"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let rejected = next_event(&mut reader, "approval_routing_rejected");
+    assert!(
+        rejected["payload"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("without an approval request")
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let trace = trace_messages(&dirs.trace);
+        if trace.iter().any(|entry| {
+            entry["direction"] == "in" && entry["message"]["method"] == "turn/interrupt"
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no turn/interrupt sent"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    next_event(&mut reader, "turn_finished");
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "again"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_rejected");
 }
 
 #[test]

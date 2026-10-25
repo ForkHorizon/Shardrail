@@ -2,6 +2,12 @@
 //!
 //! `thread/start` must echo `approvalsReviewer: "user"`. `turn/start` in schema
 //! 0.160.0 does not return that field; a present non-user value still fails closed.
+//!
+//! The approval policy is `untrusted`. With `on-request` under `workspace-write`,
+//! Codex 0.160.0 applies in-workspace patches and sandboxed commands without
+//! asking (observed in the S1-lite live run), so `on-request` is treated as
+//! weaker than requested and fails closed. A file change that completes without
+//! a prior approval request also fails the session closed.
 
 use crate::{
     Daemon, DaemonApproval, ProviderCommand, ProviderOption, expire_approval, wall_clock_ms,
@@ -40,6 +46,8 @@ pub(crate) const SAFETY_CONFIG: &[&str] = &[
 
 const COMMAND_APPROVAL: &str = "item/commandExecution/requestApproval";
 const FILE_APPROVAL: &str = "item/fileChange/requestApproval";
+/// The only approval policy the daemon requests and accepts in an echo.
+pub(crate) const APPROVAL_POLICY: &str = "untrusted";
 
 static GROUPS: StdMutex<Vec<u32>> = StdMutex::new(Vec::new());
 static SHUTDOWN_HOOK: Once = Once::new();
@@ -123,17 +131,30 @@ pub(crate) fn thread_routing_accepted(
         return Err("codex thread cwd does not match the configured workdir".into());
     }
     if !approval_policy_asks(result.get("approvalPolicy")) {
-        return Err("codex approval policy does not ask the user".into());
+        return Err("codex approval policy is weaker than untrusted".into());
     }
     confirmed_sandbox(result.get("sandbox"))
         .ok_or_else(|| "codex sandbox is not workspace-write or read-only".into())
 }
 
 fn approval_policy_asks(value: Option<&Value>) -> bool {
-    matches!(
-        value.and_then(Value::as_str),
-        Some("on-request" | "untrusted")
-    )
+    value.and_then(Value::as_str) == Some(APPROVAL_POLICY)
+}
+
+/// A completed file change that never went through an approval request.
+pub(crate) fn unapproved_file_change<'a>(
+    item: &'a Value,
+    requested: &HashMap<String, Uuid>,
+) -> Option<&'a str> {
+    if item.get("type").and_then(Value::as_str) != Some("fileChange") {
+        return None;
+    }
+    let id = item.get("id").and_then(Value::as_str)?;
+    match item.get("status").and_then(Value::as_str) {
+        Some("declined" | "failed" | "inProgress") => None,
+        _ if requested.contains_key(id) => None,
+        _ => Some(id),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -792,7 +813,7 @@ impl CodexRun {
             "threadId": thread_id,
             "input": [{"type": "text", "text": prompt}],
             "approvalsReviewer": "user",
-            "approvalPolicy": "on-request",
+            "approvalPolicy": APPROVAL_POLICY,
             "cwd": self.workdir,
             "sandboxPolicy": {"type": self.sandbox.turn_type()}
         });
@@ -909,7 +930,7 @@ impl CodexRun {
                 self.send_notification("initialized", json!({}));
                 let params = json!({
                     "cwd": self.workdir,
-                    "approvalPolicy": "on-request",
+                    "approvalPolicy": APPROVAL_POLICY,
                     "sandbox": "workspace-write",
                     "approvalsReviewer": "user"
                 });
@@ -970,6 +991,23 @@ impl CodexRun {
                     self.finish_turn(TurnOutcome::Interrupted, "routing_rejected")
                         .await;
                     let _ = done.send(Err("approvals are not routed to the user".into()));
+                    return false;
+                }
+                if let Some(policy) = result.get("approvalPolicy")
+                    && policy.as_str() != Some(APPROVAL_POLICY)
+                {
+                    self.turn_id = result
+                        .pointer("/turn/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    self.fail_closed_turn(
+                        "turn/start approvalPolicy is weaker than untrusted",
+                        &result,
+                    )
+                    .await;
+                    self.finish_turn(TurnOutcome::Interrupted, "routing_rejected")
+                        .await;
+                    let _ = done.send(Err("codex approval policy is weaker than untrusted".into()));
                     return false;
                 }
                 if result.get("approvalsReviewer").is_none() {
@@ -1053,6 +1091,37 @@ impl CodexRun {
         set_status(&self.daemon, self.session_id, status.clone()).await;
         if let Some(tx) = ready.take() {
             let _ = tx.send(status);
+        }
+    }
+
+    /// Approvals are not reaching the user: block later turns, journal why, and
+    /// interrupt the running turn.
+    async fn fail_closed_turn(&mut self, reason: &str, evidence: &Value) {
+        self.turns_allowed = false;
+        set_status(
+            &self.daemon,
+            self.session_id,
+            CodexStatus::RoutingRejected(reason.to_owned()),
+        )
+        .await;
+        let _ = self
+            .append_notice(
+                "approval_routing_rejected",
+                json!({"reason": reason, "result": evidence}),
+            )
+            .await;
+        if let (Some(thread_id), Some(turn_id)) = (self.thread_id.clone(), self.turn_id.clone()) {
+            let line = json!({
+                "jsonrpc": "2.0",
+                "id": self.next_id,
+                "method": "turn/interrupt",
+                "params": {"threadId": thread_id, "turnId": turn_id}
+            })
+            .to_string();
+            self.next_id += 1;
+            let _ = self.writer.send(Outbound { line, done: None });
+        } else {
+            self.interrupt_when_turn_known = true;
         }
     }
 
@@ -1253,6 +1322,23 @@ impl CodexRun {
                     && let Some(id) = item.get("id").and_then(Value::as_str)
                 {
                     self.items.insert(id.to_owned(), item.clone());
+                    if method == "item/completed"
+                        && unapproved_file_change(item, &self.approval_by_item).is_some()
+                    {
+                        let item = item.clone();
+                        let _ = self
+                            .append_notice(
+                                "provider_item",
+                                json!({"method": method, "params": params}),
+                            )
+                            .await;
+                        self.fail_closed_turn(
+                            "codex applied a file change without an approval request",
+                            &item,
+                        )
+                        .await;
+                        return;
+                    }
                     if method == "item/completed"
                         && let Some(approval_id) = self.approval_by_item.get(id).copied()
                     {
@@ -1747,6 +1833,27 @@ mod tests {
     }
 
     #[test]
+    fn completed_file_change_without_a_request_is_detected() {
+        let mut requested = HashMap::new();
+        let applied =
+            json!({"type": "fileChange", "id": "f1", "status": "completed", "changes": []});
+        assert_eq!(unapproved_file_change(&applied, &requested), Some("f1"));
+        let unknown_status = json!({"type": "fileChange", "id": "f1", "changes": []});
+        assert_eq!(
+            unapproved_file_change(&unknown_status, &requested),
+            Some("f1")
+        );
+        for status in ["declined", "failed", "inProgress"] {
+            let item = json!({"type": "fileChange", "id": "f1", "status": status, "changes": []});
+            assert_eq!(unapproved_file_change(&item, &requested), None);
+        }
+        let command = json!({"type": "commandExecution", "id": "c1", "status": "completed"});
+        assert_eq!(unapproved_file_change(&command, &requested), None);
+        requested.insert("f1".to_owned(), Uuid::nil());
+        assert_eq!(unapproved_file_change(&applied, &requested), None);
+    }
+
+    #[test]
     fn decisions_never_grant_the_session() {
         assert_eq!(codex_decision(Some("accept")), "accept");
         assert_eq!(codex_decision(Some("decline")), "decline");
@@ -1759,8 +1866,28 @@ mod tests {
     #[test]
     fn thread_echo_fails_closed_unless_user_routing_is_confirmed() {
         let workdir = "/tmp/s1-work";
-        let ok = json!({
+        let weak = json!({
             "approvalPolicy": "on-request",
+            "approvalsReviewer": "user",
+            "cwd": workdir,
+            "sandbox": {"type": "workspaceWrite"},
+            "thread": {"id": "thread-1"}
+        });
+        assert!(
+            thread_routing_accepted(&weak, workdir)
+                .unwrap_err()
+                .contains("weaker")
+        );
+        let granular = json!({
+            "approvalPolicy": {"granular": {"mcp_elicitations": true, "rules": true, "sandbox_approval": true}},
+            "approvalsReviewer": "user",
+            "cwd": workdir,
+            "sandbox": {"type": "workspaceWrite"},
+            "thread": {"id": "thread-1"}
+        });
+        assert!(thread_routing_accepted(&granular, workdir).is_err());
+        let ok = json!({
+            "approvalPolicy": "untrusted",
             "approvalsReviewer": "user",
             "cwd": workdir,
             "sandbox": {"type": "workspaceWrite"},
