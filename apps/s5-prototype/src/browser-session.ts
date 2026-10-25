@@ -68,6 +68,15 @@ export function parseStoredCursor(raw: string | null): StoredCursor | undefined 
   return undefined;
 }
 
+export function sessionWorkdirs(frame: DaemonFrame): readonly string[] | null {
+  return frame.kind === 'session_workdirs' ? frame.workdirs : null;
+}
+
+export function sessionCreateError(frame: DaemonFrame, pendingCommandId: string | null): string | null {
+  if (frame.kind !== 'command_rejected' || pendingCommandId === null || frame.command_id !== pendingCommandId) return null;
+  return frame.error;
+}
+
 export function cursorStorageKey(hostPublicKey: string) {
   return `shardrail-browser-cursor:${hostPublicKey}`;
 }

@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DaemonFrame } from '@shardrail/contracts';
-import { connectionStatusLabel, createBrowserSession, isKeyChangedError, parseStoredCursor, reconnectDelayMs, type ConnectionPhase, type SessionSocket, type StoredCursor } from '../src/browser-session';
+import { connectionStatusLabel, createBrowserSession, isKeyChangedError, parseStoredCursor, reconnectDelayMs, sessionCreateError, sessionWorkdirs, type ConnectionPhase, type SessionSocket, type StoredCursor } from '../src/browser-session';
 import type { JournalEvent } from '../src/session-model';
+
+test('session workdirs are visible only on that frame and a create rejection matches the pending command', () => {
+  const listed: DaemonFrame = { kind: 'session_workdirs', workdirs: ['/tmp/work'] };
+  const other: DaemonFrame = { kind: 'authenticated' };
+  assert.deepEqual(sessionWorkdirs(listed), ['/tmp/work']);
+  assert.equal(sessionWorkdirs(other), null);
+  const rejected: DaemonFrame = { kind: 'command_rejected', command_id: 'create-1', error: 'workdir is not allowlisted' };
+  assert.equal(sessionCreateError(rejected, 'create-1'), 'workdir is not allowlisted');
+  assert.equal(sessionCreateError(rejected, 'prompt-1'), null);
+  assert.equal(sessionCreateError(rejected, null), null);
+});
 
 test('reconnect delay backs off and the status labels stay explicit', () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8].map(reconnectDelayMs), [200, 400, 800, 1600, 3200, 6400, 8000, 8000]);

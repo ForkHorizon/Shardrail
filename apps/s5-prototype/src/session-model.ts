@@ -121,9 +121,17 @@ export function ingestJournalEvents(current: readonly JournalEvent[], incoming: 
   return { events, cursor: events.at(-1)?.cursor ?? 0, added };
 }
 
+export const NIL_SESSION_ID = '00000000-0000-0000-0000-000000000000';
+
+export function newSessionButton(workdirs: readonly string[] | null): 'hidden' | 'disabled' | 'ready' {
+  if (workdirs === null) return 'hidden';
+  return workdirs.length === 0 ? 'disabled' : 'ready';
+}
+
 export function sessionSummaries(events: readonly JournalEvent[]): SessionSummary[] {
   const byId = new Map<string, SessionSummary>();
   for (const event of events) {
+    if (event.sessionId === NIL_SESSION_ID || event.kind === 'session_create_audit') continue;
     const summary = byId.get(event.sessionId) ?? {
       id: event.sessionId,
       label: event.sessionId,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activityTimestamp, agentText, approvalsForSession, checklistSummary, clearPromptOnAccept, controlFailureTarget, eventsForSession, ingestJournalEvents, plainEventText, promptClearApplies, reduceApprovalFlight, revealHiddenCharacters, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
+import { NIL_SESSION_ID, activityTimestamp, agentText, approvalsForSession, checklistSummary, clearPromptOnAccept, controlFailureTarget, eventsForSession, ingestJournalEvents, newSessionButton, plainEventText, promptClearApplies, reduceApprovalFlight, revealHiddenCharacters, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
 import { applyDaemonEvent, eventCount, observeJournalEpoch, reset, sessionJournalEvents, subscribe } from '../src/store';
 
 const event = (cursor: number, sessionId: string, kind: string, payload: unknown, occurredAtMs = cursor * 1000): JournalEvent => ({ cursor, sessionId, kind, payload, occurredAtMs });
@@ -193,6 +193,18 @@ test('coalesces session events once per frame and ignores a replayed cursor', ()
   } finally {
     globalThis.requestAnimationFrame = previous;
   }
+});
+
+test('session summaries skip the nil create audit and the new-session button follows the allowlist', () => {
+  const events = [
+    event(1, NIL_SESSION_ID, 'session_create_audit', { outcome: 'denied', reason: 'scope' }),
+    event(2, 'session-a', 'session_created', { session_snapshot: snapshot('open', 'Idle', 'Exited') }, 10),
+    event(3, 'session-a', 'session_create_audit', { outcome: 'allowed' }, 11),
+  ];
+  assert.deepEqual(sessionSummaries(events).map((item) => item.id), ['session-a']);
+  assert.equal(newSessionButton(null), 'hidden');
+  assert.equal(newSessionButton([]), 'disabled');
+  assert.equal(newSessionButton(['/tmp/work']), 'ready');
 });
 
 test('command rejection stays on the prompt and an error follows the approval flight', () => {
