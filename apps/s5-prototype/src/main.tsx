@@ -14,7 +14,7 @@ import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownV
 import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo, type PairingState } from './pairing';
 import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
 import { connectBrowser, openBrowserKeyStore } from '@shardrail/client/browser';
-import { createBrowserSession, isKeyChangedError, type BrowserSession, type ConnectionPhase } from './browser-session';
+import { createBrowserSession, createFlightOnControl, createFlightOnSessionCreated, isKeyChangedError, noteCreateSent, sessionWorkdirs, type BrowserSession, type ConnectionPhase, type CreateFlight, type CreateFlightResult } from './browser-session';
 import { approvalIdFromPayload, clearPromptOnAccept, controlFailureTarget, reduceApprovalFlight, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
 import { MainScreen } from './MainScreen';
 import './style.css';
@@ -129,7 +129,13 @@ function App() {
   const browserSession = useRef<BrowserSession | null>(null);
   const approvalFlightRef = useRef<ApprovalFlight>({ inFlight: new Set(), error: null });
   const pendingPromptRef = useRef<{ commandId: string; sessionId: string } | null>(null);
+  const createFlightRef = useRef<CreateFlight>({ pendingCommandId: null, acceptedCommandId: null });
+  const selectedCreateRef = useRef<string | null>(null);
   const [promptClear, setPromptClear] = useState<{ commandId: string; sessionId: string } | null>(null);
+  const [sessionWorkdirsState, setSessionWorkdirs] = useState<readonly string[] | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createdSessionId, setCreatedSessionId] = useState<string | null>(null);
+  const [dismissedSessionId, setDismissedSessionId] = useState<string | null>(null);
   const publishApprovalFlight = (action: ApprovalFlightAction) => {
     const next = reduceApprovalFlight(approvalFlightRef.current, action);
     if (next === approvalFlightRef.current) return;
@@ -163,6 +169,19 @@ function App() {
         const identity = await (await openBrowserKeyStore()).get(info.daemonPublicKey);
         if (cancelled) return;
         if (!identity || !info.clientId) throw new Error('browser key is missing; pair this browser again');
+        const applyCreateFlight = (result: CreateFlightResult) => {
+          createFlightRef.current = result.flight;
+          if (result.selectSessionId) {
+            selectedCreateRef.current = result.selectSessionId;
+            setCreatedSessionId(result.selectSessionId);
+          }
+          if (result.createError !== undefined) setCreateError(result.createError);
+          if (result.dismissSelection) {
+            setDismissedSessionId(selectedCreateRef.current);
+            selectedCreateRef.current = null;
+            setCreatedSessionId(null);
+          }
+        };
         const session = createBrowserSession({
           connect: connectBrowser,
           url: browserWebSocketUrl(),
@@ -183,8 +202,16 @@ function App() {
           onDurableEvent: (event) => {
             applyDaemonEvent(event.cursor, { session_id: event.sessionId, kind: event.kind, payload: event.payload, occurred_at_ms: event.occurredAtMs }, null);
             publishApprovalFlight({ type: 'journal', kind: event.kind, approvalId: approvalIdFromPayload(event.payload) });
+            if (event.kind !== 'session_created') return;
+            const commandId = event.payload && typeof event.payload === 'object' && 'command_id' in event.payload ? (event.payload as { command_id?: unknown }).command_id : null;
+            applyCreateFlight(createFlightOnSessionCreated(createFlightRef.current, typeof commandId === 'string' ? commandId : null, event.sessionId));
           },
           onControl: (frame) => {
+            const workdirs = sessionWorkdirs(frame);
+            if (workdirs) { setSessionWorkdirs(workdirs); return; }
+            const reduced = createFlightOnControl(createFlightRef.current, frame);
+            applyCreateFlight(reduced);
+            if (reduced.createError !== undefined) return;
             if (frame.kind === 'approval_resolved') publishApprovalFlight({ type: 'resolved', approvalId: frame.approval_id });
             if (frame.kind === 'command_accepted') {
               const pending = pendingPromptRef.current;
@@ -466,7 +493,20 @@ function App() {
       setPromptError(result === 'sent' ? null : blocked);
     };
     const keyStorage = pairing.info.keyStorage;
-    return <MainScreen phase={connectionPhase} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} promptError={promptError} promptClear={promptClear} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval} onSendPrompt={(sessionId, prompt) => sendCommand('turn.start', { session_id: sessionId, prompt }, 'Not connected. The prompt was not sent.')} onInterrupt={(sessionId) => sendCommand('turn.interrupt', { session_id: sessionId }, 'Not connected. Interrupt was not sent.')}/>;
+    const createSession = (workdir: string) => {
+      const commandId = crypto.randomUUID();
+      const result = browserSession.current?.request({
+        command_id: commandId,
+        kind: 'session.create',
+        payload: { workdir },
+        expected_state: null,
+        expected_turn_id: null,
+      }) ?? 'blocked';
+      if (result !== 'sent') { setCreateError('Not connected. The session was not created.'); return; }
+      createFlightRef.current = noteCreateSent(commandId);
+      setCreateError(null);
+    };
+    return <MainScreen phase={connectionPhase} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} promptError={promptError} promptClear={promptClear} workdirs={sessionWorkdirsState} createError={createError} createdSessionId={createdSessionId} dismissedSessionId={dismissedSessionId} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval} onSendPrompt={(sessionId, prompt) => sendCommand('turn.start', { session_id: sessionId, prompt }, 'Not connected. The prompt was not sent.')} onInterrupt={(sessionId) => sendCommand('turn.interrupt', { session_id: sessionId }, 'Not connected. Interrupt was not sent.')} onCreateSession={createSession}/>;
   }
   return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{pairing.kind === 'paired' ? <><span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairing.info.fingerprint}>{pairing.info.fingerprint}</span><Button onPress={() => setReconnect((current) => current + 1)}>Reconnect</Button>{!browserMode ? <Button onPress={() => { void unpairClient(pairingApi).then(setPairing); }}>Unpair</Button> : null}</> : null}{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header>{browserMode && pairing.kind === 'paired' && pairing.info.keyStorage === 'noble-fallback' ? <p role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}<section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
 }

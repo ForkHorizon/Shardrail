@@ -9,21 +9,40 @@ import { UntrustedMarkdown } from './UntrustedMarkdown';
 
 const checklist = checklistSummary();
 
-export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, onReconnect, onResolveApproval, onSendPrompt, onInterrupt }: {
+export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
   approvalInFlight: ReadonlySet<string>;
   approvalError: string | null;
   promptError: string | null;
   promptClear: { commandId: string; sessionId: string } | null;
+  workdirs: readonly string[] | null;
+  createError: string | null;
+  createdSessionId: string | null;
+  dismissedSessionId: string | null;
   onReconnect: () => void;
   onResolveApproval: (approvalId: string, optionId: string) => void;
   onSendPrompt: (sessionId: string, prompt: string) => void;
   onInterrupt: (sessionId: string) => void;
+  onCreateSession: (workdir: string) => void;
 }) {
   const events = useSessionJournalEvents();
   const sessions = useMemo(() => sessionSummaries(events), [events]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [appliedCreateId, setAppliedCreateId] = useState<string | null>(null);
+  const [appliedDismissId, setAppliedDismissId] = useState<string | null>(null);
+  let nextSelected = selectedId;
+  if (createdSessionId && createdSessionId !== appliedCreateId) {
+    setAppliedCreateId(createdSessionId);
+    nextSelected = createdSessionId;
+  }
+  if (dismissedSessionId && dismissedSessionId !== appliedDismissId) {
+    setAppliedDismissId(dismissedSessionId);
+    if (nextSelected === dismissedSessionId) nextSelected = null;
+  }
+  if (nextSelected !== selectedId) setSelectedId(nextSelected);
+  const [pickedWorkdir, setPickedWorkdir] = useState('');
+  const selectedWorkdir = workdirs?.includes(pickedWorkdir) ? pickedWorkdir : (workdirs?.[0] ?? '');
   const [confirmingAllowId, setConfirmingAllowId] = useState<string | null>(null);
   const selected = sessions.find((session) => session.id === selectedId) ?? null;
   const visible = useMemo(() => selected ? eventsForSession(events, selected.id) : [], [events, selected]);
@@ -42,6 +61,14 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
     <div className="workspace">
       <section className="session-column" aria-labelledby="sessions-heading">
         <h2 id="sessions-heading">Sessions</h2>
+        {workdirs !== null ? <section className="new-session" aria-label="New session">
+          <label htmlFor="session-workdir">Workdir</label>
+          <select id="session-workdir" value={selectedWorkdir} onChange={(event) => setPickedWorkdir(event.currentTarget.value)}>
+            {workdirs.map((dir) => <option key={dir} value={dir}>{dir}</option>)}
+          </select>
+          <Button isDisabled={selectedWorkdir.length === 0} onPress={() => onCreateSession(selectedWorkdir)}>New session</Button>
+          {createError ? <p role="alert">{createError}</p> : null}
+        </section> : null}
         {sessions.length === 0 ? <p>No sessions yet.</p> : <ListBox className="session-list" aria-label="Sessions" selectionMode="single" selectedKeys={selected ? [selected.id] : []} onSelectionChange={(keys) => { if (keys === 'all') return; const next = [...keys][0]; setSelectedId(next == null ? null : String(next)); setConfirmingAllowId(null); }}>
           {sessions.map((session) => <ListBoxItem key={session.id} id={session.id} textValue={`${session.id} ${session.agentKind ?? 'agent unknown'} ${session.status} ${checklist.unverified} not verified`} onFocus={() => { setSelectedId(session.id); setConfirmingAllowId(null); }}>
             <span className="session-id">{session.id}</span>

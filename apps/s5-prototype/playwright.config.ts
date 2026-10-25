@@ -9,7 +9,7 @@ process.env.SHARDRAILD_BIN = process.env.SHARDRAILD_BIN ?? join(process.cwd(), '
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: ['browser-main-screen.spec.ts', 'browser-pairing.spec.ts'],
+  testMatch: ['browser-main-screen.spec.ts', 'browser-pairing.spec.ts', 'browser-new-session.spec.ts'],
   fullyParallel: false,
   workers: 1,
   globalSetup: './tests/browser-e2e-setup.ts',

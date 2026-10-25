@@ -309,6 +309,24 @@ fn read_json(reader: &mut BufReader<UnixStream>) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+fn read_until(reader: &mut BufReader<UnixStream>, kind: &str) -> Value {
+    loop {
+        let frame = read_json(reader);
+        if frame["kind"] == kind {
+            return frame;
+        }
+    }
+}
+
+fn read_session_created(reader: &mut BufReader<UnixStream>) -> Value {
+    loop {
+        let frame = read_json(reader);
+        if frame["kind"] == "durable_event" && frame["event"]["kind"] == "session_created" {
+            return frame;
+        }
+    }
+}
+
 fn try_read_json(reader: &mut BufReader<UnixStream>) -> Option<Value> {
     let mut line = String::new();
     match reader.read_line(&mut line) {
@@ -591,11 +609,18 @@ fn client_can_resume_from_an_earlier_cursor_on_the_same_connection() {
     assert!(accepted["cursor"].as_i64().unwrap() > 0);
     let event = read_json(&mut reader);
     assert_eq!(event["kind"], "durable_event");
+    assert_eq!(event["event"]["kind"], "session_created");
     let cursor = event["cursor"].as_i64().unwrap();
+    // session.create also pushes session_create_audit. Drain it so resume is
+    // not answered by the unread audit still sitting in the socket buffer.
+    let audit = read_json(&mut reader);
+    assert_eq!(audit["kind"], "durable_event");
+    assert_eq!(audit["event"]["kind"], "session_create_audit");
 
     writeln!(stream, "{}", json!({"kind":"resume","resume_after":0})).unwrap();
     let replayed = read_json(&mut reader);
     assert_eq!(replayed["kind"], "durable_event");
+    assert_eq!(replayed["event"]["kind"], "session_created");
     assert_eq!(replayed["cursor"], cursor);
     daemon.kill().unwrap();
     daemon.wait().unwrap();
@@ -877,12 +902,14 @@ fn repeated_sigkill_restarts_replay_an_intact_journal() {
     for created in 0..RESTARTS {
         let (mut stream, mut reader, hello) = handshake(dir.path(), epoch, 0, &client);
         epoch = Some(Uuid::parse_str(hello["journal_epoch"].as_str().unwrap()).unwrap());
-        assert_eq!(hello["cursor"], created as i64);
+        // Each create journals session_created and then session_create_audit.
+        let high_water = (created as i64) * 2;
+        assert_eq!(hello["cursor"], high_water);
         writeln!(stream, "{}", json!({"kind":"resume","resume_after":0})).unwrap();
-        for cursor in 1..=created {
+        for cursor in 1..=high_water {
             let event = read_json(&mut reader);
             assert_eq!(event["kind"], "durable_event");
-            assert_eq!(event["cursor"], cursor as i64);
+            assert_eq!(event["cursor"], cursor);
         }
         writeln!(
             stream,
@@ -910,7 +937,7 @@ fn repeated_sigkill_restarts_replay_an_intact_journal() {
     daemon.wait().unwrap();
     let journal = Journal::open(dir.path().join("journal.sqlite3")).unwrap();
     let events = journal.events_after(0).unwrap();
-    assert_eq!(events.len(), RESTARTS);
+    assert_eq!(events.len(), RESTARTS * 2);
     assert!(
         events
             .iter()
@@ -931,14 +958,17 @@ fn replay_fanout_and_command_retries_preserve_the_cursor() {
         "request": {"command_id": command_id, "kind": "session.create", "expected_state": null, "expected_turn_id": null, "payload": {}}
     });
     writeln!(writer, "{}", serde_json::to_string(&request).unwrap()).unwrap();
-    assert_eq!(read_json(&mut writer_reader)["kind"], "command_accepted");
-    assert_eq!(read_json(&mut writer_reader)["event"]["event_id"], 1);
+    let accepted = read_until(&mut writer_reader, "command_accepted");
+    let created = read_session_created(&mut writer_reader);
+    assert_eq!(created["event"]["event_id"], 1);
+    assert_eq!(accepted["cursor"], 1);
 
     let (subscriber, mut subscriber_reader, _) = handshake(dir.path(), None, 0, &client_key);
-    assert_eq!(read_json(&mut subscriber_reader)["event"]["event_id"], 1);
+    let replayed = read_session_created(&mut subscriber_reader);
+    assert_eq!(replayed["event"]["event_id"], 1);
 
     writeln!(writer, "{}", serde_json::to_string(&request).unwrap()).unwrap();
-    let retry = read_json(&mut writer_reader);
+    let retry = read_until(&mut writer_reader, "command_accepted");
     assert_eq!(retry["kind"], "command_accepted");
     assert_eq!(retry["cursor"], 1);
 
@@ -952,9 +982,12 @@ fn replay_fanout_and_command_retries_preserve_the_cursor() {
         serde_json::to_string(&second_request).unwrap()
     )
     .unwrap();
-    assert_eq!(read_json(&mut writer_reader)["kind"], "command_accepted");
-    assert_eq!(read_json(&mut writer_reader)["event"]["event_id"], 2);
-    assert_eq!(read_json(&mut subscriber_reader)["event"]["event_id"], 2);
+    let second = read_until(&mut writer_reader, "command_accepted");
+    let second_created = read_session_created(&mut writer_reader);
+    assert_eq!(second_created["event"]["event_id"], 3);
+    assert_eq!(second["cursor"], 3);
+    let subscriber_second = read_session_created(&mut subscriber_reader);
+    assert_eq!(subscriber_second["event"]["event_id"], 3);
     drop(subscriber);
     daemon.kill().unwrap();
     daemon.wait().unwrap();

@@ -71,6 +71,48 @@ export function assertHeadIsCommit(head, commit) {
   if (actual !== commit) throw new Error(`HEAD is ${actual}, expected ${commit}`);
 }
 
+const CODEX_HOME_MARKERS = ['~/.codex', '/.codex/', '~/.agents', '/.agents/'];
+
+// Codex's own config-load warning (sent as configWarning and again as a thread warning)
+// names the config file it parsed at startup. That is not the model reading ~/.codex, so
+// it is the one notice left out of the check.
+function isCodexConfigWarning(event) {
+  if (event?.kind !== 'provider_notice') return false;
+  const method = event?.payload?.method;
+  if (method === 'configWarning') return true;
+  return method === 'warning' && /unrecognized configuration setting/.test(String(event?.payload?.params?.message ?? ''));
+}
+
+// thread/started reports where Codex itself writes the session rollout
+// (~/.codex/sessions/...). That is Codex's own log, not the model reading ~/.codex,
+// so only that one field is dropped before the check.
+function withoutRolloutPath(event) {
+  const thread = event?.payload?.params?.thread;
+  if (event?.kind !== 'provider_notice' || event?.payload?.method !== 'thread/started') return event;
+  if (!thread || typeof thread.path !== 'string' || !/\/\.codex\/sessions\/[^/]+\/[^/]+\/[^/]+\/rollout-[^/]+\.jsonl$/.test(thread.path)) return event;
+  const { path: _rollout, ...rest } = thread;
+  return { ...event, payload: { ...event.payload, params: { ...event.payload.params, thread: rest } } };
+}
+
+export function codexHomePathHits(events) {
+  const hits = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    if (isCodexConfigWarning(event)) continue;
+    const text = JSON.stringify(withoutRolloutPath(event));
+    const markers = CODEX_HOME_MARKERS.filter((marker) => text.includes(marker));
+    if (!markers.length) continue;
+    const at = text.indexOf(markers[0]);
+    hits.push({
+      event_id: event?.event_id ?? null,
+      kind: event?.kind ?? null,
+      method: event?.payload?.method ?? null,
+      markers,
+      context: text.slice(Math.max(0, at - 160), at + 160),
+    });
+  }
+  return hits;
+}
+
 export function turn1Failure(turn) {
   const denied = Array.isArray(turn.decisions) && turn.decisions.some((item) => item.decision === 'deny');
   if (!denied) return 'turn 1 never denied an approval';
