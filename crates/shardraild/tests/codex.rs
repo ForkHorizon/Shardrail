@@ -1499,7 +1499,7 @@ fn codex_notices_before_admission_are_journaled_after_session_created() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     let position = |predicate: &dyn Fn(&shardrail_protocol::DurableEvent) -> bool| {
-        events.iter().position(|event| predicate(event))
+        events.iter().position(predicate)
     };
     let created = position(&|event| event.kind == "session_created").expect("session_created");
     let early = position(&|event| {

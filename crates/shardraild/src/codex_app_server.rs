@@ -1923,11 +1923,10 @@ impl CodexRun {
         {
             return Err("codex session admission was dropped".into());
         }
-        match self.admission_commit.take() {
-            Some(commit) => commit
+        if let Some(commit) = self.admission_commit.take() {
+            commit
                 .await
-                .map_err(|_| "codex session admission was dropped".to_owned())??,
-            None => {}
+                .map_err(|_| "codex session admission was dropped".to_owned())??;
         }
         let held = self
             .held_events
