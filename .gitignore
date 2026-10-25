@@ -10,3 +10,4 @@ node_modules/
 /apps/s5-prototype/src-tauri/gen/
 /apps/s5-prototype/results*/
 .build/
+/apps/s5-prototype/test-results/

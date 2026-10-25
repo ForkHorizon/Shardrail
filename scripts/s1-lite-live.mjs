@@ -122,7 +122,9 @@ async function main() {
 
     const requireFromS5 = createRequire(join(s5Dir, 'package.json'));
     const playwright = await import(pathToFileURL(requireFromS5.resolve('playwright-core')).href);
-    browser = await playwright.chromium.launch({ headless: true, channel: 'chromium' });
+    const chromium = playwright.chromium ?? playwright.default?.chromium;
+    if (!chromium) throw new Error('playwright-core did not expose chromium');
+    browser = await chromium.launch({ headless: true, channel: 'chromium' });
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     page.setDefaultTimeout(120_000);
     await pairBrowser(page, binary, dataDir, baseUrl);
