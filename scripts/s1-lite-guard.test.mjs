@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, turn1Failure } from './s1-lite-guard.mjs';
+import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, turn1Failure } from './s1-lite-guard.mjs';
 
 const FULL = '1bb8838aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -150,11 +150,29 @@ test('turn 1 can finish after a denial without a second approval', () => {
   assert.match(turn1Failure({ decisions: [{ decision: 'deny' }], allowed: false, finished: false, outcome: null }), /did not finish/);
 });
 
+test('journaled commands, approvals, items, and paths must stay out of Codex and agent homes', () => {
+  assert.deepEqual(codexHomePathHits([{ event_id: 'ok', kind: 'command', payload: { argv: ['ls'] } }]), []);
+  const hits = codexHomePathHits([
+    { event_id: 'skill', kind: 'command', payload: { command: 'cat ~/.codex/skills/SKILL.md' } },
+    { event_id: 'plugin', kind: 'approval', payload: { path: '/Users/owner/.codex/plugins/cache/ponytail/SKILL.md' } },
+    { event_id: 'agents', kind: 'item', payload: { file: '/Users/owner/.agents/skills/demo' } },
+    { event_id: 'tilde-agents', kind: 'file', payload: { file: '~/.agents/skills/demo' } },
+  ]);
+  assert.deepEqual(hits.map((hit) => hit.event_id), ['skill', 'plugin', 'agents', 'tilde-agents']);
+  assert.deepEqual(hits[0].markers, ['~/.codex', '/.codex/']);
+  assert.deepEqual(hits[1].markers, ['/.codex/']);
+  assert.deepEqual(hits[2].markers, ['/.agents/']);
+  assert.deepEqual(hits[3].markers, ['~/.agents', '/.agents/']);
+});
+
 test('the live script gates on the env and resets only through the guard', () => {
   const source = readFileSync(new URL('./s1-lite-live.mjs', import.meta.url), 'utf8');
   assert.match(source, /SHARDRAIL_S1_LIVE !== '1'/);
   assert.match(source, /assertRepoIdentity\(/);
   assert.match(source, /turn1Failure\(/);
+  assert.match(source, /--allow-session-create/);
+  assert.match(source, /New session/);
+  assert.match(source, /codexHomePathHits\(/);
   const guardAt = source.indexOf('assertRepoIdentity(');
   const resetAt = source.indexOf("'reset', '--hard'");
   assert.ok(guardAt > 0 && resetAt > guardAt);

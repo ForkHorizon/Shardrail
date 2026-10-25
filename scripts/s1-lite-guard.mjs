@@ -71,6 +71,17 @@ export function assertHeadIsCommit(head, commit) {
   if (actual !== commit) throw new Error(`HEAD is ${actual}, expected ${commit}`);
 }
 
+const CODEX_HOME_MARKERS = ['~/.codex', '/.codex/', '~/.agents', '/.agents/'];
+
+export function codexHomePathHits(events) {
+  const hits = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    const markers = CODEX_HOME_MARKERS.filter((marker) => JSON.stringify(event).includes(marker));
+    if (markers.length) hits.push({ event_id: event?.event_id ?? null, kind: event?.kind ?? null, markers });
+  }
+  return hits;
+}
+
 export function turn1Failure(turn) {
   const denied = Array.isArray(turn.decisions) && turn.decisions.some((item) => item.decision === 'deny');
   if (!denied) return 'turn 1 never denied an approval';

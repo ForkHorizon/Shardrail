@@ -1,92 +1,41 @@
 # S1-lite Codex app-server
 
-S1-lite connects one real `codex app-server` child per Shardrail session. The fake ACP provider stays the default. Codex is selected only with both `--codex-app-server` and `--codex-workdir`.
+S1-lite connects one real `codex app-server` child per Shardrail session. The fake ACP provider stays the default. Codex is selected with `--codex-app-server` and at least one allowlisted workdir (`--codex-workdir` or `--session-workdir`). `--codex-workdir` is the default workdir and is also the first allowlist entry.
 
 The adapter speaks newline JSON-RPC on the child's stdio. It does not pass `capabilities.experimentalApi` (D36). `thread/start` and `turn/start` ask for sandbox `workspace-write`, approval policy `untrusted`, and `approvalsReviewer: "user"`. The first live run used `on-request`: Codex 0.160.0 then applied an in-workspace patch to the test repo without sending any approval request, because `on-request` under `workspace-write` lets the model write inside the workspace and run sandboxed commands without asking. `untrusted` asks before every patch and every command outside Codex's small built-in list of read-only commands (such as `ls` or `cat`), which still run without a card. The daemon journals `approval_routing_rejected` and refuses later turns unless the thread response echoes user routing, the configured cwd, approval policy `untrusted` (an `on-request`, `never`, or granular echo is weaker and fails closed; a `turn/start` response that reports a different policy also fails closed), and a `workspaceWrite` or `readOnly` sandbox whose `networkAccess` is absent or false. A non-boolean `networkAccess` fails closed. `turn/start` in Codex CLI 0.160.0 does not return `approvalsReviewer`; a present non-user value still fails closed, and a missing value keeps the thread confirmation.
 
 Each child is started in its own process group. The mandatory safety `-c` overrides, including `web_search="disabled"`, are appended after any extra config. `--codex-config` accepts only `model` and `model_reasoning_effort`, as a single-line `KEY=VALUE` with a non-empty value. SIGTERM or SIGINT of the daemon kills those process groups. SIGKILL of the daemon does not run that handler. A failed `session.create` stays rejected when the same command id is retried until the child has reached `process_started` or `approval_routing_rejected`.
 
+Before `thread/start`, a preflight child runs `initialize` and `skills/list` in the session workdir, then exits. The session child gets the safety overrides plus `features.plugins=false`, `features.hooks=false`, `features.apps=false`, `skills.bundled.enabled=false`, `skills.include_instructions=false`, and a per-name `skills.config` list that disables every skill the preflight found enabled. After `initialize`, and before `thread/start`, the daemon checks `skills/list`, `hooks/list`, `plugin/installed`, and `app/list`. Any enabled skill, hook, plugin, app, error, or unexpected shape fails the session closed: the child is killed, the failure is journaled, and no turn starts. User skills are disabled by name. A `name="*"` selector and path globs do not work, so the daemon does not trust the overrides without that check.
+
 If a `fileChange` item completes without an approval request for that item, the daemon journals `approval_routing_rejected`, sends `turn/interrupt`, and refuses later turns on that session. This only detects a bypass after the patch is on disk; the approval policy is the prevention.
 
 Command and file-change approval requests become daemon approval cards. A limited client can allow once or deny. Those map to Codex `accept` or `decline`. `acceptForSession` is never sent. Timeout, disconnect, and unknown server requests fail closed. Unknown methods, including user-input, elicitation, and permission grants, get JSON-RPC `-32601` and a `provider_request_refused` journal event.
 
-A limited browser may send `turn.start` and `turn.interrupt` on an existing session. Creating a session still requires a full client. The main screen prompt box is for that limited path. Its draft belongs to the selected session, stays in the field when the command is rejected, and clears when that prompt's `command_accepted` arrives.
+A limited browser may send `turn.start` and `turn.interrupt` on an existing session. It may create a session only when enrollment granted `session.create` (`client enroll --label browser --allow-session-create`). The workdir has to be an exact allowlisted path. Full clients stay on the allowlist when they name a workdir, and otherwise use the first allowlisted directory. The main screen shows **New session** only for a browser that has the capability. The prompt draft belongs to the selected session, stays in the field when the command is rejected, and clears when that prompt's `command_accepted` arrives.
 
-## Try it in a normal browser
+## Try it
 
-Build the daemon and the S5 assets, then start `shardraild` yourself. This uses the Codex login already on the machine. Do not pass an API key.
+`scripts/dev-try.sh` is the way to try this. It builds `shardraild` and the S5 assets, starts the daemon on `127.0.0.1:9731` with a temporary data directory and `--no-file-log`, enrolls a browser with `--allow-session-create`, and prints the URL and the one-time enrollment code. It does not open a browser. Ctrl-C or exit stops the daemon, which stops Codex, and deletes the temporary data directory. This uses the Codex login already on the machine. Do not pass an API key.
 
-```sh
-cd /Users/daliys/Daliys/Shardrail/spikes/wt-s1
-nice cargo build -p shardraild
-cd apps/s5-prototype
-npm ci
-npm run build
-cd ../..
-DATA=$(mktemp -d)
-./target/debug/shardraild --data-dir "$DATA" --no-file-log \
-  --codex-app-server "$(command -v codex)" \
-  --codex-workdir /Users/daliys/Daliys/Shardrail/spikes/s1-testrepo \
-  --codex-config 'model_reasoning_effort="low"' \
-  --browser-listen 127.0.0.1:9731 \
-  --browser-assets-dir apps/s5-prototype/dist
-```
-
-In another terminal, authorize one full client and create the session. A browser enrollment is limited and cannot create sessions.
+The default session workdir is `/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo`. Override it with `SHARDRAIL_SESSION_WORKDIR` or `--workdir`. The daemon still refuses `/`, `$HOME`, and any path inside the Shardrail checkout other than that test repo.
 
 ```sh
-./target/debug/shardraild --data-dir "$DATA" client add --label me --scope full
-./target/debug/shardraild --data-dir "$DATA" identity
+scripts/dev-try.sh
 ```
 
-`client add` prints `client_id`, `public_key`, `scope`, and `host_public_key`, and writes the raw 32-byte key to `$DATA/client-<client_id>.key`. There is no `session create` CLI. From this worktree, with the daemon already running:
+`--dry-run` prints the commands. `--port` or `SHARDRAIL_TRY_PORT` changes the port (default 9731). `--codex` or `SHARDRAIL_TRY_CODEX` selects the Codex CLI. `--skip-build` or `SHARDRAIL_TRY_SKIP_BUILD=1` reuses a binary and assets that are already built. The script refuses to start, including for `--dry-run`, when that port is already in use or when `codex` is missing. Reasoning effort is `low`.
 
-```sh
-export DATA CLIENT_ID HOST_PUBLIC_KEY
-node --experimental-strip-types --input-type=module -e '
-import { readFileSync } from "node:fs";
-import { connect } from "./packages/client/src/index.ts";
-const commandId = crypto.randomUUID();
-const client = await connect({
-  socketPath: process.env.DATA + "/shardraild.sock",
-  clientId: process.env.CLIENT_ID,
-  privateKey: new Uint8Array(readFileSync(process.env.DATA + "/client-" + process.env.CLIENT_ID + ".key")),
-  hostPublicKey: process.env.HOST_PUBLIC_KEY,
-});
-client.onFrame((frame) => {
-  if (frame.kind === "durable_event" && frame.event.kind === "session_created" && frame.event.payload?.command_id === commandId) {
-    console.log(frame.event.session_id);
-    client.close();
-  }
-  if (frame.kind === "command_rejected" && frame.command_id === commandId) {
-    console.error(frame.error);
-    client.close();
-  }
-});
-client.request({ command_id: commandId, kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
-'
-```
-
-Then enroll the browser:
-
-```sh
-./target/debug/shardraild --data-dir "$DATA" client enroll --label browser
-```
-
-Open `http://127.0.0.1:9731/`, review the fingerprint, enter the enrollment code, select the session, type a prompt, and use **Send prompt**, **Allow once** or **Deny**, and **Interrupt**.
-
-Point `--codex-workdir` only at the throwaway repo `/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo`. Reset it before a run you care about:
+Open the printed URL, review the fingerprint, enter the enrollment code, choose the workdir, and press **New session**. Then use **Send prompt**, **Allow once** or **Deny**, and **Interrupt**. Reset the test repo before a run you care about:
 
 ```sh
 git -C /Users/daliys/Daliys/Shardrail/spikes/s1-testrepo reset --hard 1bb8838
 git -C /Users/daliys/Daliys/Shardrail/spikes/s1-testrepo clean -fdx
 ```
 
-Stop the daemon with SIGTERM so it kills the Codex process group.
-
 ## Live smoke
 
-`scripts/s1-lite-live.mjs` is the checked run. It refuses to start unless `SHARDRAIL_S1_LIVE=1`. Before `git reset` or `git clean`, it requires `s1-testrepo` itself to be a directory rather than a symlink, `.git` to be that repo's real git directory rather than a symlink or gitdir file, no remote, and a git directory that is not Shardrail's. `git rev-parse --verify 1bb8838^{commit}` must succeed first. Reset uses that full hash, and HEAD must equal it afterward. A parent directory may be a symlink. The script starts the daemon on `127.0.0.1:0` with a temp data directory and `--no-file-log`, pairs a full socket client for `session.create` and a headless Chromium limited browser for the prompt, denies the first approval, then allows each later approval once (at most 8, then denies) until that turn finishes. If the model stops after the denial without asking again, it sends one short follow-up prompt and allows its approvals the same way. It then interrupts a second turn after the first new journaled `agent_message_chunk`, and writes `s1-lite-result.json`, `s1-lite-result.md`, and `daemon.log` under `S1_RESULT_DIR`. The transcript virtualizes rows, so that journal event is the delta signal. Any approval routing rejection, including a file change applied without an approval request, fails the run. `S1_RESULT_DIR` must be outside both Shardrail checkouts or exactly `spikes/reviews19/live-1`. The script's hard timeout is 15 minutes. On 2026-10-25 a live run with Codex 0.160.0 passed: one command denied, five approvals allowed once (including the `calc.py` file change and `python3 -m unittest`), and the second turn interrupted.
+`scripts/s1-lite-live.mjs` is the checked run. It refuses to start unless `SHARDRAIL_S1_LIVE=1`. Before `git reset` or `git clean`, it requires `s1-testrepo` itself to be a directory rather than a symlink, `.git` to be that repo's real git directory rather than a symlink or gitdir file, no remote, and a git directory that is not Shardrail's. `git rev-parse --verify 1bb8838^{commit}` must succeed first. Reset uses that full hash, and HEAD must equal it afterward. A parent directory may be a symlink. The script starts the daemon on `127.0.0.1:0` with a temp data directory, `--no-file-log`, and the test repo on the workdir allowlist. A full socket client only watches the journal. A headless Chromium browser, enrolled with `--allow-session-create`, creates the session with **New session** and sends the prompt. The run denies the first approval, then allows each later approval once (at most 8, then denies) until that turn finishes. It fails if extension verification was not journaled, if extensions were rejected, or if any journaled command, approval, item, or file path references `~/.codex`, `/.codex/`, `~/.agents`, or `/.agents/`. The result file records the verification event and the preflight log lines. If the model stops after the denial without asking again, it sends one short follow-up prompt and allows its approvals the same way. It then interrupts a second turn after the first new journaled `agent_message_chunk`, and writes `s1-lite-result.json`, `s1-lite-result.md`, and `daemon.log` under `S1_RESULT_DIR`. The transcript virtualizes rows, so that journal event is the delta signal. Any approval routing rejection, including a file change applied without an approval request, fails the run. `S1_RESULT_DIR` must be outside both Shardrail checkouts or exactly `spikes/reviews19/live-1`. The script's hard timeout is 15 minutes. On 2026-10-25 a live run with Codex 0.160.0 passed: one command denied, five approvals allowed once (including the `calc.py` file change and `python3 -m unittest`), and the second turn interrupted.
 
 ```sh
 export SHARDRAIL_S1_LIVE=1
@@ -98,4 +47,4 @@ Headless Chromium must be available as Playwright's `channel: 'chromium'`. The s
 
 ## What the automated tests cover without Codex
 
-`crates/shardraild/tests/codex.rs` drives `tests/fixtures/fake_codex_app_server.py`. The fixture follows the pinned schema in `tests/fixtures/codex-app-server-0.160.0/` (generated by `codex app-server generate-json-schema` for CLI 0.160.0, without experimental methods). The happy-path trace is checked against that schema with an in-repo draft-07 subset validator. The tests check the spawn overrides, initialize without `experimentalApi`, thread and turn parameters, fail-closed reviewer, approval-policy and sandbox echoes, a replayed on-request auto-write (`tests/fixtures/codex-0.160.0-on-request-autowrite.jsonl`) that must interrupt and block the session including `readOnly` with `networkAccess: true`, redaction of a high-entropy secret, deny then allow-once, no `acceptForSession`, unknown-request refusal, interrupt, child crash, approval timeout, disconnect during an approval, an invalid turn `session_id` that rejects without dropping the socket, a refused MCP `--codex-config`, a failed `session.create` retry, and SIGTERM killing the child process group.
+`crates/shardraild/tests/codex.rs` drives `tests/fixtures/fake_codex_app_server.py`. The fixture follows the pinned schema in `tests/fixtures/codex-app-server-0.160.0/` (generated by `codex app-server generate-json-schema` for CLI 0.160.0, without experimental methods). The happy-path trace is checked against that schema with an in-repo draft-07 subset validator. The tests check the spawn overrides, initialize without `experimentalApi`, thread and turn parameters, fail-closed reviewer, approval-policy and sandbox echoes, a replayed on-request auto-write (`tests/fixtures/codex-0.160.0-on-request-autowrite.jsonl`) that must interrupt and block the session including `readOnly` with `networkAccess: true`, redaction of a high-entropy secret, deny then allow-once, no `acceptForSession`, unknown-request refusal, interrupt, child crash, approval timeout, disconnect during an approval, an invalid turn `session_id` that rejects without dropping the socket, a refused MCP `--codex-config`, a failed `session.create` retry, and SIGTERM killing the child process group. Recorded Codex 0.160.0 traces check that plugins, hooks, apps, and skills are disabled before `thread/start`. The fake child can leave an extension enabled, keep a hook, or fail a list call, and each of those must fail closed with no turn. `scripts/dev-try.test.mjs` starts the try script against that fake child on a free port.

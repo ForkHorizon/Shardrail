@@ -12,7 +12,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, turn1Failure } from './s1-lite-guard.mjs';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, turn1Failure } from './s1-lite-guard.mjs';
 
 const TEST_REPO = '/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo';
 const SHARDRAIL = '/Users/daliys/Daliys/Shardrail';
@@ -117,8 +117,8 @@ async function main() {
     });
     client.onFrame((frame) => frames.push(frame));
     client.onError((error) => console.error(`full client: ${error.message}`));
-    const sessionId = await createSession(client, frames);
-    mark('session_created_ms');
+    // The browser creates the session. This full client only watches the journal:
+    // the transcript virtualizes rows, and the turn driver counts journal events.
 
     const requireFromS5 = createRequire(join(s5Dir, 'package.json'));
     const playwright = await import(pathToFileURL(requireFromS5.resolve('playwright-core')).href);
@@ -129,10 +129,13 @@ async function main() {
     page.setDefaultTimeout(120_000);
     await pairBrowser(page, binary, dataDir, baseUrl);
     mark('browser_paired_ms');
-    const option = page.getByRole('option', { name: new RegExp(sessionId) });
-    await option.waitFor({ state: 'visible', timeout: 30_000 });
-    await option.focus();
-    await page.getByRole('heading', { name: `Events for ${sessionId}` }).waitFor();
+    const sessionId = await createSessionInBrowser(page);
+    mark('session_created_ms');
+    await waitUntil(
+      () => frames.some((frame) => frame.kind === 'durable_event' && frame.event.kind === 'session_created' && frame.event.session_id === sessionId),
+      30_000,
+      'observer session_created',
+    );
     const streamed = await page.evaluate(() => window.__s5Metrics?.().eventStoreCount ?? 0);
     if (!(streamed > 0)) throw new Error('browser main screen did not stream session events');
 
@@ -168,6 +171,13 @@ async function main() {
     mark('turn2_done_ms');
 
     const events = frames.filter((frame) => frame.kind === 'durable_event').map((frame) => frame.event);
+    const verifiedExtensions = events.filter((event) => event.kind === 'codex_extensions_verified');
+    const rejectedExtensions = events.filter((event) => event.kind === 'codex_extensions_rejected');
+    const extensionLog = daemonLog.join('').split('\n').filter((line) => line.includes('codex extension'));
+    const codexHomeHits = [
+      ...codexHomePathHits(events),
+      ...codexHomePathHits(extensionLog.map((line) => ({ kind: 'daemon_log', payload: { line } }))),
+    ];
     const refused = events.filter((event) => event.kind === 'provider_request_refused');
     const usage = events.filter((event) => JSON.stringify(event.payload ?? {}).toLowerCase().includes('token'));
     const statusAfter = { shardrail: porcelain(SHARDRAIL), worktree: porcelain(worktree) };
@@ -192,11 +202,20 @@ async function main() {
       },
       allow_once: turn1.allowed ? 'observed' : 'not observed',
       routing_rejected: events.filter((event) => event.kind === 'approval_routing_rejected').map(summarizeEvent),
+      extensions: {
+        verified: verifiedExtensions.map(summarizeEvent),
+        rejected: rejectedExtensions.map(summarizeEvent),
+        log: extensionLog,
+      },
+      codex_home_paths: codexHomeHits,
       shardrail_git_status_unchanged: shardrailUnchanged,
     };
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
     if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');
+    if (codexHomeHits.length) throw new Error(`journal references ${[...new Set(codexHomeHits.flatMap((hit) => hit.markers))].join(', ')}`);
+    if (rejectedExtensions.length) throw new Error('codex extensions were rejected');
+    if (!verifiedExtensions.length) throw new Error('codex extension verification was not journaled');
     const turnFailure = turn1Failure({ ...turn1, finished: true });
     if (turnFailure) throw new Error(turnFailure);
     console.log(`S1-lite result written to ${resultDir}`);
@@ -319,21 +338,32 @@ function waitForBrowser(daemon, daemonLog) {
   });
 }
 
-async function createSession(client, frames) {
-  const commandId = randomUUID();
-  const pending = waitForEvent(frames, (frame) => {
-    if (frame.kind === 'command_rejected' && frame.command_id === commandId) {
-      throw new Error(frame.error || 'session.create was rejected');
+async function createSessionInBrowser(page) {
+  await page.locator('#session-workdir').waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'New session' }).click();
+  const option = page.locator('.session-list [role="option"]').filter({ hasText: /[0-9a-f]{8}-[0-9a-f-]{27}/ });
+  const alert = page.locator('.new-session [role="alert"]');
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if (await option.count()) {
+      const sessionId = (await option.first().innerText()).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0];
+      if (sessionId) {
+        await option.first().focus();
+        await page.getByRole('heading', { name: `Events for ${sessionId}` }).waitFor();
+        return sessionId;
+      }
     }
-    return frame.kind === 'durable_event' && frame.event.kind === 'session_created' && frame.event.payload?.command_id === commandId;
-  }, 30_000, 'session_created');
-  client.request({ command_id: commandId, kind: 'session.create', expected_state: null, expected_turn_id: null, payload: {} });
-  const frame = await pending;
-  return frame.event.session_id;
+    if (await alert.count()) {
+      const text = (await alert.innerText()).trim();
+      if (text) throw new Error(text);
+    }
+    await page.waitForTimeout(200);
+  }
+  throw new Error('browser New session did not create a session');
 }
 
 async function pairBrowser(page, binary, dataDir, baseUrl) {
-  const enrolled = spawnSync(binary, ['--data-dir', dataDir, 'client', 'enroll', '--label', `s1-lite-${randomUUID()}`], { encoding: 'utf8' });
+  const enrolled = spawnSync(binary, ['--data-dir', dataDir, 'client', 'enroll', '--label', `s1-lite-${randomUUID()}`, '--allow-session-create'], { encoding: 'utf8' });
   if (enrolled.status !== 0) throw new Error(enrolled.stderr || 'enroll failed');
   const code = enrolled.stdout.match(/enrollment_code=([0-9a-f]+)/)?.[1];
   if (!code) throw new Error('enrollment did not return a code');
@@ -495,6 +525,8 @@ function renderMarkdown(result) {
     `- Interrupt: \`${result.interrupt.outcome}\``,
     `- Unknown server request: ${result.unknown_request === 'not observed' ? 'not observed' : `${result.unknown_request.length} refused`}`,
     `- Shardrail git status unchanged: ${result.shardrail_git_status_unchanged}`,
+    `- Codex extensions verified: ${result.extensions?.verified?.length ?? 0}`,
+    `- Codex home paths in the journal: ${result.codex_home_paths?.length ?? 0}`,
     '',
     '## Event counts',
     '',
