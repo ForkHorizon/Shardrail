@@ -125,7 +125,11 @@ impl Logger {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let _ = io::stderr().lock().write_all(line.as_bytes());
+        {
+            let mut stderr = io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+        }
         if let Some(directory) = state.directory.clone() {
             let result = if state.file.is_none() {
                 open_log(&directory).map(|file| state.file = Some(file))

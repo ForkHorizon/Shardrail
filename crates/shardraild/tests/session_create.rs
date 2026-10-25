@@ -8,6 +8,7 @@ use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -256,6 +257,78 @@ fn spawn_logged(command: &mut Command) -> (DaemonGuard, thread::JoinHandle<Strin
     (DaemonGuard(child), reader)
 }
 
+fn shardrail_checkout() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&manifest)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let reported = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let git_dir = if reported.is_absolute() {
+        reported
+    } else {
+        manifest.join(reported)
+    };
+    let canonical = std::fs::canonicalize(git_dir).unwrap();
+    let root = canonical.parent().unwrap();
+    let data = Path::new("/System/Volumes/Data");
+    if let Ok(rest) = root.strip_prefix(data) {
+        let logical = Path::new("/").join(rest);
+        if logical.is_dir() {
+            return logical;
+        }
+    }
+    root.to_path_buf()
+}
+
+fn wait_for_stderr_line(
+    child: &mut Child,
+    mut stderr: impl Read + Send + 'static,
+    needle: &str,
+) -> String {
+    let shared = Arc::new((Mutex::new(String::new()), Condvar::new()));
+    let reader_shared = Arc::clone(&shared);
+    thread::spawn(move || {
+        let mut chunk = [0u8; 512];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => {
+                    reader_shared.1.notify_all();
+                    break;
+                }
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&chunk[..n]);
+                    reader_shared.0.lock().unwrap().push_str(&text);
+                    reader_shared.1.notify_all();
+                }
+            }
+        }
+    });
+    let (lock, cvar) = &*shared;
+    let mut text = lock.lock().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !text.contains(needle) {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "daemon exited before {needle}: {text}"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for {needle}: {text}"
+        );
+        let (guard, timed) = cvar.wait_timeout(text, remaining).unwrap();
+        text = guard;
+        if timed.timed_out() && !text.contains(needle) {
+            panic!("timed out waiting for {needle}: {text}");
+        }
+    }
+    text.clone()
+}
+
 fn wait_for_socket(path: &Path, child: &mut Child) {
     let socket = path.join("shardraild.sock");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -291,15 +364,16 @@ fn assert_audit(event: &DurableEvent, outcome: &str, reason: Option<&str>, capab
 #[test]
 fn startup_allowlist_rejects_root_home_and_the_shardrail_repo() {
     let data = tempfile::tempdir().unwrap();
+    let checkout = shardrail_checkout();
     for (path, needle) in [
-        ("/", "refusing the filesystem root"),
-        (&std::env::var("HOME").unwrap(), "refusing $HOME"),
+        ("/".to_owned(), "refusing the filesystem root"),
+        (std::env::var("HOME").unwrap(), "refusing $HOME"),
         (
-            "/Users/daliys/Daliys/Shardrail",
+            checkout.display().to_string(),
             "refusing a path inside the Shardrail repository",
         ),
         (
-            "/Users/daliys/Daliys/Shardrail/spikes/wt-w8",
+            env!("CARGO_MANIFEST_DIR").to_owned(),
             "refusing a path inside the Shardrail repository",
         ),
     ] {
@@ -308,7 +382,7 @@ fn startup_allowlist_rejects_root_home_and_the_shardrail_repo() {
             .arg(data.path())
             .arg("--no-file-log")
             .arg("--session-workdir")
-            .arg(path)
+            .arg(&path)
             .output()
             .unwrap();
         assert!(!output.status.success(), "{path} was accepted");
@@ -349,11 +423,30 @@ fn startup_logs_the_canonical_allowlist_and_codex_workdir_is_first() {
         .arg("--session-workdir")
         .arg(&link)
         .arg("--codex-app-server")
-        .arg(fake_program());
-    let (mut guard, reader) = spawn_logged(&mut command);
-    wait_for_socket(data.path(), &mut guard.0);
-    drop(guard);
-    let stderr = reader.join().unwrap();
+        .arg(fake_program())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut guard = DaemonGuard(child);
+    let shared = Arc::new((Mutex::new(String::new()), Condvar::new()));
+    let reader_shared = Arc::clone(&shared);
+    thread::spawn(move || {
+        let mut chunk = [0u8; 512];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => {
+                    reader_shared.1.notify_all();
+                    break;
+                }
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&chunk[..n]);
+                    reader_shared.0.lock().unwrap().push_str(&text);
+                    reader_shared.1.notify_all();
+                }
+            }
+        }
+    });
     let first = std::fs::canonicalize(first.path()).unwrap();
     let second = std::fs::canonicalize(second.path()).unwrap();
     let listed = format!(
@@ -361,7 +454,79 @@ fn startup_logs_the_canonical_allowlist_and_codex_workdir_is_first() {
         first.display(),
         second.display()
     );
-    assert!(stderr.contains(&listed), "{stderr}");
+    let (lock, cvar) = &*shared;
+    let mut text = lock.lock().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !text.contains(&listed) {
+        assert!(
+            guard.0.try_wait().unwrap().is_none(),
+            "daemon exited before the allowlist line: {text}"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for the allowlist line: {text}"
+        );
+        let (guard, timed) = cvar.wait_timeout(text, remaining).unwrap();
+        text = guard;
+        if timed.timed_out() && !text.contains(&listed) {
+            panic!("timed out waiting for the allowlist line: {text}");
+        }
+    }
+    drop(text);
+    drop(guard);
+}
+
+#[test]
+fn overridden_checkout_refuses_itself_and_allows_its_test_repo() {
+    let data = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("crates");
+    std::fs::create_dir_all(&nested).unwrap();
+    let testrepo = root.path().join("spikes/s1-testrepo");
+    std::fs::create_dir_all(&testrepo).unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&testrepo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let refused = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+        .arg("--data-dir")
+        .arg(data.path())
+        .arg("--no-file-log")
+        .arg("--shardrail-root")
+        .arg(root.path())
+        .arg("--session-workdir")
+        .arg(&nested)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("refusing a path inside the Shardrail repository")
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
+        .arg("--data-dir")
+        .arg(data.path())
+        .arg("--no-file-log")
+        .arg("--shardrail-root")
+        .arg(root.path())
+        .arg("--session-workdir")
+        .arg(&testrepo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut guard = DaemonGuard(child);
+    let canonical = std::fs::canonicalize(&testrepo).unwrap();
+    let listed = format!("session workdir allowlist: {}", canonical.display());
+    let text = wait_for_stderr_line(&mut guard.0, stderr, &listed);
+    assert!(text.contains(&listed), "{text}");
 }
 
 #[test]

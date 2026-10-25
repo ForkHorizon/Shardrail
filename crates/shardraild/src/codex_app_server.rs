@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
 use std::io::{self, ErrorKind};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, Once};
@@ -59,6 +60,9 @@ pub(crate) const EXTENSION_CONFIG: &[&str] = &[
 const MAX_SKILL_NAMES: usize = 64;
 const MAX_SKILL_NAME_CHARS: usize = 256;
 const MAX_SKILL_CONFIG_BYTES: usize = 4096;
+const MAX_MCP_SERVERS: usize = 64;
+const MAX_MCP_NAME_CHARS: usize = 256;
+const MAX_MCP_ARG_BYTES: usize = 512;
 
 const COMMAND_APPROVAL: &str = "item/commandExecution/requestApproval";
 const FILE_APPROVAL: &str = "item/fileChange/requestApproval";
@@ -75,8 +79,11 @@ pub(crate) struct CodexConfig {
     pub(crate) program: PathBuf,
     pub(crate) workdir: PathBuf,
     pub(crate) extra: Vec<String>,
-    /// Directory object admitted for this session. Spawn uses it instead of the path.
+    /// Directory object admitted for this session. Its device and inode are the
+    /// identity the helper must see when it opens `workdir`.
     pub(crate) directory: Option<Arc<File>>,
+    /// Test hook: replace `workdir` after the pin and before the helper opens it.
+    pub(crate) replace_after_pin: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -109,9 +116,14 @@ pub(crate) fn config_override_allowed(value: &str) -> bool {
     !raw_value.is_empty() && matches!(key, "model" | "model_reasoning_effort")
 }
 
-pub(crate) fn command_arguments(extra: &[String], skills_config: Option<&str>) -> Vec<String> {
+pub(crate) fn command_arguments(
+    extra: &[String],
+    skills_config: Option<&str>,
+    mcp_disables: &[String],
+) -> Vec<String> {
     let mut args = Vec::with_capacity(
-        1 + (extra.len() + SAFETY_CONFIG.len() + EXTENSION_CONFIG.len() + 1) * 2,
+        1 + (extra.len() + SAFETY_CONFIG.len() + EXTENSION_CONFIG.len() + mcp_disables.len() + 1)
+            * 2,
     );
     args.push("app-server".to_owned());
     for item in extra {
@@ -126,7 +138,51 @@ pub(crate) fn command_arguments(extra: &[String], skills_config: Option<&str>) -
         args.push("-c".to_owned());
         args.push(skills_config.to_owned());
     }
+    for item in mcp_disables {
+        args.push("-c".to_owned());
+        args.push(item.clone());
+    }
     args
+}
+
+/// `-c mcp_servers.<name>.enabled=false` for every name from `config/read`.
+/// Names that are not bare TOML keys are quoted. Control characters, too many
+/// names, or an over-long argument fail closed.
+pub(crate) fn mcp_disable_overrides(names: &[String]) -> Result<Vec<String>, String> {
+    if names.len() > MAX_MCP_SERVERS {
+        return Err("mcp server disable list is too long".into());
+    }
+    let mut overrides = Vec::with_capacity(names.len());
+    for name in names {
+        overrides.push(mcp_disable_override(name)?);
+    }
+    Ok(overrides)
+}
+
+fn mcp_disable_override(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || name.chars().count() > MAX_MCP_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        return Err("mcp server name is not safe to disable".into());
+    }
+    let key = if bare_toml_key(name) {
+        name.to_owned()
+    } else {
+        format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+    };
+    let value = format!("mcp_servers.{key}.enabled=false");
+    if value.len() > MAX_MCP_ARG_BYTES {
+        return Err("mcp server disable list is too long".into());
+    }
+    Ok(value)
+}
+
+fn bare_toml_key(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// `skills.config=[{name="...",enabled=false},...]` for every enabled name.
@@ -273,11 +329,23 @@ pub(crate) fn install_shutdown_kill() {
             tokio::select! {
                 _ = terminate.recv() => {}
                 _ = interrupt.recv() => {}
+                _ = async {
+                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                        Ok(mut hangup) => {
+                            let _ = hangup.recv().await;
+                        }
+                        Err(_) => std::future::pending::<()>().await,
+                    }
+                } => {}
             }
             kill_tracked_groups();
             std::process::exit(0);
         });
     });
+}
+
+pub(crate) fn shutdown_children() {
+    kill_tracked_groups();
 }
 
 fn kill_tracked_groups() {
@@ -327,6 +395,7 @@ enum PendingRpc {
     HooksList,
     PluginsInstalled,
     AppsList,
+    ConfigRead,
     ThreadStart,
     TurnStart {
         done: oneshot::Sender<Result<i64, String>>,
@@ -684,21 +753,28 @@ async fn run_codex_session(
     commit_rx: oneshot::Receiver<Result<(), String>>,
 ) {
     let mut ready = Some(ready_tx);
-    let enabled = match preflight_enabled_skills(&config).await {
-        Ok(names) => names,
+    let preflight = match preflight_extensions(&config).await {
+        Ok(preflight) => preflight,
         Err(reason) => {
             reject_extensions_now(&daemon, session_id, &mut ready, &reason).await;
             return;
         }
     };
-    let skills_config = match skills_config_override(&enabled) {
+    let skills_config = match skills_config_override(&preflight.skills) {
         Ok(value) => value,
         Err(reason) => {
             reject_extensions_now(&daemon, session_id, &mut ready, &reason).await;
             return;
         }
     };
-    let mut child = match spawn_child(&config, &skills_config) {
+    let mcp_disables = match mcp_disable_overrides(&preflight.mcp_servers) {
+        Ok(values) => values,
+        Err(reason) => {
+            reject_extensions_now(&daemon, session_id, &mut ready, &reason).await;
+            return;
+        }
+    };
+    let mut child = match spawn_child(&config, &skills_config, &mcp_disables) {
         Ok(child) => child,
         Err(error) => {
             let status = CodexStatus::Failed(format!("codex app-server failed to start: {error}"));
@@ -1075,14 +1151,18 @@ impl CodexRun {
             .map(str::to_owned);
         let has_id = frame.get("id").is_some_and(|id| !id.is_null());
         if method.is_some() && has_id {
-            self.server_request(frame).await;
-            return false;
+            return self.server_request(frame, ready).await;
         }
         if method.is_none() && has_id {
             return self.server_response(frame, ready).await;
         }
         if let Some(method) = method {
-            self.server_notification(&method, frame.get("params").cloned().unwrap_or(Value::Null))
+            return self
+                .server_notification(
+                    &method,
+                    frame.get("params").cloned().unwrap_or(Value::Null),
+                    ready,
+                )
                 .await;
         }
         false
@@ -1155,6 +1235,29 @@ impl CodexRun {
                     self.reject_extensions(ready, reason).await;
                     return true;
                 }
+                self.send_request(
+                    "config/read",
+                    json!({"cwd": self.workdir}),
+                    PendingRpc::ConfigRead,
+                );
+                false
+            }
+            PendingRpc::ConfigRead => {
+                let mcp_servers = match mcp_enabled_count(&result) {
+                    Ok(0) => 0,
+                    Ok(_) => {
+                        drop(result);
+                        self.reject_extensions(ready, "enabled mcp servers remain")
+                            .await;
+                        return true;
+                    }
+                    Err(reason) => {
+                        drop(result);
+                        self.reject_extensions(ready, reason).await;
+                        return true;
+                    }
+                };
+                drop(result);
                 if let Err(error) = self.wait_for_admission().await {
                     self.fail_transport(ready, &error).await;
                     return true;
@@ -1162,7 +1265,7 @@ impl CodexRun {
                 if self
                     .journal_extension_event(
                         "codex_extensions_verified",
-                        json!({"enabled_skills": 0, "hooks": 0, "enabled_plugins": 0, "apps": 0}),
+                        json!({"enabled_skills": 0, "hooks": 0, "enabled_plugins": 0, "apps": 0, "mcp_servers": mcp_servers}),
                     )
                     .await
                     .is_err()
@@ -1178,7 +1281,7 @@ impl CodexRun {
                     "INFO",
                     "codex",
                     &format!(
-                        "codex extensions verified session {} skills=0 hooks=0 plugins=0 apps=0",
+                        "codex extensions verified session {} skills=0 hooks=0 plugins=0 apps=0 mcp_servers={mcp_servers}",
                         self.session_id
                     ),
                 );
@@ -1327,6 +1430,7 @@ impl CodexRun {
                     .await;
             }
             PendingRpc::AppsList => self.reject_extensions(ready, "app/list failed").await,
+            PendingRpc::ConfigRead => self.reject_extensions(ready, "config/read failed").await,
             PendingRpc::TurnStart { done, .. } => {
                 self.finish_turn(TurnOutcome::Interrupted, "turn_start_failed")
                     .await;
@@ -1389,7 +1493,12 @@ impl CodexRun {
         }
     }
 
-    async fn server_request(&mut self, frame: Value) {
+    /// Returns true when the session loop should stop.
+    async fn server_request(
+        &mut self,
+        frame: Value,
+        ready: &mut Option<oneshot::Sender<CodexStatus>>,
+    ) -> bool {
         let method = frame
             .get("method")
             .and_then(Value::as_str)
@@ -1397,9 +1506,20 @@ impl CodexRun {
             .to_owned();
         let id = frame.get("id").cloned().unwrap_or(Value::Null);
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
+        if method.starts_with("mcpServer/") {
+            let line = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": "method not supported"}
+            })
+            .to_string();
+            let _ = self.writer.send(Outbound { line, done: None });
+            self.stop_mcp(ready, &method).await;
+            return true;
+        }
         if method == COMMAND_APPROVAL || method == FILE_APPROVAL {
             self.approval_request(&method, id, params).await;
-            return;
+            return false;
         }
         let line = json!({
             "jsonrpc": "2.0",
@@ -1414,6 +1534,7 @@ impl CodexRun {
                 json!({"method": method, "id": id, "params": params}),
             )
             .await;
+        false
     }
 
     async fn approval_request(&mut self, method: &str, rpc_id: Value, params: Value) {
@@ -1566,7 +1687,17 @@ impl CodexRun {
         );
     }
 
-    async fn server_notification(&mut self, method: &str, params: Value) {
+    /// Returns true when the session loop should stop.
+    async fn server_notification(
+        &mut self,
+        method: &str,
+        params: Value,
+        ready: &mut Option<oneshot::Sender<CodexStatus>>,
+    ) -> bool {
+        if method.starts_with("mcpServer/") {
+            self.stop_mcp(ready, method).await;
+            return true;
+        }
         match method {
             "item/agentMessage/delta" => {
                 let _ = self
@@ -1601,7 +1732,7 @@ impl CodexRun {
                             &item,
                         )
                         .await;
-                        return;
+                        return false;
                     }
                     if method == "item/completed"
                         && let Some(approval_id) = self.approval_by_item.get(id).copied()
@@ -1662,6 +1793,53 @@ impl CodexRun {
                     .await;
             }
         }
+        false
+    }
+
+    async fn stop_mcp(&mut self, ready: &mut Option<oneshot::Sender<CodexStatus>>, method: &str) {
+        let reason = format!("mcp server activity: {method}");
+        self.turns_allowed = false;
+        if self.process_marked || self.thread_id.is_some() {
+            let _ = self
+                .journal_extension_event("codex_extensions_rejected", json!({"reason": reason}))
+                .await;
+            self.interrupt_open_turn().await;
+            self.fail_transport(ready, &reason).await;
+            return;
+        }
+        self.reject_extensions(ready, &reason).await;
+    }
+
+    /// Flush `turn/interrupt` before the process group is killed.
+    async fn interrupt_open_turn(&mut self) {
+        let (Some(thread_id), Some(turn_id)) = (self.thread_id.clone(), self.turn_id.clone())
+        else {
+            return;
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": "turn/interrupt",
+            "params": {"threadId": thread_id, "turnId": turn_id}
+        })
+        .to_string();
+        self.next_id += 1;
+        if self
+            .writer
+            .send(Outbound {
+                line,
+                done: Some(done_tx),
+            })
+            .is_err()
+        {
+            return;
+        }
+        let _ =
+            tokio::task::spawn_blocking(move || done_rx.recv_timeout(Duration::from_secs(2))).await;
+        // The bytes are in the pipe. Give the child one slice of time to read
+        // the interrupt before the session task drops the process group.
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     async fn finish_turn(&mut self, outcome: TurnOutcome, status: &str) {
@@ -1739,6 +1917,7 @@ impl CodexRun {
                 | PendingRpc::HooksList
                 | PendingRpc::PluginsInstalled
                 | PendingRpc::AppsList
+                | PendingRpc::ConfigRead
                 | PendingRpc::ThreadStart => {}
             }
         }
@@ -2002,22 +2181,32 @@ impl CodexRun {
     }
 }
 
-fn codex_command<'a>(
-    config: &'a CodexConfig,
+fn codex_command(
+    config: &CodexConfig,
     skills_config: Option<&str>,
-) -> io::Result<(Command, crate::session_workdir::InheritedDirFd<'a>)> {
+    mcp_disables: &[String],
+) -> io::Result<Command> {
     let Some(directory) = config.directory.as_deref() else {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "session workdir is not pinned",
         ));
     };
-    let inherited = crate::session_workdir::InheritedDirFd::acquire(directory)?;
+    let metadata = directory.metadata()?;
+    if config.replace_after_pin {
+        replace_pinned_path(&config.workdir)?;
+    }
     let mut command = Command::new(crate::session_workdir::chdir_helper());
     command
-        .arg(inherited.raw().to_string())
+        .arg(&config.workdir)
+        .arg(metadata.dev().to_string())
+        .arg(metadata.ino().to_string())
         .arg(&config.program)
-        .args(command_arguments(&config.extra, skills_config))
+        .args(command_arguments(
+            &config.extra,
+            skills_config,
+            mcp_disables,
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true)
@@ -2026,15 +2215,44 @@ fn codex_command<'a>(
         .env_remove("GPG_AGENT_INFO");
     #[cfg(unix)]
     command.process_group(0);
-    Ok((command, inherited))
+    Ok(command)
 }
 
-fn spawn_child(config: &CodexConfig, skills_config: &str) -> io::Result<tokio::process::Child> {
-    let (mut command, inherited) = codex_command(config, Some(skills_config))?;
+fn spawn_child(
+    config: &CodexConfig,
+    skills_config: &str,
+    mcp_disables: &[String],
+) -> io::Result<tokio::process::Child> {
+    let mut command = codex_command(config, Some(skills_config), mcp_disables)?;
     command.stderr(Stdio::piped());
-    let child = command.spawn()?;
-    drop(inherited);
-    Ok(child)
+    command.spawn()
+}
+
+/// Test-only: the path is replaced after the directory fd is pinned.
+fn replace_pinned_path(path: &std::path::Path) -> io::Result<()> {
+    static SLOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(error) = SLOT.get() {
+        return if error.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(error.clone()))
+        };
+    }
+    let saved = path.with_file_name(format!(
+        "{}-replaced",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let outcome: io::Result<()> = (|| {
+        std::fs::rename(path, &saved)?;
+        std::fs::create_dir(path)?;
+        Ok(())
+    })();
+    let message = match &outcome {
+        Ok(()) => String::new(),
+        Err(error) => error.to_string(),
+    };
+    let _ = SLOT.set(message);
+    outcome
 }
 
 async fn reject_extensions_now(
@@ -2148,19 +2366,24 @@ async fn journal_session_notice(
     Ok(())
 }
 
+struct Preflight {
+    skills: Vec<String>,
+    mcp_servers: Vec<String>,
+}
+
 fn skills_list_params(workdir: &str) -> Value {
     json!({"cwds": [workdir], "forceReload": true})
 }
 
-async fn preflight_enabled_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
-    match tokio::time::timeout(Duration::from_secs(10), preflight_skills(config)).await {
+async fn preflight_extensions(config: &CodexConfig) -> Result<Preflight, String> {
+    match tokio::time::timeout(Duration::from_secs(10), preflight_child(config)).await {
         Ok(result) => result,
         Err(_) => Err("codex extension preflight timed out".into()),
     }
 }
 
-async fn preflight_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
-    let (mut command, inherited) = codex_command(config, None).map_err(|error| {
+async fn preflight_child(config: &CodexConfig) -> Result<Preflight, String> {
+    let mut command = codex_command(config, None, &[]).map_err(|error| {
         crate::daemon_log::log(
             "WARN",
             "codex",
@@ -2168,9 +2391,8 @@ async fn preflight_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
         );
         "codex extension preflight failed to start".to_owned()
     })?;
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::piped());
     let spawned = command.spawn();
-    drop(inherited);
     let mut child = spawned.map_err(|error| {
         crate::daemon_log::log(
             "WARN",
@@ -2182,6 +2404,7 @@ async fn preflight_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
     let pid = child.id().unwrap_or(0);
     track_group(pid);
     let _guard = GroupGuard(pid);
+    let stderr_text = drain_stderr(child.stderr.take());
     let mut stdin = child
         .stdin
         .take()
@@ -2192,12 +2415,85 @@ async fn preflight_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
         .ok_or_else(|| "codex extension preflight stdout is unavailable".to_owned())?;
     let mut lines = BufReader::new(stdout).lines();
     let workdir = config.workdir.display().to_string();
-    write_rpc(&mut stdin, 1, "initialize", initialize_params()).await?;
-    let _initialized = read_rpc_result(&mut lines, 1, "initialize").await?;
-    write_notification(&mut stdin, "initialized", json!({})).await?;
-    write_rpc(&mut stdin, 2, "skills/list", skills_list_params(&workdir)).await?;
-    let listed = read_rpc_result(&mut lines, 2, "skills/list").await?;
-    enabled_skill_names(&listed)
+    let outcome = preflight_rpcs(&mut stdin, &mut lines, &workdir).await;
+    if outcome.is_err() {
+        drop(stdin);
+        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while stderr_text
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    let stderr_text = stderr_text
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    outcome.map_err(|error| preflight_error(error, &stderr_text))
+}
+
+fn drain_stderr(stderr: Option<tokio::process::ChildStderr>) -> Arc<StdMutex<String>> {
+    let text = Arc::new(StdMutex::new(String::new()));
+    let Some(mut stderr) = stderr else {
+        return text;
+    };
+    let captured = Arc::clone(&text);
+    tokio::spawn(async move {
+        let mut buffer = [0u8; 512];
+        loop {
+            match stderr.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut guard = captured.lock().unwrap_or_else(|error| error.into_inner());
+                    if guard.len() < 1024 {
+                        let take = n.min(1024 - guard.len());
+                        guard.push_str(&String::from_utf8_lossy(&buffer[..take]));
+                    }
+                }
+            }
+        }
+    });
+    text
+}
+
+fn preflight_error(fallback: String, stderr: &str) -> String {
+    let Some(line) = stderr.lines().next() else {
+        return fallback;
+    };
+    let Some(message) = line.strip_prefix("chdir-fd: ") else {
+        return fallback;
+    };
+    if message.is_empty() || message.len() > 300 || message.chars().any(char::is_control) {
+        return fallback;
+    }
+    format!("chdir-fd: {message}")
+}
+
+async fn preflight_rpcs(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    workdir: &str,
+) -> Result<Preflight, String> {
+    write_rpc(stdin, 1, "initialize", initialize_params()).await?;
+    let initialized = read_rpc_result(lines, 1, "initialize").await?;
+    drop(initialized);
+    write_notification(stdin, "initialized", json!({})).await?;
+    write_rpc(stdin, 2, "config/read", json!({"cwd": workdir})).await?;
+    let config = read_rpc_result(lines, 2, "config/read").await?;
+    let mcp_servers = mcp_server_names(&config)?;
+    drop(config);
+    write_rpc(stdin, 3, "skills/list", skills_list_params(workdir)).await?;
+    let listed = read_rpc_result(lines, 3, "skills/list").await?;
+    let skills = enabled_skill_names(&listed)?;
+    drop(listed);
+    Ok(Preflight {
+        skills,
+        mcp_servers,
+    })
 }
 
 async fn write_rpc(
@@ -2272,6 +2568,43 @@ async fn read_rpc_result(
             .cloned()
             .ok_or_else(|| format!("codex extension preflight {method} response is invalid"));
     }
+}
+
+/// Names only. The `config/read` value is dropped by the caller. Other fields,
+/// including MCP `env` and headers, are never copied.
+fn mcp_server_names(result: &Value) -> Result<Vec<String>, &'static str> {
+    let servers = mcp_server_object(result)?;
+    let mut names = Vec::with_capacity(servers.len());
+    for (name, value) in servers {
+        if value.get("enabled").and_then(Value::as_bool).is_none() {
+            return Err("config/read response is invalid");
+        }
+        names.push(name.clone());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Count of entries whose `enabled` field is true. Anything else is invalid.
+fn mcp_enabled_count(result: &Value) -> Result<usize, &'static str> {
+    let servers = mcp_server_object(result)?;
+    let mut enabled = 0usize;
+    for value in servers.values() {
+        match value.get("enabled").and_then(Value::as_bool) {
+            Some(true) => enabled += 1,
+            Some(false) => {}
+            None => return Err("config/read response is invalid"),
+        }
+    }
+    Ok(enabled)
+}
+
+fn mcp_server_object(result: &Value) -> Result<&serde_json::Map<String, Value>, &'static str> {
+    result
+        .get("config")
+        .and_then(|config| config.get("mcp_servers"))
+        .and_then(Value::as_object)
+        .ok_or("config/read response is invalid")
 }
 
 fn enabled_skill_names(result: &Value) -> Result<Vec<String>, String> {
@@ -2509,6 +2842,7 @@ mod tests {
         let args = command_arguments(
             &["model_reasoning_effort=\"low\"".into()],
             Some("skills.config=[]"),
+            &["mcp_servers.soma.enabled=false".into()],
         );
         assert_eq!(args[0], "app-server");
         assert_eq!(args[1], "-c");
@@ -2523,11 +2857,12 @@ mod tests {
         let mut expected = SAFETY_CONFIG.to_vec();
         expected.extend(EXTENSION_CONFIG);
         expected.push("skills.config=[]");
+        expected.push("mcp_servers.soma.enabled=false");
         assert!(paired.ends_with(expected.as_slice()));
         assert!(paired.contains(&"web_search=\"disabled\""));
         assert!(paired.contains(&"features.js_repl=false"));
         assert!(paired.contains(&"features.plugins=false"));
-        let preflight = command_arguments(&[], None);
+        let preflight = command_arguments(&[], None, &[]);
         assert!(
             !preflight
                 .iter()
@@ -2552,6 +2887,58 @@ mod tests {
         let long = "n".repeat(80);
         let names = vec![long; MAX_SKILL_NAMES];
         assert!(skills_config_override(&names).is_err());
+    }
+
+    #[test]
+    fn mcp_disable_overrides_quote_bare_keys_and_fail_closed() {
+        assert_eq!(
+            mcp_disable_overrides(&["soma".into(), "odd.server".into(), "has space".into()])
+                .unwrap(),
+            vec![
+                "mcp_servers.soma.enabled=false".to_owned(),
+                "mcp_servers.\"odd.server\".enabled=false".to_owned(),
+                "mcp_servers.\"has space\".enabled=false".to_owned(),
+            ]
+        );
+        assert_eq!(
+            mcp_disable_override("a\"b\\c").unwrap(),
+            "mcp_servers.\"a\\\"b\\\\c\".enabled=false"
+        );
+        assert!(mcp_disable_overrides(&["has\nnewline".into()]).is_err());
+        assert!(mcp_disable_overrides(&["has\u{007f}delete".into()]).is_err());
+        assert!(mcp_disable_overrides(&[String::new()]).is_err());
+        assert!(mcp_disable_overrides(&["n".repeat(MAX_MCP_NAME_CHARS + 1)]).is_err());
+        assert!(mcp_disable_overrides(&vec!["soma".into(); MAX_MCP_SERVERS + 1]).is_err());
+        let secret = "mcp-decoy-secret-SHOULD-NOT-LEAK";
+        let result = json!({
+            "config": {
+                "mcp_servers": {
+                    "soma": {"enabled": false, "env": {"TOKEN": secret}},
+                    "node_repl": {"enabled": true, "headers": {"Authorization": secret}}
+                },
+                "other": secret
+            }
+        });
+        assert_eq!(
+            mcp_server_names(&result).unwrap(),
+            vec!["node_repl".to_owned(), "soma".to_owned()]
+        );
+        assert_eq!(mcp_enabled_count(&result).unwrap(), 1);
+        assert_eq!(
+            mcp_enabled_count(&json!({"config": {"mcp_servers": {}}})).unwrap(),
+            0
+        );
+        assert!(mcp_enabled_count(&json!({"config": {}})).is_err());
+        assert!(
+            mcp_enabled_count(&json!({"config": {"mcp_servers": {"soma": {"enabled": "false"}}}}))
+                .is_err()
+        );
+        let rendered = format!(
+            "{:?} {}",
+            mcp_server_names(&result),
+            mcp_enabled_count(&result).unwrap()
+        );
+        assert!(!rendered.contains(secret));
     }
 
     #[test]
