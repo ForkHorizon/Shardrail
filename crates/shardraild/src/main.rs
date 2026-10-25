@@ -34,6 +34,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use uuid::Uuid;
 
+mod codex_app_server;
 mod daemon_log;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -63,6 +64,15 @@ struct Args {
     browser_listen: Option<SocketAddr>,
     #[arg(long, requires = "browser_listen")]
     browser_assets_dir: Option<PathBuf>,
+    /// Codex CLI used as `codex app-server` for one child process per session.
+    #[arg(long, value_name = "PATH")]
+    codex_app_server: Option<PathBuf>,
+    /// Working directory for Codex threads. Required with `--codex-app-server`.
+    #[arg(long, value_name = "DIR", requires = "codex_app_server")]
+    codex_workdir: Option<PathBuf>,
+    /// Extra Codex `-c` override, placed before the mandatory safety overrides.
+    #[arg(long = "codex-config", value_name = "KEY=VALUE")]
+    codex_config: Vec<String>,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
 }
@@ -125,6 +135,7 @@ async fn resolve_approval(
             let (written, result) = std::sync::mpsc::sync_channel(1);
             sender
                 .send(ProviderCommand {
+                    approval_id: request.approval_id,
                     option_id: option_id.map(str::to_owned),
                     written,
                     delay: write_delay,
@@ -143,7 +154,7 @@ async fn resolve_approval(
             return Err("approval is already resolved".into());
         }
         if let Some(provider) = entry.provider.take() {
-            let _ = provider.send(ProviderCommand::cancel());
+            let _ = provider.send(ProviderCommand::cancel(request.approval_id));
         }
         return Err(error.to_string());
     }
@@ -519,6 +530,7 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
             let (written, result) = std::sync::mpsc::sync_channel(1);
             provider
                 .send(ProviderCommand {
+                    approval_id,
                     option_id: option_id.map(str::to_owned),
                     written,
                     delay: Duration::ZERO,
@@ -536,7 +548,7 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
         }
         Err(_error) => {
             if let Some(provider) = entry.provider.take() {
-                let _ = provider.send(ProviderCommand::cancel());
+                let _ = provider.send(ProviderCommand::cancel(approval_id));
             }
             daemon_log::log("ERROR", "approval", "expiry failed closed");
         }
@@ -653,16 +665,18 @@ fn parse_client_frame(line: &str) -> io::Result<ClientFrame> {
     serde_json::from_value(value).map_err(io::Error::other)
 }
 
-struct ProviderCommand {
-    option_id: Option<String>,
-    written: std::sync::mpsc::SyncSender<io::Result<()>>,
-    delay: Duration,
+pub(crate) struct ProviderCommand {
+    pub(crate) approval_id: Uuid,
+    pub(crate) option_id: Option<String>,
+    pub(crate) written: std::sync::mpsc::SyncSender<io::Result<()>>,
+    pub(crate) delay: Duration,
 }
 
 impl ProviderCommand {
-    fn cancel() -> Self {
+    pub(crate) fn cancel(approval_id: Uuid) -> Self {
         let (written, _result) = std::sync::mpsc::sync_channel(1);
         Self {
+            approval_id,
             option_id: None,
             written,
             delay: Duration::ZERO,
@@ -772,39 +786,92 @@ struct EnrollmentRequest {
     public_key: String,
 }
 
-struct Daemon {
+pub(crate) struct Daemon {
     data: DaemonDataDir,
-    journal: Mutex<Journal>,
-    event_generation: watch::Sender<u64>,
+    pub(crate) journal: Mutex<Journal>,
+    pub(crate) event_generation: watch::Sender<u64>,
     command_lock: Mutex<()>,
     host_key: SigningKey,
     fake_acp_path: Option<PathBuf>,
     fake_acp_no_reject: bool,
     fake_acp_disconnect_after_permission: bool,
-    approval_timeout_secs: u64,
-    test_write_ahead_delay_ms: u64,
-    approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
-    sessions: Mutex<HashMap<Uuid, Arc<Mutex<Coordinator>>>>,
+    pub(crate) approval_timeout_secs: u64,
+    pub(crate) test_write_ahead_delay_ms: u64,
+    pub(crate) approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
+    pub(crate) sessions: Mutex<HashMap<Uuid, Arc<Mutex<Coordinator>>>>,
+    pub(crate) codex: Option<codex_app_server::CodexConfig>,
+    pub(crate) codex_status: Mutex<HashMap<Uuid, codex_app_server::CodexStatus>>,
+    pub(crate) turn_commands:
+        Mutex<HashMap<Uuid, mpsc::UnboundedSender<codex_app_server::SessionCommand>>>,
 }
 
-struct DaemonApproval {
-    session_id: Uuid,
-    approval: Approval,
-    options: Vec<ProviderOption>,
-    provider: Option<mpsc::UnboundedSender<ProviderCommand>>,
-    timeout_task: Option<tokio::task::AbortHandle>,
+pub(crate) struct DaemonApproval {
+    pub(crate) session_id: Uuid,
+    pub(crate) approval: Approval,
+    pub(crate) options: Vec<ProviderOption>,
+    pub(crate) provider: Option<mpsc::UnboundedSender<ProviderCommand>>,
+    pub(crate) timeout_task: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Clone)]
-struct ProviderOption {
-    id: String,
-    class: OptionClass,
-    decision: ApprovalDecision,
+pub(crate) struct ProviderOption {
+    pub(crate) id: String,
+    pub(crate) class: OptionClass,
+    pub(crate) decision: ApprovalDecision,
+}
+
+fn codex_config(args: &Args) -> Result<Option<codex_app_server::CodexConfig>, io::Error> {
+    if args.fake_acp_path.is_some() && args.codex_app_server.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "choose either --fake-acp-path or --codex-app-server",
+        ));
+    }
+    if args.codex_app_server.is_none() && !args.codex_config.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--codex-config requires --codex-app-server",
+        ));
+    }
+    let Some(program) = args.codex_app_server.clone() else {
+        return Ok(None);
+    };
+    let workdir = args.codex_workdir.clone().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--codex-workdir is required with --codex-app-server",
+        )
+    })?;
+    let workdir = fs::canonicalize(&workdir)?;
+    if !workdir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--codex-workdir must be an existing directory",
+        ));
+    }
+    for item in &args.codex_config {
+        if !codex_app_server::config_override_allowed(item) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "codex config override must be model or model_reasoning_effort as a single-line KEY=VALUE",
+            ));
+        }
+    }
+    Ok(Some(codex_app_server::CodexConfig {
+        program,
+        workdir,
+        extra: args.codex_config.clone(),
+    }))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let codex = if args.command.is_none() {
+        codex_config(&args)?
+    } else {
+        None
+    };
     let path = args.data_dir.unwrap_or_else(default_data_dir);
     match args.command {
         Some(DaemonCommand::Client { command }) => manage_clients(&path, command)?,
@@ -837,6 +904,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     address: args.browser_listen,
                     assets_dir: args.browser_assets_dir,
                 },
+                codex,
             )
             .await?
         }
@@ -844,6 +912,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Codex config is one more startup input beside the existing daemon options"
+)]
 async fn run(
     path: PathBuf,
     fake_acp_path: Option<PathBuf>,
@@ -852,6 +924,7 @@ async fn run(
     approval_timeout_secs: u64,
     test_write_ahead_delay_ms: u64,
     browser: BrowserListenerOptions,
+    codex: Option<codex_app_server::CodexConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -890,7 +963,11 @@ async fn run(
         test_write_ahead_delay_ms,
         approvals: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
+        codex,
+        codex_status: Mutex::new(HashMap::new()),
+        turn_commands: Mutex::new(HashMap::new()),
     });
+    codex_app_server::install_shutdown_kill();
     daemon_log::log("INFO", "daemon", &startup_message(&socket, host_id, epoch));
     if let Some(listener) = browser_listener {
         let address = listener.local_addr()?;
@@ -2194,6 +2271,21 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             continue;
         }
         if let Some(request) = request {
+            if request.expected_state.is_some() || request.expected_turn_id.is_some() {
+                write_frame(
+                    &outbound,
+                    &DaemonFrame::CommandRejected {
+                        command_id: request.command_id,
+                        error: "unsupported command or invalid preconditions".into(),
+                    },
+                )
+                .await?;
+                continue;
+            }
+            if request.kind == "turn.start" || request.kind == "turn.interrupt" {
+                codex_app_server::handle_turn_command(&daemon, &outbound, &request).await?;
+                continue;
+            }
             if client.scope == ClientScope::Limited {
                 write_frame(
                     &outbound,
@@ -2205,10 +2297,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 .await?;
                 continue;
             }
-            if request.kind != "session.create"
-                || request.expected_state.is_some()
-                || request.expected_turn_id.is_some()
-            {
+            if request.kind != "session.create" {
                 write_frame(
                     &outbound,
                     &DaemonFrame::CommandRejected {
@@ -2226,7 +2315,26 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 .await
                 .created_session_for_command(client.client_id, request.command_id)
                 .map_err(io::Error::other)?;
-            if let Some((_session_id, event_id)) = existing {
+            if let Some((session_id, event_id)) = existing {
+                if let Some(config) = daemon.codex.clone()
+                    && codex_start_incomplete(&daemon, session_id).await?
+                {
+                    let status =
+                        codex_app_server::start_session(Arc::clone(&daemon), config, session_id)
+                            .await;
+                    if let codex_app_server::CodexStatus::Failed(error) = status {
+                        write_frame(
+                            &outbound,
+                            &DaemonFrame::CommandRejected {
+                                command_id: request.command_id,
+                                error,
+                            },
+                        )
+                        .await?;
+                        push_events(&outbound, &daemon, &mut cursor).await?;
+                        continue;
+                    }
+                }
                 let receipt = daemon
                     .journal
                     .lock()
@@ -2270,15 +2378,34 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 .lock()
                 .await
                 .insert(session_id, Arc::new(Mutex::new(coordinator)));
-            let journal = daemon.journal.lock().await;
-            let event = journal
-                .events_for_session(session_id)
-                .map_err(io::Error::other)?
-                .into_iter()
-                .last()
-                .ok_or_else(|| io::Error::other("session creation event was not committed"))?;
-            let event_id = event.event_id;
-            let receipt = journal.event_receipt(event_id).map_err(io::Error::other)?;
+            let (event_id, receipt) = {
+                let journal = daemon.journal.lock().await;
+                let event = journal
+                    .events_for_session(session_id)
+                    .map_err(io::Error::other)?
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| io::Error::other("session creation event was not committed"))?;
+                let event_id = event.event_id;
+                let receipt = journal.event_receipt(event_id).map_err(io::Error::other)?;
+                (event_id, receipt)
+            };
+            if let Some(config) = daemon.codex.clone() {
+                let status =
+                    codex_app_server::start_session(Arc::clone(&daemon), config, session_id).await;
+                if let codex_app_server::CodexStatus::Failed(error) = status {
+                    write_frame(
+                        &outbound,
+                        &DaemonFrame::CommandRejected {
+                            command_id: request.command_id,
+                            error,
+                        },
+                    )
+                    .await?;
+                    push_events(&outbound, &daemon, &mut cursor).await?;
+                    continue;
+                }
+            }
             write_frame(
                 &outbound,
                 &DaemonFrame::CommandAccepted {
@@ -2289,9 +2416,10 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 },
             )
             .await?;
-            drop(journal);
             push_events(&outbound, &daemon, &mut cursor).await?;
-            if let Some(path) = daemon.fake_acp_path.clone() {
+            if daemon.codex.is_none()
+                && let Some(path) = daemon.fake_acp_path.clone()
+            {
                 tokio::spawn(run_fake_acp(Arc::clone(&daemon), path, session_id));
             }
         }
@@ -2300,6 +2428,19 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
             push_events(&outbound, &daemon, &mut cursor).await?;
         }
     }
+}
+
+async fn codex_start_incomplete(daemon: &Daemon, session_id: Uuid) -> io::Result<bool> {
+    let journal = daemon.journal.lock().await;
+    let events = journal
+        .events_for_session(session_id)
+        .map_err(io::Error::other)?;
+    Ok(!events.iter().any(|event| {
+        matches!(
+            event.kind.as_str(),
+            "process_started" | "approval_routing_rejected"
+        )
+    }))
 }
 
 async fn push_events(

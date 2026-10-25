@@ -224,6 +224,20 @@ export function approvalIdFromPayload(payload: unknown) {
   return typeof approvalId === 'string' && approvalId.length > 0 ? approvalId : null;
 }
 
+export function controlFailureTarget(kind: string, approvalInFlightCount: number): 'approval' | 'prompt' | null {
+  if (kind === 'command_rejected') return 'prompt';
+  if (kind === 'error') return approvalInFlightCount > 0 ? 'approval' : 'prompt';
+  return null;
+}
+
+export function clearPromptOnAccept(pendingCommandId: string | null, acceptedCommandId: string) {
+  return pendingCommandId !== null && pendingCommandId === acceptedCommandId;
+}
+
+export function promptClearApplies(acceptedSessionId: string | null, visibleSessionId: string) {
+  return acceptedSessionId !== null && acceptedSessionId === visibleSessionId;
+}
+
 export function reduceApprovalFlight(state: ApprovalFlight, action: ApprovalFlightAction): ApprovalFlight {
   if (action.type === 'blocked') return { inFlight: state.inFlight, error: 'Could not send the approval response. It was not allowed.' };
   if (action.type === 'sent') {

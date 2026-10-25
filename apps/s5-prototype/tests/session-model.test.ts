@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activityTimestamp, agentText, approvalsForSession, checklistSummary, eventsForSession, ingestJournalEvents, plainEventText, reduceApprovalFlight, revealHiddenCharacters, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
+import { activityTimestamp, agentText, approvalsForSession, checklistSummary, clearPromptOnAccept, controlFailureTarget, eventsForSession, ingestJournalEvents, plainEventText, promptClearApplies, reduceApprovalFlight, revealHiddenCharacters, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
 import { applyDaemonEvent, eventCount, observeJournalEpoch, reset, sessionJournalEvents, subscribe } from '../src/store';
 
 const event = (cursor: number, sessionId: string, kind: string, payload: unknown, occurredAtMs = cursor * 1000): JournalEvent => ({ cursor, sessionId, kind, payload, occurredAtMs });
@@ -193,4 +193,21 @@ test('coalesces session events once per frame and ignores a replayed cursor', ()
   } finally {
     globalThis.requestAnimationFrame = previous;
   }
+});
+
+test('command rejection stays on the prompt and an error follows the approval flight', () => {
+  assert.equal(controlFailureTarget('command_rejected', 1), 'prompt');
+  assert.equal(controlFailureTarget('command_rejected', 0), 'prompt');
+  assert.equal(controlFailureTarget('error', 1), 'approval');
+  assert.equal(controlFailureTarget('error', 0), 'prompt');
+  assert.equal(controlFailureTarget('approval_resolved', 1), null);
+});
+
+test('a prompt clears only when its own turn command is accepted on that session', () => {
+  assert.equal(clearPromptOnAccept(null, 'command-1'), false);
+  assert.equal(clearPromptOnAccept('command-1', 'command-2'), false);
+  assert.equal(clearPromptOnAccept('command-1', 'command-1'), true);
+  assert.equal(promptClearApplies(null, 'session-a'), false);
+  assert.equal(promptClearApplies('session-a', 'session-b'), false);
+  assert.equal(promptClearApplies('session-a', 'session-a'), true);
 });
