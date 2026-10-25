@@ -368,6 +368,12 @@ fn codex_streams_approvals_redacts_and_interrupts() {
         "plugins.\"visualize@openai-bundled\".enabled=false",
         "features.js_repl=false",
         "web_search=\"disabled\"",
+        "features.plugins=false",
+        "features.hooks=false",
+        "features.apps=false",
+        "skills.bundled.enabled=false",
+        "skills.include_instructions=false",
+        "skills.config=[]",
     ] {
         assert!(argv.iter().any(|arg| arg == required), "missing {required}");
     }
@@ -997,6 +1003,177 @@ fn pinned_turn_schema_rejects_a_start_without_thread_id() {
     .expect("readOnly networkAccess true is a legal sandbox echo");
 }
 
+fn config_values(argv: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut expect_value = false;
+    let mut started = false;
+    for arg in argv {
+        if !started {
+            if arg == "app-server" {
+                started = true;
+            }
+            continue;
+        }
+        if expect_value {
+            values.push(arg.clone());
+            expect_value = false;
+            continue;
+        }
+        assert_eq!(arg, "-c");
+        expect_value = true;
+    }
+    assert!(!expect_value);
+    values
+}
+
+fn fixture_enabled_skill_names() -> Vec<String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/codex-0.160.0-extensions-default.trimmed.jsonl");
+    let mut names = Vec::new();
+    for line in std::fs::read_to_string(path).unwrap().lines() {
+        let item: Value = serde_json::from_str(line).unwrap();
+        let Some(skills) = item["frame"]["result"]["data"][0]["skills"].as_array() else {
+            continue;
+        };
+        for skill in skills {
+            if skill["enabled"].as_bool() != Some(true) {
+                continue;
+            }
+            let name = skill["name"].as_str().unwrap().to_owned();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+fn extension_indexes(trace: &[Value], method: &str) -> Vec<usize> {
+    trace
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry["direction"] == "in" && entry["message"]["method"] == method)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+#[test]
+fn codex_recorded_extensions_are_disabled_before_thread_start() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "recorded", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let trace = trace_messages(&dirs.trace);
+    let argv: Vec<String> = serde_json::from_slice(&std::fs::read(&dirs.argv).unwrap()).unwrap();
+    let values = config_values(&argv);
+    let names = fixture_enabled_skill_names();
+    assert_eq!(names.len(), 8);
+    let mut expected = vec![
+        "model_reasoning_effort=\"low\"".to_owned(),
+        "mcp_servers.node_repl.enabled=false".into(),
+        "mcp_servers.cua_repl.command=\"/usr/bin/false\"".into(),
+        "mcp_servers.cua_repl.enabled=false".into(),
+        "mcp_servers.computer-use.enabled=false".into(),
+        "mcp_servers.nexus-unity.enabled=false".into(),
+        "mcp_servers.unityMCP.enabled=false".into(),
+        "plugins.\"browser@openai-bundled\".enabled=false".into(),
+        "plugins.\"computer-use@openai-bundled\".enabled=false".into(),
+        "plugins.\"unified-computer-use@openai-bundled\".enabled=false".into(),
+        "plugins.\"codex-app-tools@openai-bundled\".enabled=false".into(),
+        "plugins.\"visualize@openai-bundled\".enabled=false".into(),
+        "features.js_repl=false".into(),
+        "web_search=\"disabled\"".into(),
+        "features.plugins=false".into(),
+        "features.hooks=false".into(),
+        "features.apps=false".into(),
+        "skills.bundled.enabled=false".into(),
+        "skills.include_instructions=false".into(),
+    ];
+    let disabled = names
+        .iter()
+        .map(|name| format!("{{name=\"{name}\",enabled=false}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    expected.push(format!("skills.config=[{disabled}]"));
+    assert_eq!(values, expected);
+    let skills = extension_indexes(&trace, "skills/list");
+    let hooks = extension_indexes(&trace, "hooks/list");
+    let plugins = extension_indexes(&trace, "plugin/installed");
+    let apps = extension_indexes(&trace, "app/list");
+    let threads = extension_indexes(&trace, "thread/start");
+    assert_eq!(skills.len(), 2, "preflight and session both list skills");
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(plugins.len(), 1);
+    assert_eq!(apps.len(), 1);
+    assert_eq!(threads.len(), 1);
+    assert!(
+        skills[1] < hooks[0]
+            && hooks[0] < plugins[0]
+            && plugins[0] < apps[0]
+            && apps[0] < threads[0]
+    );
+    assert_extension_exchange(&trace);
+    let verified = journal_events(dirs.data.path())
+        .into_iter()
+        .find(|event| event.kind == "codex_extensions_verified")
+        .expect("verification was not journaled");
+    assert!(verified.payload.get("session_snapshot").is_some());
+    assert_eq!(verified.payload["enabled_skills"], 0);
+    assert_eq!(verified.payload["hooks"], 0);
+    assert_eq!(verified.payload["enabled_plugins"], 0);
+    assert_eq!(verified.payload["apps"], 0);
+}
+
+#[test]
+fn codex_extensions_left_on_fail_closed() {
+    assert_extension_rejected(&codex_dirs(), "extensions-on", "enabled plugins remain");
+}
+
+#[test]
+fn codex_skill_left_enabled_fails_closed() {
+    assert_extension_rejected(&codex_dirs(), "skill-enabled", "enabled skills remain");
+}
+
+#[test]
+fn codex_hook_left_present_fails_closed() {
+    assert_extension_rejected(&codex_dirs(), "hook-present", "hooks remain");
+}
+
+#[test]
+fn codex_extension_list_error_fails_closed() {
+    assert_extension_rejected(&codex_dirs(), "list-error", "skills/list failed");
+}
+
+fn assert_extension_rejected(dirs: &CodexDirs, mode: &str, reason: &str) {
+    let _daemon = start_codex(dirs, mode, 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    let rejected = command_reply(&mut reader);
+    assert_eq!(rejected["kind"], "command_rejected");
+    assert!(
+        rejected["error"].as_str().unwrap().contains(reason),
+        "{}",
+        rejected["error"]
+    );
+    let trace = trace_messages(&dirs.trace);
+    assert!(
+        extension_indexes(&trace, "thread/start").is_empty(),
+        "thread/start ran after a failed extension check: {trace:?}"
+    );
+    let event = journal_events(dirs.data.path())
+        .into_iter()
+        .find(|event| event.kind == "codex_extensions_rejected")
+        .expect("rejection was not journaled");
+    assert_eq!(event.payload["reason"], reason);
+    assert!(event.payload.get("session_snapshot").is_some());
+    let rendered = event.payload.to_string();
+    assert!(!rendered.contains("/.codex/"));
+    assert!(!rendered.contains("/.agents/"));
+}
+
 fn schema_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-app-server-0.160.0")
 }
@@ -1018,6 +1195,48 @@ fn validate_schema(name: &str, instance: &Value) -> Result<(), String> {
     validate(&schema, instance, &schema, 0)
 }
 
+fn assert_extension_exchange(trace: &[Value]) {
+    let mut methods = std::collections::HashMap::<String, String>::new();
+    for entry in trace {
+        let message = &entry["message"];
+        let direction = entry["direction"].as_str().unwrap_or("");
+        if direction == "in"
+            && let (Some(method), Some(id)) = (
+                message.get("method").and_then(Value::as_str),
+                message.get("id"),
+            )
+        {
+            methods.insert(id.to_string(), method.to_owned());
+            match method {
+                "skills/list" => assert_valid("v2/SkillsListParams.json", &message["params"]),
+                "hooks/list" => assert_valid("v2/HooksListParams.json", &message["params"]),
+                "plugin/installed" => {
+                    assert_valid("v2/PluginInstalledParams.json", &message["params"]);
+                }
+                "app/list" => assert_valid("v2/AppsListParams.json", &message["params"]),
+                "thread/start" => assert_valid("v2/ThreadStartParams.json", &message["params"]),
+                _ => {}
+            }
+        }
+        if direction == "out"
+            && message.get("result").is_some()
+            && let Some(method) = message
+                .get("id")
+                .and_then(|id| methods.get(&id.to_string()))
+        {
+            match method.as_str() {
+                "skills/list" => assert_valid("v2/SkillsListResponse.json", &message["result"]),
+                "hooks/list" => assert_valid("v2/HooksListResponse.json", &message["result"]),
+                "plugin/installed" => {
+                    assert_valid("v2/PluginInstalledResponse.json", &message["result"]);
+                }
+                "app/list" => assert_valid("v2/AppsListResponse.json", &message["result"]),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn assert_codex_trace(trace: &[Value]) {
     let mut methods = std::collections::HashMap::<String, String>::new();
     for entry in trace {
@@ -1031,6 +1250,12 @@ fn assert_codex_trace(trace: &[Value]) {
                 methods.insert(id.to_string(), method.to_owned());
                 match method {
                     "initialize" => assert_valid("v1/InitializeParams.json", &message["params"]),
+                    "skills/list" => assert_valid("v2/SkillsListParams.json", &message["params"]),
+                    "hooks/list" => assert_valid("v2/HooksListParams.json", &message["params"]),
+                    "plugin/installed" => {
+                        assert_valid("v2/PluginInstalledParams.json", &message["params"]);
+                    }
+                    "app/list" => assert_valid("v2/AppsListParams.json", &message["params"]),
                     "thread/start" => assert_valid("v2/ThreadStartParams.json", &message["params"]),
                     "turn/start" => assert_valid("v2/TurnStartParams.json", &message["params"]),
                     "turn/interrupt" => {
@@ -1085,6 +1310,12 @@ fn assert_codex_trace(trace: &[Value]) {
                     "initialize" => {
                         assert_valid("v1/InitializeResponse.json", &message["result"]);
                     }
+                    "skills/list" => assert_valid("v2/SkillsListResponse.json", &message["result"]),
+                    "hooks/list" => assert_valid("v2/HooksListResponse.json", &message["result"]),
+                    "plugin/installed" => {
+                        assert_valid("v2/PluginInstalledResponse.json", &message["result"]);
+                    }
+                    "app/list" => assert_valid("v2/AppsListResponse.json", &message["result"]),
                     "thread/start" => {
                         assert_valid("v2/ThreadStartResponse.json", &message["result"]);
                     }

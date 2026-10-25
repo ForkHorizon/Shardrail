@@ -17,7 +17,7 @@ use nix::unistd::Pid;
 use serde_json::{Value, json};
 use shardrail_protocol::{ApprovalDecision, ApprovalState, ClientScope, DurableEvent, OptionClass};
 use shardrail_session_core::{Approval, TurnOutcome, TurnState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -43,6 +43,20 @@ pub(crate) const SAFETY_CONFIG: &[&str] = &[
     "features.js_repl=false",
     "web_search=\"disabled\"",
 ];
+
+/// Per-run overrides that turn plugins, hooks, apps, and bundled skills off.
+/// User skills are disabled by name in a later `skills.config` override.
+pub(crate) const EXTENSION_CONFIG: &[&str] = &[
+    "features.plugins=false",
+    "features.hooks=false",
+    "features.apps=false",
+    "skills.bundled.enabled=false",
+    "skills.include_instructions=false",
+];
+
+const MAX_SKILL_NAMES: usize = 64;
+const MAX_SKILL_NAME_CHARS: usize = 256;
+const MAX_SKILL_CONFIG_BYTES: usize = 4096;
 
 const COMMAND_APPROVAL: &str = "item/commandExecution/requestApproval";
 const FILE_APPROVAL: &str = "item/fileChange/requestApproval";
@@ -89,18 +103,49 @@ pub(crate) fn config_override_allowed(value: &str) -> bool {
     !raw_value.is_empty() && matches!(key, "model" | "model_reasoning_effort")
 }
 
-pub(crate) fn command_arguments(extra: &[String]) -> Vec<String> {
-    let mut args = Vec::with_capacity(1 + (extra.len() + SAFETY_CONFIG.len()) * 2);
+pub(crate) fn command_arguments(extra: &[String], skills_config: Option<&str>) -> Vec<String> {
+    let mut args = Vec::with_capacity(
+        1 + (extra.len() + SAFETY_CONFIG.len() + EXTENSION_CONFIG.len() + 1) * 2,
+    );
     args.push("app-server".to_owned());
     for item in extra {
         args.push("-c".to_owned());
         args.push(item.clone());
     }
-    for item in SAFETY_CONFIG {
+    for item in SAFETY_CONFIG.iter().chain(EXTENSION_CONFIG.iter()) {
         args.push("-c".to_owned());
         args.push((*item).to_owned());
     }
+    if let Some(skills_config) = skills_config {
+        args.push("-c".to_owned());
+        args.push(skills_config.to_owned());
+    }
     args
+}
+
+/// `skills.config=[{name="...",enabled=false},...]` for every enabled name.
+/// Control characters and an oversized list fail closed. A `name` selector
+/// disables every copy of that name; `*` and path globs do not.
+pub(crate) fn skills_config_override(names: &[String]) -> Result<String, String> {
+    if names.len() > MAX_SKILL_NAMES {
+        return Err("skill disable list is too long".into());
+    }
+    let mut parts = Vec::with_capacity(names.len());
+    for name in names {
+        if name.is_empty()
+            || name.chars().count() > MAX_SKILL_NAME_CHARS
+            || name.chars().any(char::is_control)
+        {
+            return Err("skill name is not safe to disable".into());
+        }
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        parts.push(format!("{{name=\"{escaped}\",enabled=false}}"));
+    }
+    let value = format!("skills.config=[{}]", parts.join(","));
+    if value.len() > MAX_SKILL_CONFIG_BYTES {
+        return Err("skill disable list is too long".into());
+    }
+    Ok(value)
 }
 
 pub(crate) fn initialize_params() -> Value {
@@ -272,6 +317,10 @@ struct Outbound {
 
 enum PendingRpc {
     Initialize,
+    SkillsList,
+    HooksList,
+    PluginsInstalled,
+    AppsList,
     ThreadStart,
     TurnStart {
         done: oneshot::Sender<Result<i64, String>>,
@@ -519,7 +568,21 @@ async fn run_codex_session(
     ready_tx: oneshot::Sender<CodexStatus>,
 ) {
     let mut ready = Some(ready_tx);
-    let mut child = match spawn_child(&config) {
+    let enabled = match preflight_enabled_skills(&config).await {
+        Ok(names) => names,
+        Err(reason) => {
+            reject_extensions_now(&daemon, session_id, &mut ready, &reason).await;
+            return;
+        }
+    };
+    let skills_config = match skills_config_override(&enabled) {
+        Ok(value) => value,
+        Err(reason) => {
+            reject_extensions_now(&daemon, session_id, &mut ready, &reason).await;
+            return;
+        }
+    };
+    let mut child = match spawn_child(&config, &skills_config) {
         Ok(child) => child,
         Err(error) => {
             let status = CodexStatus::Failed(format!("codex app-server failed to start: {error}"));
@@ -928,13 +991,79 @@ impl CodexRun {
         match pending {
             PendingRpc::Initialize => {
                 self.send_notification("initialized", json!({}));
-                let params = json!({
-                    "cwd": self.workdir,
-                    "approvalPolicy": APPROVAL_POLICY,
-                    "sandbox": "workspace-write",
-                    "approvalsReviewer": "user"
-                });
-                self.send_request("thread/start", params, PendingRpc::ThreadStart);
+                self.send_request(
+                    "skills/list",
+                    skills_list_params(&self.workdir),
+                    PendingRpc::SkillsList,
+                );
+                false
+            }
+            PendingRpc::SkillsList => {
+                if let Err(reason) = skills_are_clear(&result) {
+                    self.reject_extensions(ready, reason).await;
+                    return true;
+                }
+                self.send_request(
+                    "hooks/list",
+                    json!({"cwds": [self.workdir]}),
+                    PendingRpc::HooksList,
+                );
+                false
+            }
+            PendingRpc::HooksList => {
+                if let Err(reason) = hooks_are_clear(&result) {
+                    self.reject_extensions(ready, reason).await;
+                    return true;
+                }
+                self.send_request("plugin/installed", json!({}), PendingRpc::PluginsInstalled);
+                false
+            }
+            PendingRpc::PluginsInstalled => {
+                if let Err(reason) = plugins_are_clear(&result) {
+                    self.reject_extensions(ready, reason).await;
+                    return true;
+                }
+                self.send_request("app/list", json!({}), PendingRpc::AppsList);
+                false
+            }
+            PendingRpc::AppsList => {
+                if let Err(reason) = apps_are_clear(&result) {
+                    self.reject_extensions(ready, reason).await;
+                    return true;
+                }
+                if self
+                    .journal_extension_event(
+                        "codex_extensions_verified",
+                        json!({"enabled_skills": 0, "hooks": 0, "enabled_plugins": 0, "apps": 0}),
+                    )
+                    .await
+                    .is_err()
+                {
+                    self.reject_extensions(
+                        ready,
+                        "codex extension verification could not be journaled",
+                    )
+                    .await;
+                    return true;
+                }
+                crate::daemon_log::log(
+                    "INFO",
+                    "codex",
+                    &format!(
+                        "codex extensions verified session {} skills=0 hooks=0 plugins=0 apps=0",
+                        self.session_id
+                    ),
+                );
+                self.send_request(
+                    "thread/start",
+                    json!({
+                        "cwd": self.workdir,
+                        "approvalPolicy": APPROVAL_POLICY,
+                        "sandbox": "workspace-write",
+                        "approvalsReviewer": "user"
+                    }),
+                    PendingRpc::ThreadStart,
+                );
                 false
             }
             PendingRpc::ThreadStart => match thread_routing_accepted(&result, &self.workdir) {
@@ -1063,6 +1192,13 @@ impl CodexRun {
             PendingRpc::Initialize | PendingRpc::ThreadStart => {
                 self.fail_transport(ready, message).await;
             }
+            PendingRpc::SkillsList => self.reject_extensions(ready, "skills/list failed").await,
+            PendingRpc::HooksList => self.reject_extensions(ready, "hooks/list failed").await,
+            PendingRpc::PluginsInstalled => {
+                self.reject_extensions(ready, "plugin/installed failed")
+                    .await;
+            }
+            PendingRpc::AppsList => self.reject_extensions(ready, "app/list failed").await,
             PendingRpc::TurnStart { done, .. } => {
                 self.finish_turn(TurnOutcome::Interrupted, "turn_start_failed")
                     .await;
@@ -1470,7 +1606,12 @@ impl CodexRun {
                 PendingRpc::TurnStart { done, .. } | PendingRpc::Interrupt { done, .. } => {
                     let _ = done.send(Err(message.to_owned()));
                 }
-                PendingRpc::Initialize | PendingRpc::ThreadStart => {}
+                PendingRpc::Initialize
+                | PendingRpc::SkillsList
+                | PendingRpc::HooksList
+                | PendingRpc::PluginsInstalled
+                | PendingRpc::AppsList
+                | PendingRpc::ThreadStart => {}
             }
         }
         if ready.is_some() {
@@ -1639,6 +1780,19 @@ impl CodexRun {
         body(&mut coordinator).map_err(|error| error.to_string())
     }
 
+    async fn reject_extensions(
+        &mut self,
+        ready: &mut Option<oneshot::Sender<CodexStatus>>,
+        reason: &str,
+    ) {
+        self.turns_allowed = false;
+        reject_extensions_now(&self.daemon, self.session_id, ready, reason).await;
+    }
+
+    async fn journal_extension_event(&self, kind: &str, payload: Value) -> Result<(), String> {
+        journal_session_notice(&self.daemon, self.session_id, kind, payload).await
+    }
+
     async fn append_notice(&self, kind: &str, payload: Value) -> Result<i64, String> {
         let mut journal = self.daemon.journal.lock().await;
         let journal_epoch = journal.journal_epoch().map_err(|error| error.to_string())?;
@@ -1684,21 +1838,341 @@ impl CodexRun {
     }
 }
 
-fn spawn_child(config: &CodexConfig) -> io::Result<tokio::process::Child> {
+fn codex_command(config: &CodexConfig, skills_config: Option<&str>) -> Command {
     let mut command = Command::new(&config.program);
     command
-        .args(command_arguments(&config.extra))
+        .args(command_arguments(&config.extra, skills_config))
         .current_dir(&config.workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("SSH_AGENT_PID")
         .env_remove("GPG_AGENT_INFO");
     #[cfg(unix)]
     command.process_group(0);
+    command
+}
+
+fn spawn_child(config: &CodexConfig, skills_config: &str) -> io::Result<tokio::process::Child> {
+    let mut command = codex_command(config, Some(skills_config));
+    command.stderr(Stdio::piped());
     command.spawn()
+}
+
+async fn reject_extensions_now(
+    daemon: &Daemon,
+    session_id: Uuid,
+    ready: &mut Option<oneshot::Sender<CodexStatus>>,
+    reason: &str,
+) {
+    let _ = journal_session_notice(
+        daemon,
+        session_id,
+        "codex_extensions_rejected",
+        json!({"reason": reason}),
+    )
+    .await;
+    fail_extensions(daemon, session_id, ready, reason).await;
+}
+
+async fn fail_extensions(
+    daemon: &Daemon,
+    session_id: Uuid,
+    ready: &mut Option<oneshot::Sender<CodexStatus>>,
+    reason: &str,
+) {
+    crate::daemon_log::log(
+        "WARN",
+        "codex",
+        &format!("codex extensions rejected session {session_id} reason={reason}"),
+    );
+    let status = CodexStatus::Failed(format!("codex extensions rejected: {reason}"));
+    set_status(daemon, session_id, status.clone()).await;
+    if let Some(tx) = ready.take() {
+        let _ = tx.send(status);
+    }
+}
+
+async fn journal_session_notice(
+    daemon: &Daemon,
+    session_id: Uuid,
+    kind: &str,
+    mut payload: Value,
+) -> Result<(), String> {
+    let snapshot = {
+        let Some(coordinator) = daemon.sessions.lock().await.get(&session_id).cloned() else {
+            return Err("session coordinator unavailable".into());
+        };
+        let coordinator = coordinator.lock().await;
+        serde_json::to_value(coordinator.session()).map_err(|error| error.to_string())?
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("session_snapshot".to_owned(), snapshot);
+    }
+    let mut journal = daemon.journal.lock().await;
+    let journal_epoch = journal.journal_epoch().map_err(|error| error.to_string())?;
+    let host_id = journal.host_id().map_err(|error| error.to_string())?;
+    journal
+        .append_event(&DurableEvent {
+            event_id: 0,
+            journal_epoch,
+            host_id,
+            session_id,
+            schema_version: 1,
+            kind: kind.to_owned(),
+            occurred_at_ms: wall_clock_ms(),
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload,
+        })
+        .map_err(|error| error.to_string())?;
+    drop(journal);
+    bump(daemon);
+    Ok(())
+}
+
+fn skills_list_params(workdir: &str) -> Value {
+    json!({"cwds": [workdir], "forceReload": true})
+}
+
+async fn preflight_enabled_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
+    match tokio::time::timeout(Duration::from_secs(10), preflight_skills(config)).await {
+        Ok(result) => result,
+        Err(_) => Err("codex extension preflight timed out".into()),
+    }
+}
+
+async fn preflight_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
+    let mut command = codex_command(config, None);
+    command.stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|error| {
+        crate::daemon_log::log(
+            "WARN",
+            "codex",
+            &format!("codex extension preflight failed to start: {error}"),
+        );
+        "codex extension preflight failed to start".to_owned()
+    })?;
+    let pid = child.id().unwrap_or(0);
+    track_group(pid);
+    let _guard = GroupGuard(pid);
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "codex extension preflight stdin is unavailable".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "codex extension preflight stdout is unavailable".to_owned())?;
+    let mut lines = BufReader::new(stdout).lines();
+    let workdir = config.workdir.display().to_string();
+    write_rpc(&mut stdin, 1, "initialize", initialize_params()).await?;
+    let _initialized = read_rpc_result(&mut lines, 1, "initialize").await?;
+    write_notification(&mut stdin, "initialized", json!({})).await?;
+    write_rpc(&mut stdin, 2, "skills/list", skills_list_params(&workdir)).await?;
+    let listed = read_rpc_result(&mut lines, 2, "skills/list").await?;
+    enabled_skill_names(&listed)
+}
+
+async fn write_rpc(
+    stdin: &mut tokio::process::ChildStdin,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    write_line(
+        stdin,
+        &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
+    )
+    .await
+}
+
+async fn write_notification(
+    stdin: &mut tokio::process::ChildStdin,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    write_line(
+        stdin,
+        &json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string(),
+    )
+    .await
+}
+
+async fn write_line(stdin: &mut tokio::process::ChildStdin, line: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|_| "codex extension preflight disconnected".to_owned())?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|_| "codex extension preflight disconnected".to_owned())?;
+    stdin
+        .flush()
+        .await
+        .map_err(|_| "codex extension preflight disconnected".to_owned())?;
+    Ok(())
+}
+
+async fn read_rpc_result(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: i64,
+    method: &'static str,
+) -> Result<Value, String> {
+    loop {
+        let line = lines
+            .next_line()
+            .await
+            .map_err(|_| "codex extension preflight disconnected".to_owned())?
+            .ok_or_else(|| "codex extension preflight disconnected".to_owned())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame: Value = serde_json::from_str(&line)
+            .map_err(|_| format!("codex extension preflight {method} response is invalid"))?;
+        let Some(frame_id) = frame.get("id") else {
+            continue;
+        };
+        if frame_id.as_i64() != Some(id) {
+            continue;
+        }
+        if frame.get("error").is_some() {
+            return Err(format!("{method} failed"));
+        }
+        return frame
+            .get("result")
+            .cloned()
+            .ok_or_else(|| format!("codex extension preflight {method} response is invalid"));
+    }
+}
+
+fn enabled_skill_names(result: &Value) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for skill in listed_skills(result).map_err(str::to_owned)? {
+        let enabled = skill
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or("skills/list response is invalid")?;
+        if !enabled {
+            continue;
+        }
+        let name = skill
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or("skills/list response is invalid")?;
+        if seen.insert(name.to_owned()) {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+fn skills_are_clear(result: &Value) -> Result<(), &'static str> {
+    for skill in listed_skills(result)? {
+        match skill.get("enabled").and_then(Value::as_bool) {
+            Some(false) => {}
+            Some(true) => return Err("enabled skills remain"),
+            None => return Err("skills/list response is invalid"),
+        }
+    }
+    Ok(())
+}
+
+fn listed_skills(result: &Value) -> Result<Vec<&Value>, &'static str> {
+    let data = result
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("skills/list response is invalid")?;
+    let mut skills = Vec::new();
+    for entry in data {
+        let errors = entry
+            .get("errors")
+            .and_then(Value::as_array)
+            .ok_or("skills/list response is invalid")?;
+        if !errors.is_empty() {
+            return Err("skills/list reported errors");
+        }
+        let list = entry
+            .get("skills")
+            .and_then(Value::as_array)
+            .ok_or("skills/list response is invalid")?;
+        skills.extend(list);
+    }
+    Ok(skills)
+}
+
+fn hooks_are_clear(result: &Value) -> Result<(), &'static str> {
+    let data = result
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("hooks/list response is invalid")?;
+    for entry in data {
+        let errors = entry
+            .get("errors")
+            .and_then(Value::as_array)
+            .ok_or("hooks/list response is invalid")?;
+        if !errors.is_empty() {
+            return Err("hooks/list reported errors");
+        }
+        if !entry.get("warnings").is_some_and(Value::is_array) {
+            return Err("hooks/list response is invalid");
+        }
+        let hooks = entry
+            .get("hooks")
+            .and_then(Value::as_array)
+            .ok_or("hooks/list response is invalid")?;
+        if !hooks.is_empty() {
+            return Err("hooks remain");
+        }
+    }
+    Ok(())
+}
+
+fn plugins_are_clear(result: &Value) -> Result<(), &'static str> {
+    let marketplaces = result
+        .get("marketplaces")
+        .and_then(Value::as_array)
+        .ok_or("plugin/installed response is invalid")?;
+    if let Some(errors) = result.get("marketplaceLoadErrors") {
+        let errors = errors
+            .as_array()
+            .ok_or("plugin/installed response is invalid")?;
+        if !errors.is_empty() {
+            return Err("plugin/installed reported errors");
+        }
+    }
+    for marketplace in marketplaces {
+        let plugins = marketplace
+            .get("plugins")
+            .and_then(Value::as_array)
+            .ok_or("plugin/installed response is invalid")?;
+        for plugin in plugins {
+            match plugin.get("enabled").and_then(Value::as_bool) {
+                Some(false) => {}
+                Some(true) => return Err("enabled plugins remain"),
+                None => return Err("plugin/installed response is invalid"),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apps_are_clear(result: &Value) -> Result<(), &'static str> {
+    let data = result
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("app/list response is invalid")?;
+    if data.is_empty() {
+        Ok(())
+    } else {
+        Err("apps remain")
+    }
 }
 
 fn bump(daemon: &Daemon) {
@@ -1808,7 +2282,10 @@ mod tests {
 
     #[test]
     fn safety_overrides_follow_extra_config_and_disable_web_search() {
-        let args = command_arguments(&["model_reasoning_effort=\"low\"".into()]);
+        let args = command_arguments(
+            &["model_reasoning_effort=\"low\"".into()],
+            Some("skills.config=[]"),
+        );
         assert_eq!(args[0], "app-server");
         assert_eq!(args[1], "-c");
         assert_eq!(args[2], "model_reasoning_effort=\"low\"");
@@ -1819,9 +2296,38 @@ mod tests {
             .chunks(2)
             .map(|chunk| chunk[1].as_str())
             .collect::<Vec<_>>();
-        assert!(paired.ends_with(SAFETY_CONFIG));
+        let mut expected = SAFETY_CONFIG.to_vec();
+        expected.extend(EXTENSION_CONFIG);
+        expected.push("skills.config=[]");
+        assert!(paired.ends_with(expected.as_slice()));
         assert!(paired.contains(&"web_search=\"disabled\""));
         assert!(paired.contains(&"features.js_repl=false"));
+        assert!(paired.contains(&"features.plugins=false"));
+        let preflight = command_arguments(&[], None);
+        assert!(
+            !preflight
+                .iter()
+                .any(|arg| arg.starts_with("skills.config="))
+        );
+    }
+
+    #[test]
+    fn skill_disable_override_escapes_names_and_fails_closed() {
+        assert_eq!(
+            skills_config_override(&["cloudflare".into(), "pdf:pdf".into()]).unwrap(),
+            "skills.config=[{name=\"cloudflare\",enabled=false},{name=\"pdf:pdf\",enabled=false}]"
+        );
+        assert_eq!(
+            skills_config_override(&["a\"b\\c".into()]).unwrap(),
+            "skills.config=[{name=\"a\\\"b\\\\c\",enabled=false}]"
+        );
+        assert_eq!(skills_config_override(&[]).unwrap(), "skills.config=[]");
+        assert!(skills_config_override(&["has\nnewline".into()]).is_err());
+        assert!(skills_config_override(&["has\u{007f}delete".into()]).is_err());
+        assert!(skills_config_override(&[" ".repeat(MAX_SKILL_NAME_CHARS + 1)]).is_err());
+        let long = "n".repeat(80);
+        let names = vec![long; MAX_SKILL_NAMES];
+        assert!(skills_config_override(&names).is_err());
     }
 
     #[test]

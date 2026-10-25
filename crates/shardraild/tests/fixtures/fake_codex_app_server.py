@@ -110,6 +110,135 @@ def command_approval(turn_id, cwd):
     )
 
 
+def session_child():
+    return any(str(arg).startswith("skills.config=") for arg in sys.argv)
+
+
+def requested_cwd(message):
+    params = message.get("params") or {}
+    cwds = params.get("cwds") or []
+    if cwds and isinstance(cwds[0], str) and cwds[0].startswith("/"):
+        return cwds[0]
+    return "/tmp"
+
+
+def skill_row(name, enabled):
+    return {
+        "name": name,
+        "description": "fixture skill",
+        "enabled": enabled,
+        "path": "/tmp/skill/fixture/SKILL.md",
+        "scope": "user",
+    }
+
+
+def skills_result(cwd, skills):
+    return {"data": [{"cwd": cwd, "errors": [], "skills": skills}]}
+
+
+def hooks_result(cwd, hooks):
+    return {"data": [{"cwd": cwd, "errors": [], "hooks": hooks, "warnings": []}]}
+
+
+def empty_plugins():
+    return {"marketplaces": [], "marketplaceLoadErrors": []}
+
+
+def empty_apps():
+    return {"data": [], "nextCursor": None}
+
+
+def command_hook():
+    return {
+        "currentHash": "fixture",
+        "displayOrder": 0,
+        "enabled": True,
+        "eventName": "sessionStart",
+        "isManaged": False,
+        "key": "sessionStart:0",
+        "source": "plugin",
+        "sourcePath": "/tmp/hooks/sessionStart",
+        "timeoutSec": 10,
+        "trustStatus": "trusted",
+        "handlerType": "command",
+        "command": "node /tmp/hooks/sessionStart.js",
+        "async": False,
+    }
+
+
+def enabled_plugin():
+    return {
+        "marketplaces": [
+            {
+                "name": "local",
+                "plugins": [
+                    {
+                        "authPolicy": "ON_INSTALL",
+                        "enabled": True,
+                        "id": "plugin-1",
+                        "installPolicy": "AVAILABLE",
+                        "installed": True,
+                        "name": "ponytail",
+                        "source": {"type": "local", "path": "/tmp/plugins/ponytail"},
+                    }
+                ],
+            }
+        ],
+        "marketplaceLoadErrors": [],
+    }
+
+
+def recorded_results(filename):
+    results = {}
+    pending = None
+    path = os.path.join(HERE, filename)
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            frame = item["frame"]
+            if item.get("dir") == "client":
+                pending = frame.get("method")
+            elif item.get("dir") == "server" and pending and "result" in frame:
+                results[pending] = frame["result"]
+                pending = None
+    return results
+
+
+def extension_result(method, message):
+    cwd = requested_cwd(message)
+    child = session_child()
+    if MODE == "list-error" and child and method == "skills/list":
+        return "error"
+    if MODE == "recorded":
+        filename = (
+            "codex-0.160.0-extensions-disabled.jsonl"
+            if child
+            else "codex-0.160.0-extensions-default.trimmed.jsonl"
+        )
+        results = recorded_results(filename)
+        if method in results:
+            return results[method]
+    if MODE == "extensions-on" and not child and method == "skills/list":
+        return skills_result(cwd, [skill_row("cloudflare", True)])
+    if MODE == "extensions-on" and child and method == "plugin/installed":
+        return enabled_plugin()
+    if MODE == "skill-enabled" and method == "skills/list":
+        return skills_result(cwd, [skill_row("cloudflare", True)])
+    if MODE == "hook-present" and child and method == "hooks/list":
+        return hooks_result(cwd, [command_hook()])
+    if method == "skills/list":
+        return skills_result(cwd, [])
+    if method == "hooks/list":
+        return hooks_result(cwd, [])
+    if method == "plugin/installed":
+        return empty_plugins()
+    if method == "app/list":
+        return empty_apps()
+    return {}
+
+
 def complete(turn_id, status):
     notify(
         "turn/completed",
@@ -142,6 +271,19 @@ def main():
             )
             continue
         if method == "initialized":
+            continue
+        if method in ("skills/list", "hooks/list", "plugin/installed", "app/list"):
+            result = extension_result(method, message)
+            if result == "error":
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "error": {"code": -32000, "message": "skills/list failed"},
+                    }
+                )
+            else:
+                reply(message["id"], result)
             continue
         if method == "thread/start":
             reply(message["id"], thread_result(message.get("params") or {}))
