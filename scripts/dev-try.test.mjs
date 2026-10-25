@@ -60,9 +60,11 @@ test('dev-try prints an enrollment code and removes its data dir', async () => {
         if (error) reject(error);
         else resolveCode(value);
       };
+      // data_dir is printed on the next line. A pipe can deliver that write
+      // after the code line, so wait until both are present.
       child.stdout.on('data', () => {
         const found = stdout.match(/enrollment_code=([0-9a-f]{64})/);
-        if (found) finish(null, found[1]);
+        if (found && /data_dir=\S+/.test(stdout)) finish(null, found[1]);
       });
       child.once('exit', (status) => finish(new Error(`exited ${status}\n${stdout}\n${stderr}`)));
     });
