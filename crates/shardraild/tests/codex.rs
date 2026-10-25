@@ -1475,3 +1475,45 @@ fn type_matches(kinds: &Value, instance: &Value) -> bool {
         _ => false,
     })
 }
+
+#[test]
+fn codex_notices_before_admission_are_journaled_after_session_created() {
+    // codex-cli 0.160.0 sends configWarning and remoteControl/status/changed right
+    // after initialize, before the session exists in the journal.
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "happy", 30);
+    let full = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &full);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let events = loop {
+        let events = journal_events(dirs.data.path());
+        if events
+            .iter()
+            .any(|event| event.kind == "codex_extensions_verified")
+            || std::time::Instant::now() > deadline
+        {
+            break events;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let position = |predicate: &dyn Fn(&shardrail_protocol::DurableEvent) -> bool| {
+        events.iter().position(|event| predicate(event))
+    };
+    let created = position(&|event| event.kind == "session_created").expect("session_created");
+    let early = position(&|event| {
+        event.kind == "provider_notice" && event.payload.to_string().contains("configWarning")
+    })
+    .expect("early provider notice journaled");
+    let verified =
+        position(&|event| event.kind == "codex_extensions_verified").expect("extensions verified");
+    assert!(created < early, "early notice must follow session_created");
+    assert!(early < verified, "held notices are flushed at admission");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "session_create_audit"
+                && event.payload.to_string().contains("denied"))
+    );
+}

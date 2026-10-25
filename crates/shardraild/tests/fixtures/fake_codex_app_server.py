@@ -271,6 +271,18 @@ def main():
             )
             continue
         if method == "initialized":
+            # codex-cli 0.160.0 sends these before any thread exists (observed live).
+            notify(
+                "configWarning",
+                {
+                    "details": None,
+                    "summary": "Codex is ignoring 1 unrecognized configuration setting.\n  user (/Users/example/.codex/config.toml): `features.rmcp_client` is ignored.",
+                },
+            )
+            notify(
+                "remoteControl/status/changed",
+                {"environmentId": None, "installationId": "00000000-0000-4000-8000-000000000000", "serverName": "fake", "status": "disabled"},
+            )
             continue
         if method in ("skills/list", "hooks/list", "plugin/installed", "app/list"):
             result = extension_result(method, message)

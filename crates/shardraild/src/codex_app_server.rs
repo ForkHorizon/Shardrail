@@ -62,6 +62,8 @@ const MAX_SKILL_CONFIG_BYTES: usize = 4096;
 
 const COMMAND_APPROVAL: &str = "item/commandExecution/requestApproval";
 const FILE_APPROVAL: &str = "item/fileChange/requestApproval";
+/// Provider events held before `session_created` is committed.
+const MAX_HELD_EVENTS: usize = 64;
 /// The only approval policy the daemon requests and accepts in an echo.
 pub(crate) const APPROVAL_POLICY: &str = "untrusted";
 
@@ -760,6 +762,7 @@ async fn run_codex_session(
         sandbox: ConfirmedSandbox::WorkspaceWrite,
         admission_verified: Some(verified_tx),
         admission_commit: Some(commit_rx),
+        held_events: StdMutex::new(Some(Vec::new())),
         #[cfg(test)]
         fail_command_lookup: false,
     };
@@ -919,6 +922,9 @@ struct CodexRun {
     sandbox: ConfirmedSandbox,
     admission_verified: Option<oneshot::Sender<()>>,
     admission_commit: Option<oneshot::Receiver<Result<(), String>>>,
+    /// Provider events seen before `session_created` is committed. The session does
+    /// not exist in the journal yet, so they are held and appended after admission.
+    held_events: StdMutex<Option<Vec<(String, Value)>>>,
     #[cfg(test)]
     fail_command_lookup: bool,
 }
@@ -1920,9 +1926,19 @@ impl CodexRun {
         match self.admission_commit.take() {
             Some(commit) => commit
                 .await
-                .map_err(|_| "codex session admission was dropped".to_owned())?,
-            None => Ok(()),
+                .map_err(|_| "codex session admission was dropped".to_owned())??,
+            None => {}
         }
+        let held = self
+            .held_events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .unwrap_or_default();
+        for (kind, payload) in held {
+            self.append_notice(&kind, payload).await?;
+        }
+        Ok(())
     }
 
     async fn journal_extension_event(&self, kind: &str, payload: Value) -> Result<(), String> {
@@ -1930,6 +1946,19 @@ impl CodexRun {
     }
 
     async fn append_notice(&self, kind: &str, payload: Value) -> Result<i64, String> {
+        {
+            let mut held = self
+                .held_events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(events) = held.as_mut() {
+                if events.len() >= MAX_HELD_EVENTS {
+                    return Err("too many provider events before session admission".into());
+                }
+                events.push((kind.to_owned(), payload));
+                return Ok(0);
+            }
+        }
         let mut journal = self.daemon.journal.lock().await;
         let journal_epoch = journal.journal_epoch().map_err(|error| error.to_string())?;
         let host_id = journal.host_id().map_err(|error| error.to_string())?;
@@ -2735,6 +2764,7 @@ mod tests {
             sandbox: ConfirmedSandbox::WorkspaceWrite,
             admission_verified: None,
             admission_commit: None,
+            held_events: StdMutex::new(None),
             fail_command_lookup: true,
         };
         let (done_tx, done_rx) = oneshot::channel();
