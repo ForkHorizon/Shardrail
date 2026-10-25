@@ -9,7 +9,7 @@ import { UntrustedMarkdown } from './UntrustedMarkdown';
 
 const checklist = checklistSummary();
 
-export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
+export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
   approvalInFlight: ReadonlySet<string>;
@@ -19,6 +19,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
   workdirs: readonly string[] | null;
   createError: string | null;
   createdSessionId: string | null;
+  dismissedSessionId: string | null;
   onReconnect: () => void;
   onResolveApproval: (approvalId: string, optionId: string) => void;
   onSendPrompt: (sessionId: string, prompt: string) => void;
@@ -29,10 +30,17 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
   const sessions = useMemo(() => sessionSummaries(events), [events]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [appliedCreateId, setAppliedCreateId] = useState<string | null>(null);
+  const [appliedDismissId, setAppliedDismissId] = useState<string | null>(null);
+  let nextSelected = selectedId;
   if (createdSessionId && createdSessionId !== appliedCreateId) {
     setAppliedCreateId(createdSessionId);
-    setSelectedId(createdSessionId);
+    nextSelected = createdSessionId;
   }
+  if (dismissedSessionId && dismissedSessionId !== appliedDismissId) {
+    setAppliedDismissId(dismissedSessionId);
+    if (nextSelected === dismissedSessionId) nextSelected = null;
+  }
+  if (nextSelected !== selectedId) setSelectedId(nextSelected);
   const [pickedWorkdir, setPickedWorkdir] = useState('');
   const selectedWorkdir = workdirs?.includes(pickedWorkdir) ? pickedWorkdir : (workdirs?.[0] ?? '');
   const [confirmingAllowId, setConfirmingAllowId] = useState<string | null>(null);

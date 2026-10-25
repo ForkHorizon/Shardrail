@@ -25,12 +25,12 @@ async function stopDaemon() {
   });
 }
 
-async function pair(page: Page, allowCreate: boolean) {
-  const args = ['--data-dir', dataDir, 'client', 'enroll', '--label', `Playwright new session ${randomUUID()}`];
+async function pair(page: Page, allowCreate: boolean, root = dataDir, url = baseUrl) {
+  const args = ['--data-dir', root, 'client', 'enroll', '--label', `Playwright new session ${randomUUID()}`];
   if (allowCreate) args.push('--allow-session-create');
   const code = execFileSync(binary, args, { encoding: 'utf8' }).match(/enrollment_code=([0-9a-f]+)/)?.[1];
   if (!code) throw new Error('shardraild did not issue an enrollment code');
-  await page.goto(baseUrl);
+  await page.goto(url);
   await page.getByRole('button', { name: 'Review fingerprint' }).click();
   await page.getByRole('textbox', { name: 'One-time enrollment code' }).fill(code);
   await page.getByRole('button', { name: 'I verified this fingerprint — pair' }).click();
@@ -83,6 +83,48 @@ test('a browser with session.create can start a session and send a prompt', asyn
   await page.locator('#session-prompt').fill('Add a function sub');
   await page.getByRole('button', { name: 'Send prompt' }).click();
   await expect(page.getByRole('button', { name: 'Deny' })).toBeVisible({ timeout: 15_000 });
+});
+
+test('a daemon rejection of New session stays on the create alert', async ({ page }) => {
+  test.setTimeout(60_000);
+  const rejectedData = await mkdtemp(`${tmpdir()}/shardrail-new-session-rejected-`);
+  const rejectedWork = await mkdtemp(`${tmpdir()}/shardrail-new-session-rejected-work-`);
+  const rejected = spawn(binary, [
+    '--data-dir', rejectedData,
+    '--no-file-log',
+    '--codex-app-server', fakeCodex,
+    '--session-workdir', rejectedWork,
+    '--browser-listen', '127.0.0.1:0',
+    '--browser-assets-dir', assets,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, SHARDRAIL_CODEX_FAKE_MODE: 'extensions-on' } });
+  let stderr = '';
+  try {
+    const url = await new Promise<string>((resolveUrl, reject) => {
+      const timer = setTimeout(() => reject(new Error(`daemon did not listen: ${stderr}`)), 10_000);
+      rejected.stderr?.setEncoding('utf8');
+      rejected.stderr?.on('data', (chunk: string) => {
+        stderr += chunk;
+        const port = stderr.match(/browser WebSocket listening at ws:\/\/127\.0\.0\.1:(\d+)\/ws/)?.[1];
+        if (port) { clearTimeout(timer); resolveUrl(`http://127.0.0.1:${port}/`); }
+      });
+      rejected.once('exit', (code) => { clearTimeout(timer); reject(new Error(`daemon exited ${code}: ${stderr}`)); });
+    });
+    await pair(page, true, rejectedData, url);
+    await page.getByRole('button', { name: 'New session' }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'enabled plugins remain' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ })).toHaveCount(0);
+    await expect(page.getByText('No sessions yet.')).toBeVisible();
+  } finally {
+    if (rejected.exitCode === null) {
+      rejected.kill('SIGTERM');
+      await new Promise<void>((resolveDone) => {
+        const timer = setTimeout(() => { rejected.kill('SIGKILL'); resolveDone(); }, 2000);
+        rejected.once('exit', () => { clearTimeout(timer); resolveDone(); });
+      });
+    }
+    await rm(rejectedData, { recursive: true, force: true });
+    await rm(rejectedWork, { recursive: true, force: true });
+  }
 });
 
 test('a browser without session.create has no New session button', async ({ browser }) => {

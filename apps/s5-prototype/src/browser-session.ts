@@ -77,6 +77,55 @@ export function sessionCreateError(frame: DaemonFrame, pendingCommandId: string 
   return frame.error;
 }
 
+export interface CreateFlight {
+  pendingCommandId: string | null;
+  acceptedCommandId: string | null;
+}
+
+export interface CreateFlightResult {
+  flight: CreateFlight;
+  selectSessionId: string | null;
+  /** Undefined leaves the current create error unchanged. */
+  createError: string | null | undefined;
+  dismissSelection: boolean;
+}
+
+const idleCreateFlight: CreateFlightResult = {
+  flight: { pendingCommandId: null, acceptedCommandId: null },
+  selectSessionId: null,
+  createError: undefined,
+  dismissSelection: false,
+};
+
+export function noteCreateSent(commandId: string): CreateFlight {
+  return { pendingCommandId: commandId, acceptedCommandId: null };
+}
+
+export function createFlightOnSessionCreated(flight: CreateFlight, commandId: string | null, sessionId: string): CreateFlightResult {
+  const matches = commandId !== null && (commandId === flight.pendingCommandId || commandId === flight.acceptedCommandId);
+  if (!matches) return { ...idleCreateFlight, flight };
+  return { flight, selectSessionId: sessionId, createError: undefined, dismissSelection: false };
+}
+
+export function createFlightOnControl(flight: CreateFlight, frame: DaemonFrame): CreateFlightResult {
+  if (frame.kind === 'command_accepted' && frame.command_id === flight.pendingCommandId) {
+    return {
+      flight: { pendingCommandId: null, acceptedCommandId: frame.command_id },
+      selectSessionId: null,
+      createError: undefined,
+      dismissSelection: false,
+    };
+  }
+  const error = sessionCreateError(frame, flight.pendingCommandId);
+  if (error === null) return { ...idleCreateFlight, flight };
+  return {
+    flight: { pendingCommandId: null, acceptedCommandId: null },
+    selectSessionId: null,
+    createError: error,
+    dismissSelection: true,
+  };
+}
+
 export function cursorStorageKey(hostPublicKey: string) {
   return `shardrail-browser-cursor:${hostPublicKey}`;
 }

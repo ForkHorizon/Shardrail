@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DaemonFrame } from '@shardrail/contracts';
-import { connectionStatusLabel, createBrowserSession, isKeyChangedError, parseStoredCursor, reconnectDelayMs, sessionCreateError, sessionWorkdirs, type ConnectionPhase, type SessionSocket, type StoredCursor } from '../src/browser-session';
+import { connectionStatusLabel, createBrowserSession, createFlightOnControl, createFlightOnSessionCreated, isKeyChangedError, noteCreateSent, parseStoredCursor, reconnectDelayMs, sessionCreateError, sessionWorkdirs, type ConnectionPhase, type SessionSocket, type StoredCursor } from '../src/browser-session';
 import type { JournalEvent } from '../src/session-model';
 
 test('session workdirs are visible only on that frame and a create rejection matches the pending command', () => {
@@ -13,6 +13,32 @@ test('session workdirs are visible only on that frame and a create rejection mat
   assert.equal(sessionCreateError(rejected, 'create-1'), 'workdir is not allowlisted');
   assert.equal(sessionCreateError(rejected, 'prompt-1'), null);
   assert.equal(sessionCreateError(rejected, null), null);
+});
+
+test('a session_created event does not hide the following create rejection', () => {
+  const sent = noteCreateSent('create-1');
+  const created = createFlightOnSessionCreated(sent, 'create-1', 'session-1');
+  assert.equal(created.selectSessionId, 'session-1');
+  assert.equal(created.dismissSelection, false);
+  assert.equal(created.flight.pendingCommandId, 'create-1');
+  const rejected = createFlightOnControl(created.flight, { kind: 'command_rejected', command_id: 'create-1', error: 'enabled plugins remain' });
+  assert.equal(rejected.createError, 'enabled plugins remain');
+  assert.equal(rejected.dismissSelection, true);
+  assert.equal(rejected.flight.pendingCommandId, null);
+  assert.equal(rejected.flight.acceptedCommandId, null);
+  const unrelated = createFlightOnControl(sent, { kind: 'command_rejected', command_id: 'prompt-1', error: 'turn failed' });
+  assert.equal(unrelated.createError, undefined);
+  assert.equal(unrelated.flight.pendingCommandId, 'create-1');
+});
+
+test('an accepted create still selects the session event that follows it', () => {
+  const sent = noteCreateSent('create-1');
+  const accepted = createFlightOnControl(sent, { kind: 'command_accepted', command_id: 'create-1', cursor: 1 });
+  assert.equal(accepted.flight.pendingCommandId, null);
+  assert.equal(accepted.flight.acceptedCommandId, 'create-1');
+  const created = createFlightOnSessionCreated(accepted.flight, 'create-1', 'session-1');
+  assert.equal(created.selectSessionId, 'session-1');
+  assert.equal(created.flight.acceptedCommandId, 'create-1');
 });
 
 test('reconnect delay backs off and the status labels stay explicit', () => {
