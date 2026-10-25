@@ -812,7 +812,7 @@ pub(crate) struct Daemon {
     pub(crate) approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
     pub(crate) sessions: Mutex<HashMap<Uuid, Arc<Mutex<Coordinator>>>>,
     pub(crate) codex: Option<codex_app_server::CodexConfig>,
-    pub(crate) session_workdirs: Vec<PathBuf>,
+    pub(crate) session_workdirs: Vec<session_workdir::AllowedWorkdir>,
     pub(crate) codex_status: Mutex<HashMap<Uuid, codex_app_server::CodexStatus>>,
     pub(crate) turn_commands:
         Mutex<HashMap<Uuid, mpsc::UnboundedSender<codex_app_server::SessionCommand>>>,
@@ -835,7 +835,7 @@ pub(crate) struct ProviderOption {
 
 fn codex_config(
     args: &Args,
-    allowlist: &[PathBuf],
+    allowlist: &[session_workdir::AllowedWorkdir],
 ) -> Result<Option<codex_app_server::CodexConfig>, io::Error> {
     if args.fake_acp_path.is_some() && args.codex_app_server.is_some() {
         return Err(io::Error::new(
@@ -852,7 +852,7 @@ fn codex_config(
     let Some(program) = args.codex_app_server.clone() else {
         return Ok(None);
     };
-    let Some(workdir) = allowlist.first().cloned() else {
+    let Some(workdir) = allowlist.first().map(|entry| entry.path.clone()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--codex-app-server requires --codex-workdir or --session-workdir",
@@ -870,6 +870,7 @@ fn codex_config(
         program,
         workdir,
         extra: args.codex_config.clone(),
+        directory: None,
     }))
 }
 
@@ -935,7 +936,7 @@ async fn run(
     test_write_ahead_delay_ms: u64,
     browser: BrowserListenerOptions,
     codex: Option<codex_app_server::CodexConfig>,
-    session_workdirs: Vec<PathBuf>,
+    session_workdirs: Vec<session_workdir::AllowedWorkdir>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -2251,7 +2252,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 workdirs: daemon
                     .session_workdirs
                     .iter()
-                    .map(|path| path.display().to_string())
+                    .map(|entry| entry.path.display().to_string())
                     .collect(),
             },
         )
@@ -2354,7 +2355,7 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
 
 enum WorkdirChoice {
     Unset,
-    Path(PathBuf),
+    Path(session_workdir::PinnedWorkdir),
 }
 
 fn capability_name(client: &AuthorizedClient) -> &'static str {
@@ -2399,14 +2400,14 @@ fn audit_workdir_text(value: Option<&serde_json::Value>) -> Option<String> {
 fn choose_workdir(
     client: &AuthorizedClient,
     payload: &serde_json::Value,
-    allowlist: &[PathBuf],
+    allowlist: &[session_workdir::AllowedWorkdir],
 ) -> Result<WorkdirChoice, &'static str> {
     match requested_workdir(payload)? {
         None if client.scope != ClientScope::Full => {
             Err("limited clients must name an allowlisted workdir")
         }
         None => match allowlist.first() {
-            Some(default) => Ok(WorkdirChoice::Path(default.clone())),
+            Some(default) => Ok(WorkdirChoice::Path(session_workdir::pin_allowed(default)?)),
             None => Ok(WorkdirChoice::Unset),
         },
         Some(raw) => Ok(WorkdirChoice::Path(
@@ -2519,7 +2520,7 @@ async fn saved_session_workdir(daemon: &Daemon, session_id: Uuid) -> io::Result<
             daemon
                 .session_workdirs
                 .iter()
-                .any(|allowed| allowed == path)
+                .any(|allowed| &allowed.path == path)
         }))
 }
 
@@ -2571,8 +2572,45 @@ async fn handle_session_create(
         if let Some(mut config) = daemon.codex.clone()
             && codex_start_incomplete(daemon, session_id).await?
         {
-            if let Some(saved) = saved_session_workdir(daemon, session_id).await? {
-                config.workdir = saved;
+            let saved = saved_session_workdir(daemon, session_id).await?;
+            let entry = saved
+                .as_ref()
+                .and_then(|path| {
+                    daemon
+                        .session_workdirs
+                        .iter()
+                        .find(|allowed| &allowed.path == path)
+                })
+                .or_else(|| daemon.session_workdirs.first());
+            let Some(entry) = entry else {
+                write_frame(
+                    outbound,
+                    &DaemonFrame::CommandRejected {
+                        command_id: request.command_id,
+                        error: "workdir is not allowlisted".into(),
+                    },
+                )
+                .await?;
+                push_events(outbound, daemon, cursor).await?;
+                return Ok(());
+            };
+            match session_workdir::pin_allowed(entry) {
+                Ok(pinned) => {
+                    config.workdir = pinned.path;
+                    config.directory = Some(Arc::new(pinned.directory));
+                }
+                Err(error) => {
+                    write_frame(
+                        outbound,
+                        &DaemonFrame::CommandRejected {
+                            command_id: request.command_id,
+                            error: error.into(),
+                        },
+                    )
+                    .await?;
+                    push_events(outbound, daemon, cursor).await?;
+                    return Ok(());
+                }
             }
             let status =
                 codex_app_server::start_session(Arc::clone(daemon), config, session_id).await;
@@ -2622,8 +2660,8 @@ async fn handle_session_create(
             .await;
         }
         WorkdirChoice::Unset => None,
-        WorkdirChoice::Path(path) if daemon.codex.is_none() => {
-            let text = path.display().to_string();
+        WorkdirChoice::Path(pinned) if daemon.codex.is_none() => {
+            let text = pinned.path.display().to_string();
             return reject_session_create(
                 daemon,
                 client,
@@ -2635,9 +2673,11 @@ async fn handle_session_create(
             )
             .await;
         }
-        WorkdirChoice::Path(path) => Some(path),
+        WorkdirChoice::Path(pinned) => Some(pinned),
     };
-    let workdir_text = workdir.as_ref().map(|path| path.display().to_string());
+    let workdir_text = workdir
+        .as_ref()
+        .map(|pinned| pinned.path.display().to_string());
     let session_id = Uuid::now_v7();
     let now_ms = wall_clock_ms();
     let mut created = json!({
@@ -2701,8 +2741,9 @@ async fn handle_session_create(
         (event_id, receipt)
     };
     if let Some(mut config) = daemon.codex.clone() {
-        if let Some(path) = workdir {
-            config.workdir = path;
+        if let Some(pinned) = workdir {
+            config.workdir = pinned.path;
+            config.directory = Some(Arc::new(pinned.directory));
         }
         let status = codex_app_server::start_session(Arc::clone(daemon), config, session_id).await;
         if let codex_app_server::CodexStatus::Failed(error) = status {

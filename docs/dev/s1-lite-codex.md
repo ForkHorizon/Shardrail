@@ -18,7 +18,7 @@ A limited browser may send `turn.start` and `turn.interrupt` on an existing sess
 
 `scripts/dev-try.sh` is the way to try this. It builds `shardraild` and the S5 assets, starts the daemon on `127.0.0.1:9731` with a temporary data directory and `--no-file-log`, enrolls a browser with `--allow-session-create`, and prints the URL and the one-time enrollment code. It does not open a browser. Ctrl-C or exit stops the daemon, which stops Codex, and deletes the temporary data directory. This uses the Codex login already on the machine. Do not pass an API key.
 
-The default session workdir is `/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo`. Override it with `SHARDRAIL_SESSION_WORKDIR` or `--workdir`. The daemon still refuses `/`, `$HOME`, and any path inside the Shardrail checkout other than that test repo.
+The default session workdir is `/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo`. Override it with `SHARDRAIL_SESSION_WORKDIR` or `--workdir`. The daemon still refuses `/`, `$HOME`, and any path inside the Shardrail checkout other than that test repo. A macOS firmlink spelling such as `/System/Volumes/Data/Users/...` is the same directory and is refused the same way. The Codex child starts in the directory object checked at admission, so replacing that path afterward does not move it.
 
 ```sh
 scripts/dev-try.sh

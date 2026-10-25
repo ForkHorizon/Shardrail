@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use shardrail_protocol::{ApprovalDecision, ApprovalState, ClientScope, DurableEvent, OptionClass};
 use shardrail_session_core::{Approval, TurnOutcome, TurnState};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -66,11 +67,13 @@ pub(crate) const APPROVAL_POLICY: &str = "untrusted";
 static GROUPS: StdMutex<Vec<u32>> = StdMutex::new(Vec::new());
 static SHUTDOWN_HOOK: Once = Once::new();
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct CodexConfig {
     pub(crate) program: PathBuf,
     pub(crate) workdir: PathBuf,
     pub(crate) extra: Vec<String>,
+    /// Directory object admitted for this session. Spawn uses it instead of the path.
+    pub(crate) directory: Option<Arc<File>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1838,11 +1841,22 @@ impl CodexRun {
     }
 }
 
-fn codex_command(config: &CodexConfig, skills_config: Option<&str>) -> Command {
-    let mut command = Command::new(&config.program);
+fn codex_command<'a>(
+    config: &'a CodexConfig,
+    skills_config: Option<&str>,
+) -> io::Result<(Command, crate::session_workdir::InheritedDirFd<'a>)> {
+    let Some(directory) = config.directory.as_deref() else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "session workdir is not pinned",
+        ));
+    };
+    let inherited = crate::session_workdir::InheritedDirFd::acquire(directory)?;
+    let mut command = Command::new(crate::session_workdir::chdir_helper());
     command
+        .arg(inherited.raw().to_string())
+        .arg(&config.program)
         .args(command_arguments(&config.extra, skills_config))
-        .current_dir(&config.workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true)
@@ -1851,13 +1865,15 @@ fn codex_command(config: &CodexConfig, skills_config: Option<&str>) -> Command {
         .env_remove("GPG_AGENT_INFO");
     #[cfg(unix)]
     command.process_group(0);
-    command
+    Ok((command, inherited))
 }
 
 fn spawn_child(config: &CodexConfig, skills_config: &str) -> io::Result<tokio::process::Child> {
-    let mut command = codex_command(config, Some(skills_config));
+    let (mut command, inherited) = codex_command(config, Some(skills_config))?;
     command.stderr(Stdio::piped());
-    command.spawn()
+    let child = command.spawn()?;
+    drop(inherited);
+    Ok(child)
 }
 
 async fn reject_extensions_now(
@@ -1945,9 +1961,18 @@ async fn preflight_enabled_skills(config: &CodexConfig) -> Result<Vec<String>, S
 }
 
 async fn preflight_skills(config: &CodexConfig) -> Result<Vec<String>, String> {
-    let mut command = codex_command(config, None);
+    let (mut command, inherited) = codex_command(config, None).map_err(|error| {
+        crate::daemon_log::log(
+            "WARN",
+            "codex",
+            &format!("codex extension preflight failed to start: {error}"),
+        );
+        "codex extension preflight failed to start".to_owned()
+    })?;
     command.stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|error| {
+    let spawned = command.spawn();
+    drop(inherited);
+    let mut child = spawned.map_err(|error| {
         crate::daemon_log::log(
             "WARN",
             "codex",
