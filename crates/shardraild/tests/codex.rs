@@ -972,11 +972,16 @@ fn failed_codex_start_retry_stays_rejected() {
     .unwrap();
     let second = command_reply(&mut reader);
     assert_eq!(second["kind"], "command_rejected");
-    let created = journal_events(dirs.data.path())
-        .into_iter()
-        .filter(|event| event.kind == "session_created")
-        .count();
-    assert_eq!(created, 1);
+    let events = journal_events(dirs.data.path());
+    assert!(events.iter().all(|event| event.kind != "session_created"));
+    let audits: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "session_create_audit")
+        .collect();
+    assert_eq!(audits.len(), 2, "each failed attempt is its own denial");
+    assert!(audits.iter().all(|event| {
+        event.payload["outcome"] == "denied" && event.payload["reason"] == "extensions"
+    }));
 }
 
 #[test]
@@ -1163,15 +1168,32 @@ fn assert_extension_rejected(dirs: &CodexDirs, mode: &str, reason: &str) {
         extension_indexes(&trace, "thread/start").is_empty(),
         "thread/start ran after a failed extension check: {trace:?}"
     );
-    let event = journal_events(dirs.data.path())
-        .into_iter()
+    let events = journal_events(dirs.data.path());
+    assert!(
+        events.iter().all(|event| event.kind != "session_created"),
+        "extension failure must not record a session"
+    );
+    let event = events
+        .iter()
         .find(|event| event.kind == "codex_extensions_rejected")
         .expect("rejection was not journaled");
+    assert_eq!(event.session_id, Uuid::nil());
     assert_eq!(event.payload["reason"], reason);
-    assert!(event.payload.get("session_snapshot").is_some());
+    assert!(event.payload["session_snapshot"].is_null());
     let rendered = event.payload.to_string();
     assert!(!rendered.contains("/.codex/"));
     assert!(!rendered.contains("/.agents/"));
+    let audit = events
+        .iter()
+        .find(|event| event.kind == "session_create_audit")
+        .expect("denial was not audited");
+    assert_eq!(audit.payload["outcome"], "denied");
+    assert_eq!(audit.payload["reason"], "extensions");
+    assert!(
+        events
+            .iter()
+            .all(|event| event.payload["outcome"] != "allowed")
+    );
 }
 
 fn schema_root() -> PathBuf {

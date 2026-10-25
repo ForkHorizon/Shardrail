@@ -22,6 +22,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -2314,14 +2315,28 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         }
         if let Some(request) = request {
             if request.expected_state.is_some() || request.expected_turn_id.is_some() {
-                write_frame(
-                    &outbound,
-                    &DaemonFrame::CommandRejected {
-                        command_id: request.command_id,
-                        error: "unsupported command or invalid preconditions".into(),
-                    },
-                )
-                .await?;
+                if request.kind == "session.create" {
+                    let workdir = audit_workdir_text(request.payload.get("workdir"));
+                    reject_session_create(
+                        &daemon,
+                        &client,
+                        &outbound,
+                        request.command_id,
+                        workdir.as_deref(),
+                        "invalid_preconditions",
+                        "unsupported command or invalid preconditions",
+                    )
+                    .await?;
+                } else {
+                    write_frame(
+                        &outbound,
+                        &DaemonFrame::CommandRejected {
+                            command_id: request.command_id,
+                            error: "unsupported command or invalid preconditions".into(),
+                        },
+                    )
+                    .await?;
+                }
                 continue;
             }
             if request.kind == "turn.start" || request.kind == "turn.interrupt" {
@@ -2569,63 +2584,83 @@ async fn handle_session_create(
         .created_session_for_command(client.client_id, request.command_id)
         .map_err(io::Error::other)?;
     if let Some((session_id, event_id)) = existing {
-        if let Some(mut config) = daemon.codex.clone()
-            && codex_start_incomplete(daemon, session_id).await?
-        {
-            let saved = saved_session_workdir(daemon, session_id).await?;
-            let entry = saved
-                .as_ref()
-                .and_then(|path| {
-                    daemon
-                        .session_workdirs
-                        .iter()
-                        .find(|allowed| &allowed.path == path)
-                })
-                .or_else(|| daemon.session_workdirs.first());
-            let Some(entry) = entry else {
+        match codex_start_class(daemon, session_id).await? {
+            CodexStart::Rejected => {
                 write_frame(
                     outbound,
                     &DaemonFrame::CommandRejected {
                         command_id: request.command_id,
-                        error: "workdir is not allowlisted".into(),
+                        error: "codex extensions rejected".into(),
                     },
                 )
                 .await?;
                 push_events(outbound, daemon, cursor).await?;
                 return Ok(());
-            };
-            match session_workdir::pin_allowed(entry) {
-                Ok(pinned) => {
-                    config.workdir = pinned.path;
-                    config.directory = Some(Arc::new(pinned.directory));
-                }
-                Err(error) => {
-                    write_frame(
-                        outbound,
-                        &DaemonFrame::CommandRejected {
-                            command_id: request.command_id,
-                            error: error.into(),
-                        },
+            }
+            CodexStart::Incomplete => {
+                if let Some(mut config) = daemon.codex.clone() {
+                    let saved = saved_session_workdir(daemon, session_id).await?;
+                    let entry = saved
+                        .as_ref()
+                        .and_then(|path| {
+                            daemon
+                                .session_workdirs
+                                .iter()
+                                .find(|allowed| &allowed.path == path)
+                        })
+                        .or_else(|| daemon.session_workdirs.first());
+                    let Some(entry) = entry else {
+                        write_frame(
+                            outbound,
+                            &DaemonFrame::CommandRejected {
+                                command_id: request.command_id,
+                                error: "workdir is not allowlisted".into(),
+                            },
+                        )
+                        .await?;
+                        push_events(outbound, daemon, cursor).await?;
+                        return Ok(());
+                    };
+                    match session_workdir::pin_allowed(entry) {
+                        Ok(pinned) => {
+                            config.workdir = pinned.path;
+                            config.directory = Some(Arc::new(pinned.directory));
+                        }
+                        Err(error) => {
+                            write_frame(
+                                outbound,
+                                &DaemonFrame::CommandRejected {
+                                    command_id: request.command_id,
+                                    error: error.into(),
+                                },
+                            )
+                            .await?;
+                            push_events(outbound, daemon, cursor).await?;
+                            return Ok(());
+                        }
+                    }
+                    let status = codex_app_server::start_session(
+                        Arc::clone(daemon),
+                        config,
+                        session_id,
+                        || async { Ok(()) },
                     )
-                    .await?;
-                    push_events(outbound, daemon, cursor).await?;
-                    return Ok(());
+                    .await;
+                    if let codex_app_server::CodexStatus::Failed(error) = status {
+                        write_frame(
+                            outbound,
+                            &DaemonFrame::CommandRejected {
+                                command_id: request.command_id,
+                                error,
+                            },
+                        )
+                        .await?;
+                        push_events(outbound, daemon, cursor).await?;
+                        return Ok(());
+                    }
                 }
             }
-            let status =
-                codex_app_server::start_session(Arc::clone(daemon), config, session_id).await;
-            if let codex_app_server::CodexStatus::Failed(error) = status {
-                write_frame(
-                    outbound,
-                    &DaemonFrame::CommandRejected {
-                        command_id: request.command_id,
-                        error,
-                    },
-                )
-                .await?;
-                push_events(outbound, daemon, cursor).await?;
-                return Ok(());
-            }
+            CodexStart::Started => {}
         }
         let receipt = daemon
             .journal
@@ -2679,18 +2714,128 @@ async fn handle_session_create(
         .as_ref()
         .map(|pinned| pinned.path.display().to_string());
     let session_id = Uuid::now_v7();
+    let (event_id, receipt) = if let Some(mut config) = daemon.codex.clone() {
+        let Some(pinned) = workdir else {
+            return reject_session_create(
+                daemon,
+                client,
+                outbound,
+                request.command_id,
+                None,
+                "codex",
+                "codex is not configured",
+            )
+            .await;
+        };
+        config.workdir = pinned.path;
+        config.directory = Some(Arc::new(pinned.directory));
+        let committed = Arc::new(AtomicBool::new(false));
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let flag = Arc::clone(&committed);
+        let recorded = Arc::clone(&slot);
+        let daemon_for_commit = Arc::clone(daemon);
+        let client_for_commit = client.clone();
+        let capability_for_commit = capability.to_owned();
+        let command_id = request.command_id;
+        let workdir_for_commit = workdir_text.clone();
+        let status = codex_app_server::start_session(
+            Arc::clone(daemon),
+            config,
+            session_id,
+            || async move {
+                let created = commit_created_session(
+                    &daemon_for_commit,
+                    &client_for_commit,
+                    &capability_for_commit,
+                    command_id,
+                    session_id,
+                    workdir_for_commit.as_deref(),
+                )
+                .await?;
+                *recorded.lock().unwrap_or_else(|error| error.into_inner()) = Some(created);
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        if let codex_app_server::CodexStatus::Failed(error) = status {
+            if !committed.load(Ordering::SeqCst) {
+                return reject_session_create(
+                    daemon,
+                    client,
+                    outbound,
+                    request.command_id,
+                    workdir_text.as_deref(),
+                    session_create_failure_reason(&error),
+                    &error,
+                )
+                .await;
+            }
+            write_frame(
+                outbound,
+                &DaemonFrame::CommandRejected {
+                    command_id: request.command_id,
+                    error,
+                },
+            )
+            .await?;
+            push_events(outbound, daemon, cursor).await?;
+            return Ok(());
+        }
+        slot.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or_else(|| io::Error::other("session creation event was not committed"))?
+    } else {
+        commit_created_session(
+            daemon,
+            client,
+            capability,
+            request.command_id,
+            session_id,
+            workdir_text.as_deref(),
+        )
+        .await?
+    };
+    write_frame(
+        outbound,
+        &DaemonFrame::CommandAccepted {
+            command_id: request.command_id,
+            receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
+            receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
+            cursor: event_id,
+        },
+    )
+    .await?;
+    push_events(outbound, daemon, cursor).await?;
+    if daemon.codex.is_none()
+        && let Some(path) = daemon.fake_acp_path.clone()
+    {
+        tokio::spawn(run_fake_acp(Arc::clone(daemon), path, session_id));
+    }
+    Ok(())
+}
+
+async fn commit_created_session(
+    daemon: &Arc<Daemon>,
+    client: &AuthorizedClient,
+    capability: &str,
+    command_id: Uuid,
+    session_id: Uuid,
+    workdir: Option<&str>,
+) -> io::Result<(i64, Option<(u128, i64)>)> {
     let now_ms = wall_clock_ms();
     let mut created = json!({
         "session_id": session_id,
         "client_id": client.client_id,
-        "command_id": request.command_id,
+        "command_id": command_id,
     });
     let audit = serde_json::to_value(SessionCreateAudit {
         client_id: client.client_id,
         client_label: client.label.clone(),
         scope: client.scope,
         capability: capability.to_owned(),
-        workdir: workdir_text.clone(),
+        workdir: workdir.map(str::to_owned),
         outcome: "allowed".to_owned(),
         reason: None,
     })
@@ -2719,76 +2864,59 @@ async fn handle_session_create(
         .lock()
         .await
         .insert(session_id, Arc::new(Mutex::new(coordinator)));
-    record_session_create_audit(
-        daemon,
-        client,
-        capability,
-        workdir_text.as_deref(),
-        "allowed",
-        None,
-    )
-    .await?;
-    let (event_id, receipt) = {
-        let journal = daemon.journal.lock().await;
-        let event = journal
-            .events_for_session(session_id)
-            .map_err(io::Error::other)?
-            .into_iter()
-            .last()
-            .ok_or_else(|| io::Error::other("session creation event was not committed"))?;
-        let event_id = event.event_id;
-        let receipt = journal.event_receipt(event_id).map_err(io::Error::other)?;
-        (event_id, receipt)
-    };
-    if let Some(mut config) = daemon.codex.clone() {
-        if let Some(pinned) = workdir {
-            config.workdir = pinned.path;
-            config.directory = Some(Arc::new(pinned.directory));
-        }
-        let status = codex_app_server::start_session(Arc::clone(daemon), config, session_id).await;
-        if let codex_app_server::CodexStatus::Failed(error) = status {
-            write_frame(
-                outbound,
-                &DaemonFrame::CommandRejected {
-                    command_id: request.command_id,
-                    error,
-                },
-            )
-            .await?;
-            push_events(outbound, daemon, cursor).await?;
-            return Ok(());
-        }
-    }
-    write_frame(
-        outbound,
-        &DaemonFrame::CommandAccepted {
-            command_id: request.command_id,
-            receipt_monotonic_ns: receipt.map(|stamp| stamp.0.to_string()),
-            receipt_wall_clock_ms: receipt.map(|stamp| stamp.1),
-            cursor: event_id,
-        },
-    )
-    .await?;
-    push_events(outbound, daemon, cursor).await?;
-    if daemon.codex.is_none()
-        && let Some(path) = daemon.fake_acp_path.clone()
-    {
-        tokio::spawn(run_fake_acp(Arc::clone(daemon), path, session_id));
-    }
-    Ok(())
+    record_session_create_audit(daemon, client, capability, workdir, "allowed", None).await?;
+    let journal = daemon.journal.lock().await;
+    let event = journal
+        .events_for_session(session_id)
+        .map_err(io::Error::other)?
+        .into_iter()
+        .last()
+        .ok_or_else(|| io::Error::other("session creation event was not committed"))?;
+    let event_id = event.event_id;
+    let receipt = journal.event_receipt(event_id).map_err(io::Error::other)?;
+    Ok((event_id, receipt))
 }
 
-async fn codex_start_incomplete(daemon: &Daemon, session_id: Uuid) -> io::Result<bool> {
+fn session_create_failure_reason(error: &str) -> &'static str {
+    if error.starts_with("codex extensions rejected") {
+        "extensions"
+    } else {
+        "codex"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexStart {
+    Started,
+    Rejected,
+    Incomplete,
+}
+
+fn classify_codex_start<'a>(kinds: impl IntoIterator<Item = &'a str>) -> CodexStart {
+    let mut rejected = false;
+    for kind in kinds {
+        if matches!(kind, "process_started" | "approval_routing_rejected") {
+            return CodexStart::Started;
+        }
+        if kind == "codex_extensions_rejected" {
+            rejected = true;
+        }
+    }
+    if rejected {
+        CodexStart::Rejected
+    } else {
+        CodexStart::Incomplete
+    }
+}
+
+async fn codex_start_class(daemon: &Daemon, session_id: Uuid) -> io::Result<CodexStart> {
     let journal = daemon.journal.lock().await;
     let events = journal
         .events_for_session(session_id)
         .map_err(io::Error::other)?;
-    Ok(!events.iter().any(|event| {
-        matches!(
-            event.kind.as_str(),
-            "process_started" | "approval_routing_rejected"
-        )
-    }))
+    Ok(classify_codex_start(
+        events.iter().map(|event| event.kind.as_str()),
+    ))
 }
 
 async fn push_events(
@@ -3157,6 +3285,26 @@ mod tests {
     fn rejects_forged_root_policy_fields() {
         let frame = r#"{"kind":"approval_resolution","scope":"full","request":{"approval_id":"019b0000-0000-7000-8000-000000000001","option_id":"allow_once"}}"#;
         assert!(parse_client_frame(frame).is_err());
+    }
+
+    #[test]
+    fn codex_extensions_rejected_is_terminal_and_a_later_start_wins() {
+        assert_eq!(
+            classify_codex_start(["session_created"]),
+            CodexStart::Incomplete
+        );
+        assert_eq!(
+            classify_codex_start(["session_created", "codex_extensions_rejected"]),
+            CodexStart::Rejected
+        );
+        assert_eq!(
+            classify_codex_start(["codex_extensions_rejected", "process_started"]),
+            CodexStart::Started
+        );
+        assert_eq!(
+            classify_codex_start(["approval_routing_rejected", "codex_extensions_rejected"]),
+            CodexStart::Started
+        );
     }
 }
 

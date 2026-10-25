@@ -622,3 +622,188 @@ fn full_client_without_an_allowlist_still_audits_a_fake_provider_session() {
     assert_audit(&events[0], "allowed", None, "full");
     assert!(events[0].payload["workdir"].is_null());
 }
+
+#[test]
+fn session_create_preconditions_are_audited_and_do_not_create() {
+    let data = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(work.path()).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
+        .arg("--data-dir")
+        .arg(data.path())
+        .arg("--no-file-log")
+        .arg("--session-workdir")
+        .arg(work.path())
+        .arg("--codex-app-server")
+        .arg(fake_program());
+    let (mut guard, _reader) = spawn_logged(&mut command);
+    wait_for_socket(data.path(), &mut guard.0);
+    let full = add_client(data.path(), "full");
+    let (mut stream, mut reader) = handshake(data.path(), &full);
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"request","request":{
+            "command_id": Uuid::now_v7(), "kind": "session.create",
+            "expected_state": "1", "expected_turn_id": null,
+            "payload": {"workdir": canonical}
+        }})
+    )
+    .unwrap();
+    let rejected = read_until(&mut reader, "command_rejected");
+    assert_eq!(
+        rejected["error"],
+        "unsupported command or invalid preconditions"
+    );
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"request","request":{
+            "command_id": Uuid::now_v7(), "kind": "session.create",
+            "expected_state": null, "expected_turn_id": Uuid::now_v7(),
+            "payload": {"workdir": format!("bad\n{canonical:?}")}
+        }})
+    )
+    .unwrap();
+    assert_eq!(
+        read_until(&mut reader, "command_rejected")["error"],
+        "unsupported command or invalid preconditions"
+    );
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"request","request":{
+            "command_id": Uuid::now_v7(), "kind": "turn.start",
+            "expected_state": "1", "expected_turn_id": null, "payload": {}
+        }})
+    )
+    .unwrap();
+    assert_eq!(
+        read_until(&mut reader, "command_rejected")["error"],
+        "unsupported command or invalid preconditions"
+    );
+    drop(stream);
+    drop(guard);
+    let events = Journal::open(data.path().join("journal.sqlite3"))
+        .unwrap()
+        .events_after(0)
+        .unwrap();
+    assert!(events.iter().all(|event| event.kind != "session_created"));
+    let audits: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "session_create_audit")
+        .collect();
+    assert_eq!(
+        audits.len(),
+        2,
+        "a non-create command is not a create audit"
+    );
+    assert_eq!(audits[0].payload["outcome"], "denied");
+    assert_eq!(audits[0].payload["reason"], "invalid_preconditions");
+    assert_eq!(
+        audits[0].payload["workdir"],
+        canonical.to_string_lossy().into_owned()
+    );
+    assert_eq!(audits[1].payload["reason"], "invalid_preconditions");
+    assert!(audits[1].payload["workdir"].is_null());
+}
+
+#[test]
+fn extensions_rejected_session_is_not_retried() {
+    let data = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let client = add_client(data.path(), "full");
+    let command_id = Uuid::now_v7();
+    let session_id = Uuid::now_v7();
+    let journal_path = data.path().join("journal.sqlite3");
+    {
+        let mut journal = Journal::open(&journal_path).unwrap();
+        let epoch = journal.journal_epoch().unwrap();
+        let host_id = journal.host_id().unwrap();
+        journal
+            .append_event(&DurableEvent {
+                event_id: 0,
+                journal_epoch: epoch,
+                host_id,
+                session_id,
+                schema_version: 1,
+                kind: "session_created".into(),
+                occurred_at_ms: 1,
+                provider_ref: None,
+                causation: None,
+                redaction_flags: Vec::new(),
+                payload: json!({
+                    "session_id": session_id,
+                    "client_id": client.id,
+                    "command_id": command_id
+                }),
+            })
+            .unwrap();
+        journal
+            .append_event(&DurableEvent {
+                event_id: 0,
+                journal_epoch: epoch,
+                host_id,
+                session_id,
+                schema_version: 1,
+                kind: "codex_extensions_rejected".into(),
+                occurred_at_ms: 2,
+                provider_ref: None,
+                causation: None,
+                redaction_flags: Vec::new(),
+                payload: json!({"reason": "enabled plugins remain", "session_snapshot": null}),
+            })
+            .unwrap();
+    }
+    std::fs::set_permissions(
+        &journal_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let argv = data.path().join("codex-argv.json");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
+        .arg("--data-dir")
+        .arg(data.path())
+        .arg("--no-file-log")
+        .arg("--session-workdir")
+        .arg(work.path())
+        .arg("--codex-app-server")
+        .arg(fake_program())
+        .env("SHARDRAIL_CODEX_ARGV_OUT", &argv)
+        .env("SHARDRAIL_CODEX_FAKE_MODE", "happy");
+    let (mut guard, _reader) = spawn_logged(&mut command);
+    wait_for_socket(data.path(), &mut guard.0);
+    let (mut stream, mut reader) = handshake(data.path(), &client);
+    writeln!(
+        stream,
+        "{}",
+        json!({"kind":"request","request":{
+            "command_id": command_id, "kind": "session.create",
+            "expected_state": null, "expected_turn_id": null, "payload": {}
+        }})
+    )
+    .unwrap();
+    let rejected = read_until(&mut reader, "command_rejected");
+    assert_eq!(rejected["error"], "codex extensions rejected");
+    drop(stream);
+    drop(guard);
+    assert!(!argv.exists(), "a rejected session must not spawn Codex");
+    let events = Journal::open(&journal_path)
+        .unwrap()
+        .events_after(0)
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "session_created")
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.payload["outcome"] != "allowed")
+    );
+}

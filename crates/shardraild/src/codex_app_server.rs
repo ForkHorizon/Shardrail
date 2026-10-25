@@ -19,6 +19,7 @@ use shardrail_protocol::{ApprovalDecision, ApprovalState, ClientScope, DurableEv
 use shardrail_session_core::{Approval, TurnOutcome, TurnState};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -335,14 +336,23 @@ enum PendingRpc {
     },
 }
 
-pub(crate) async fn start_session(
+/// Runs extension checks before `commit`. `commit` records the session.
+/// A failure before those checks returns [`CodexStatus::Failed`] and does not call `commit`.
+pub(crate) async fn start_session<F, Fut>(
     daemon: Arc<Daemon>,
     config: CodexConfig,
     session_id: Uuid,
-) -> CodexStatus {
+    commit: F,
+) -> CodexStatus
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = io::Result<()>>,
+{
     let (approval_tx, approval_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = oneshot::channel();
+    let (verified_tx, verified_rx) = oneshot::channel();
+    let (commit_tx, commit_rx) = oneshot::channel();
     let session_tx = command_tx.clone();
     daemon
         .turn_commands
@@ -365,25 +375,124 @@ pub(crate) async fn start_session(
             command_tx,
             command_rx,
             ready_tx,
+            verified_tx,
+            commit_rx,
         )
         .await;
     });
-    let status = match tokio::time::timeout(Duration::from_secs(20), ready_rx).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(_)) => CodexStatus::Failed("codex session ended before it was ready".into()),
-        Err(_) => {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    tokio::pin!(ready_rx);
+    let admitted = tokio::select! {
+        biased;
+        status = &mut ready_rx => {
+            return observe_ready(&daemon, session_id, &session_tx, status).await;
+        }
+        admitted = verified_rx => admitted,
+        _ = tokio::time::sleep_until(deadline) => {
             handle.abort();
-            CodexStatus::Failed("codex session did not become ready".into())
+            return failed_status(
+                &daemon,
+                session_id,
+                &session_tx,
+                "codex session did not become ready",
+            )
+            .await;
         }
     };
-    if matches!(status, CodexStatus::Failed(_)) {
-        daemon
-            .codex_status
-            .lock()
-            .await
-            .insert(session_id, status.clone());
-        remove_turn_command(&daemon, session_id, &session_tx).await;
+    if admitted.is_err() {
+        return wait_ready(
+            &daemon,
+            session_id,
+            &session_tx,
+            ready_rx,
+            deadline,
+            &handle,
+        )
+        .await;
     }
+    let commit_result = commit().await;
+    let commit_notice = match &commit_result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    };
+    let _ = commit_tx.send(commit_notice);
+    if let Err(error) = commit_result {
+        return failed_status(&daemon, session_id, &session_tx, &error.to_string()).await;
+    }
+    wait_ready(
+        &daemon,
+        session_id,
+        &session_tx,
+        ready_rx,
+        deadline,
+        &handle,
+    )
+    .await
+}
+
+async fn wait_ready(
+    daemon: &Arc<Daemon>,
+    session_id: Uuid,
+    session_tx: &mpsc::UnboundedSender<SessionCommand>,
+    ready_rx: std::pin::Pin<&mut oneshot::Receiver<CodexStatus>>,
+    deadline: tokio::time::Instant,
+    handle: &tokio::task::JoinHandle<()>,
+) -> CodexStatus {
+    let status = tokio::select! {
+        biased;
+        status = ready_rx => status,
+        _ = tokio::time::sleep_until(deadline) => {
+            handle.abort();
+            return failed_status(
+                daemon,
+                session_id,
+                session_tx,
+                "codex session did not become ready",
+            )
+            .await;
+        }
+    };
+    observe_ready(daemon, session_id, session_tx, status).await
+}
+
+async fn observe_ready(
+    daemon: &Arc<Daemon>,
+    session_id: Uuid,
+    session_tx: &mpsc::UnboundedSender<SessionCommand>,
+    status: Result<CodexStatus, oneshot::error::RecvError>,
+) -> CodexStatus {
+    let status = match status {
+        Ok(status) => status,
+        Err(_) => CodexStatus::Failed("codex session ended before it was ready".into()),
+    };
+    if matches!(status, CodexStatus::Failed(_)) {
+        return failed_status(daemon, session_id, session_tx, &status_error(&status)).await;
+    }
+    status
+}
+
+fn status_error(status: &CodexStatus) -> String {
+    match status {
+        CodexStatus::Failed(error) => error.clone(),
+        CodexStatus::RoutingRejected(error) => error.clone(),
+        CodexStatus::Starting => "codex session is not ready".into(),
+        CodexStatus::Ready => "codex session is ready".into(),
+    }
+}
+
+async fn failed_status(
+    daemon: &Daemon,
+    session_id: Uuid,
+    session_tx: &mpsc::UnboundedSender<SessionCommand>,
+    error: &str,
+) -> CodexStatus {
+    let status = CodexStatus::Failed(error.to_owned());
+    daemon
+        .codex_status
+        .lock()
+        .await
+        .insert(session_id, status.clone());
+    remove_turn_command(daemon, session_id, session_tx).await;
     status
 }
 
@@ -569,6 +678,8 @@ async fn run_codex_session(
     command_tx: mpsc::UnboundedSender<SessionCommand>,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     ready_tx: oneshot::Sender<CodexStatus>,
+    verified_tx: oneshot::Sender<()>,
+    commit_rx: oneshot::Receiver<Result<(), String>>,
 ) {
     let mut ready = Some(ready_tx);
     let enabled = match preflight_enabled_skills(&config).await {
@@ -647,6 +758,8 @@ async fn run_codex_session(
         approval_by_item: HashMap::new(),
         items: HashMap::new(),
         sandbox: ConfirmedSandbox::WorkspaceWrite,
+        admission_verified: Some(verified_tx),
+        admission_commit: Some(commit_rx),
         #[cfg(test)]
         fail_command_lookup: false,
     };
@@ -804,6 +917,8 @@ struct CodexRun {
     approval_by_item: HashMap<String, Uuid>,
     items: HashMap<String, Value>,
     sandbox: ConfirmedSandbox,
+    admission_verified: Option<oneshot::Sender<()>>,
+    admission_commit: Option<oneshot::Receiver<Result<(), String>>>,
     #[cfg(test)]
     fail_command_lookup: bool,
 }
@@ -1032,6 +1147,10 @@ impl CodexRun {
             PendingRpc::AppsList => {
                 if let Err(reason) = apps_are_clear(&result) {
                     self.reject_extensions(ready, reason).await;
+                    return true;
+                }
+                if let Err(error) = self.wait_for_admission().await {
+                    self.fail_transport(ready, &error).await;
                     return true;
                 }
                 if self
@@ -1792,6 +1911,20 @@ impl CodexRun {
         reject_extensions_now(&self.daemon, self.session_id, ready, reason).await;
     }
 
+    async fn wait_for_admission(&mut self) -> Result<(), String> {
+        if let Some(verified) = self.admission_verified.take()
+            && verified.send(()).is_err()
+        {
+            return Err("codex session admission was dropped".into());
+        }
+        match self.admission_commit.take() {
+            Some(commit) => commit
+                .await
+                .map_err(|_| "codex session admission was dropped".to_owned())?,
+            None => Ok(()),
+        }
+    }
+
     async fn journal_extension_event(&self, kind: &str, payload: Value) -> Result<(), String> {
         journal_session_notice(&self.daemon, self.session_id, kind, payload).await
     }
@@ -1882,14 +2015,52 @@ async fn reject_extensions_now(
     ready: &mut Option<oneshot::Sender<CodexStatus>>,
     reason: &str,
 ) {
-    let _ = journal_session_notice(
+    journal_extension_rejection(daemon, session_id, reason).await;
+    fail_extensions(daemon, session_id, ready, reason).await;
+}
+
+async fn journal_extension_rejection(daemon: &Daemon, session_id: Uuid, reason: &str) {
+    let in_memory = daemon.sessions.lock().await.contains_key(&session_id);
+    if in_memory {
+        let _ = journal_session_notice(
+            daemon,
+            session_id,
+            "codex_extensions_rejected",
+            json!({"reason": reason}),
+        )
+        .await;
+        return;
+    }
+    let _ = append_unscoped_event(
         daemon,
-        session_id,
         "codex_extensions_rejected",
-        json!({"reason": reason}),
+        json!({"reason": reason, "session_snapshot": Value::Null}),
     )
     .await;
-    fail_extensions(daemon, session_id, ready, reason).await;
+}
+
+async fn append_unscoped_event(daemon: &Daemon, kind: &str, payload: Value) -> Result<(), String> {
+    let mut journal = daemon.journal.lock().await;
+    let journal_epoch = journal.journal_epoch().map_err(|error| error.to_string())?;
+    let host_id = journal.host_id().map_err(|error| error.to_string())?;
+    journal
+        .append_event(&DurableEvent {
+            event_id: 0,
+            journal_epoch,
+            host_id,
+            session_id: Uuid::nil(),
+            schema_version: 1,
+            kind: kind.to_owned(),
+            occurred_at_ms: wall_clock_ms(),
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload,
+        })
+        .map_err(|error| error.to_string())?;
+    drop(journal);
+    bump(daemon);
+    Ok(())
 }
 
 async fn fail_extensions(
@@ -2562,6 +2733,8 @@ mod tests {
             approval_by_item: HashMap::new(),
             items: HashMap::new(),
             sandbox: ConfirmedSandbox::WorkspaceWrite,
+            admission_verified: None,
+            admission_commit: None,
             fail_command_lookup: true,
         };
         let (done_tx, done_rx) = oneshot::channel();
