@@ -238,6 +238,37 @@ def mcp_server(enabled, command):
     }
 
 
+# Event names measured on a real codex-cli 0.160.0 config/read. Lists were empty.
+HOOK_EVENTS = (
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+    "Interrupt",
+)
+
+
+def realistic_hooks():
+    # One command is on the wire so the daemon test can see it is not journaled.
+    # trusted_hash is a content hash, not a secret, and must not be hashed.
+    hooks = {event: [] for event in HOOK_EVENTS}
+    hooks["SessionStart"] = [
+        {"command": "node /tmp/hook.js", "matcher": "Bash", "env": {"TOKEN": DECOY_SECRET}}
+    ]
+    hooks["state"] = {
+        "plugin:SessionStart:0:0": {"trusted_hash": "fixture-hook-hash"},
+        "user-hook.py:PreToolUse:0:1": {"enabled": False, "trusted_hash": "fixture-hook-hash"},
+    }
+    return hooks
+
+
 def config_servers(child):
     # Wire shape measured on codex-cli 0.160.0: result.config.mcp_servers is an
     # object keyed by server name. The session child returns the effective
@@ -257,23 +288,43 @@ def config_servers(child):
         {
             "approval_policy": "untrusted",
             "approvals_reviewer": "user",
+            "default_permissions": ":workspace",
             "sandbox_mode": "workspace-write",
-            "sandbox_workspace_write": {
-                "network_access": False,
-                "writable_roots": ["/tmp/a", "/tmp/b"],
-            },
+            "sandbox_workspace_write": None,
             "model_provider": "fake",
             "web_search": "disabled",
-            "features": {"plugins": False, "hooks": False, "apps": False, "js_repl": False},
-            "plugins": {"browser@openai-bundled": {"enabled": False, "bearer_token": DECOY_SECRET}},
-            "apps": {"demo": {"enabled": False, "api_key": DECOY_SECRET}},
-            "connectors": {"gmail": {"enabled": False}},
-            "hooks": {"sessionStart": {"enabled": False, "command": "node /tmp/hook.js"}},
-            "skills": {
-                "bundled": {"enabled": False},
-                "include_instructions": False,
-                "config": [{"name": "alpha", "enabled": False, "path": DECOY_SECRET}],
+            "features": {
+                "plugins": False,
+                "hooks": False,
+                "apps": False,
+                "js_repl": False,
+                "network_proxy": None,
             },
+            "plugins": {"browser@openai-bundled": {"enabled": False, "bearer_token": DECOY_SECRET}},
+            "apps": {
+                "_default": None,
+                "connector_a1b2c3d4": {
+                    "approvals_reviewer": "user",
+                    "default_tools_approval_mode": "prompt",
+                    "default_tools_enabled": False,
+                    "destructive_enabled": False,
+                    "enabled": False,
+                    "links": None,
+                    "omit_tools_from": None,
+                    "open_world_enabled": False,
+                    "tools": None,
+                    "api_key": DECOY_SECRET,
+                },
+            },
+            "connectors": None,
+            "hooks": realistic_hooks(),
+            "skills": None,
+            "agents": {"explorer": {"description": "ignored"}},
+            "memories": {},
+            "desktop": None,
+            "cloud": None,
+            "history": {"persistence": "none"},
+            "permissions": {"workspace": {"network": "restricted"}},
         }
     )
     return {"config": config, "origins": {}}
@@ -281,6 +332,9 @@ def config_servers(child):
 
 def config_for_read(child, read_index):
     payload = config_servers(child)
+    if child and MODE == "config-read-start-bad":
+        payload["config"]["features"]["network_proxy"] = "not-a-bool"
+        return payload
     if not child or read_index < 2:
         return payload
     config = payload["config"]

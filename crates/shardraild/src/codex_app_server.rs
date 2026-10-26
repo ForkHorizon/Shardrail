@@ -1394,9 +1394,10 @@ impl CodexRun {
                 };
                 let snapshot = match crate::config_snapshot::snapshot_config(&result) {
                     Ok(snapshot) => snapshot,
-                    Err(reason) => {
+                    Err(error) => {
                         drop(result);
-                        self.reject_extensions(ready, reason).await;
+                        let reason = error.reason();
+                        self.reject_extensions(ready, &reason).await;
                         return true;
                     }
                 };
@@ -1548,11 +1549,11 @@ impl CodexRun {
                             true
                         }
                     }
-                    Err(_) => {
-                        let reason = "config/read response is invalid";
-                        self.note_config_failure("pre-turn", reason).await;
-                        let _ = done.send(Err(reason.into()));
-                        self.stop_for_config(ready, reason).await;
+                    Err(error) => {
+                        let reason = error.reason();
+                        self.note_config_failure("pre-turn", &reason).await;
+                        let _ = done.send(Err(reason.clone()));
+                        self.stop_for_config(ready, &reason).await;
                         true
                     }
                 }
@@ -2397,6 +2398,9 @@ impl CodexRun {
         });
         if let Some(reason) = reason {
             payload["reason"] = Value::String(reason.to_owned());
+            if let Some(group) = config_parse_group(reason) {
+                payload["group"] = Value::String(group.to_owned());
+            }
         }
         let _ = self.append_notice("config_snapshot", payload).await;
         let level = if matched == Some(true) {
@@ -2404,11 +2408,17 @@ impl CodexRun {
         } else {
             "WARN"
         };
+        let group = reason.and_then(config_parse_group).unwrap_or("");
+        let group_suffix = if group.is_empty() {
+            String::new()
+        } else {
+            format!(" group={group}")
+        };
         crate::daemon_log::log(
             level,
             "codex",
             &format!(
-                "config snapshot {point} {} session {}",
+                "config snapshot {point} {} session {}{group_suffix}",
                 config_snapshot_log_hash(hash),
                 self.session_id
             ),
@@ -2478,8 +2488,8 @@ impl CodexRun {
                                     }
                                     return;
                                 }
-                                Err(_) => {
-                                    self.note_config_failure("session-end", "config/read response is invalid").await;
+                                Err(error) => {
+                                    self.note_config_failure("session-end", &error.reason()).await;
                                     return;
                                 }
                             }
@@ -2894,22 +2904,27 @@ async fn reject_extensions_now(
 
 async fn journal_extension_rejection(daemon: &Daemon, session_id: Uuid, reason: &str) {
     let in_memory = daemon.sessions.lock().await.contains_key(&session_id);
+    let mut payload = json!({"reason": reason});
+    if let Some(group) = config_parse_group(reason) {
+        payload["group"] = Value::String(group.to_owned());
+    }
     if in_memory {
-        let _ = journal_session_notice(
-            daemon,
-            session_id,
-            "codex_extensions_rejected",
-            json!({"reason": reason}),
-        )
-        .await;
+        let _ =
+            journal_session_notice(daemon, session_id, "codex_extensions_rejected", payload).await;
         return;
     }
-    let _ = append_unscoped_event(
-        daemon,
-        "codex_extensions_rejected",
-        json!({"reason": reason, "session_snapshot": Value::Null}),
-    )
-    .await;
+    payload["session_snapshot"] = Value::Null;
+    let _ = append_unscoped_event(daemon, "codex_extensions_rejected", payload).await;
+}
+
+/// Group suffix of an invalid `config/read`. Names only: `features`, `extensions.hooks`.
+fn config_parse_group(reason: &str) -> Option<&str> {
+    let group = reason.strip_prefix("config/read response is invalid: ")?;
+    let named = !group.is_empty()
+        && group.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '.'
+        });
+    named.then_some(group)
 }
 
 async fn append_unscoped_event(daemon: &Daemon, kind: &str, payload: Value) -> Result<(), String> {

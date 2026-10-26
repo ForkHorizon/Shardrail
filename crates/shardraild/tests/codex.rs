@@ -533,8 +533,30 @@ fn codex_config_drift_fails_closed_before_turn_start() {
 #[test]
 fn codex_config_read_failure_before_turn_fails_closed() {
     assert_config_read_stopped("config-read-turn-error", "config/read failed");
-    assert_config_read_stopped("config-read-turn-bad", "config/read response is invalid");
+    assert_config_read_stopped(
+        "config-read-turn-bad",
+        "config/read response is invalid: mcp_servers",
+    );
     assert_config_read_stopped("config-read-turn-timeout", "config/read timed out");
+}
+
+#[test]
+fn codex_invalid_config_read_names_the_group() {
+    let dirs = codex_dirs();
+    assert_extension_rejected(
+        &dirs,
+        "config-read-start-bad",
+        "config/read response is invalid: features",
+    );
+    let rendered = journal_events(dirs.data.path())
+        .iter()
+        .map(|event| event.payload.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !rendered.contains("not-a-bool"),
+        "invalid feature value was journaled: {rendered}"
+    );
 }
 
 #[test]
@@ -1918,6 +1940,14 @@ fn assert_config_secrets_absent(dirs: &CodexDirs) {
             !text.contains("/tmp/hook.js"),
             "{name} stored a hook command"
         );
+        assert!(
+            !text.contains("trusted_hash"),
+            "{name} stored a hook content hash"
+        );
+        assert!(
+            !text.contains("fixture-hook-hash"),
+            "{name} stored a hook content hash"
+        );
     }
 }
 
@@ -2021,6 +2051,10 @@ fn assert_config_read_stopped(mode: &str, needle: &str) {
     let pre_turn = config_snapshot(&events, "pre-turn");
     assert_eq!(pre_turn["matched"], false, "{mode} {pre_turn}");
     assert!(pre_turn["hash"].is_null(), "{mode} {pre_turn}");
+    if let Some(group) = needle.strip_prefix("config/read response is invalid: ") {
+        assert_eq!(pre_turn["group"], group, "{mode} {pre_turn}");
+        assert!(!pre_turn.to_string().contains("not-a-bool"));
+    }
     send_command(
         &mut stream,
         "turn.start",
@@ -2087,6 +2121,9 @@ fn expect_extension_rejection(dirs: &CodexDirs, reason: &str) {
         .expect("rejection was not journaled");
     assert_eq!(event.session_id, Uuid::nil());
     assert_eq!(event.payload["reason"], reason);
+    if let Some(group) = reason.strip_prefix("config/read response is invalid: ") {
+        assert_eq!(event.payload["group"], group);
+    }
     assert!(event.payload["session_snapshot"].is_null());
     let rendered = event.payload.to_string();
     assert!(!rendered.contains("/.codex/"));
