@@ -86,19 +86,69 @@ test('a browser with session.create can start a session and send a prompt', asyn
   await expect(page.locator('[data-check=sandbox]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=bypass]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=routing]')).toHaveAttribute('data-status', 'verified');
-  await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'not verified');
-  await expect(page.locator('[data-check=config]')).toContainText('hash');
+  await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=config]')).toContainText(/config snapshot (session-start|pre-turn) sha256:[0-9a-f]{64}/);
+  await expect(page.locator('[data-check=config]')).toContainText('Last checked');
   await expect(page.locator('[data-check=widening]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=mcp]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=mcp]')).toContainText('MCP servers disabled');
   await expect(page.locator('[data-check=mcp]')).toContainText('zero MCP');
-  for (const id of ['config', 'containment', 'credentials', 'writes', 'identity', 'boundary', 'gaps']) {
+  for (const id of ['containment', 'credentials', 'writes', 'identity', 'boundary', 'gaps']) {
     await expect(page.locator(`[data-check=${id}]`)).toHaveAttribute('data-status', 'not verified');
-    await expect(page.locator(`[data-check=${id}]`)).toContainText(/hash|process group|SSH_AUTH_SOCK|workspace-write|socket|journal|read-only/);
+    await expect(page.locator(`[data-check=${id}]`)).toContainText(/process group|SSH_AUTH_SOCK|workspace-write|socket|journal|read-only/);
   }
   await expect(page.locator('.host-banner')).toContainText('approvals not protected');
-  await expect(page.locator('.host-banner')).toContainText('config, containment, credentials, writes, identity, boundary, gaps not verified');
+  await expect(page.locator('.host-banner')).toContainText('containment, credentials, writes, identity, boundary, gaps not verified');
   await expect(page.locator('.host-banner')).not.toContainText('session checks verified');
+});
+
+test('config drift fails the row and blocks the prompt', async ({ page }) => {
+  test.setTimeout(60_000);
+  const driftData = await mkdtemp(`${tmpdir()}/shardrail-new-session-drift-`);
+  const driftWork = await mkdtemp(`${tmpdir()}/shardrail-new-session-drift-work-`);
+  const drift = spawn(binary, [
+    '--data-dir', driftData,
+    '--no-file-log',
+    '--codex-app-server', fakeCodex,
+    '--session-workdir', driftWork,
+    '--browser-listen', '127.0.0.1:0',
+    '--browser-assets-dir', assets,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, SHARDRAIL_CODEX_FAKE_MODE: 'config-drift-policy' } });
+  let stderr = '';
+  try {
+    const url = await new Promise<string>((resolveUrl, reject) => {
+      const timer = setTimeout(() => reject(new Error(`daemon did not listen: ${stderr}`)), 10_000);
+      drift.stderr?.setEncoding('utf8');
+      drift.stderr?.on('data', (chunk: string) => {
+        stderr += chunk;
+        const port = stderr.match(/browser WebSocket listening at ws:\/\/127\.0\.0\.1:(\d+)\/ws/)?.[1];
+        if (port) { clearTimeout(timer); resolveUrl(`http://127.0.0.1:${port}/`); }
+      });
+      drift.once('exit', (code) => { clearTimeout(timer); reject(new Error(`daemon exited ${code}: ${stderr}`)); });
+    });
+    await pair(page, true, driftData, url);
+    await page.getByRole('button', { name: 'New session' }).click();
+    const option = page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ });
+    await expect(option).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'verified');
+    await page.locator('#session-prompt').fill('hi');
+    await page.getByRole('button', { name: 'Send prompt' }).click();
+    await expect(page.locator('.prompt').getByRole('alert')).toContainText('config drifted: approval_policy', { timeout: 15_000 });
+    await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'failed');
+    await expect(page.locator('.host-banner')).toContainText('approvals not protected');
+    await expect(page.locator('.host-banner')).toContainText('config failed');
+    await expect(page.getByRole('button', { name: 'Deny' })).toHaveCount(0);
+  } finally {
+    if (drift.exitCode === null) {
+      drift.kill('SIGTERM');
+      await new Promise<void>((resolveDone) => {
+        const timer = setTimeout(() => { drift.kill('SIGKILL'); resolveDone(); }, 2000);
+        drift.once('exit', () => { clearTimeout(timer); resolveDone(); });
+      });
+    }
+    await rm(driftData, { recursive: true, force: true });
+    await rm(driftWork, { recursive: true, force: true });
+  }
 });
 
 test('a failed sandbox echo shows failed and blocks the next prompt', async ({ page }) => {

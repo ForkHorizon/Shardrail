@@ -185,6 +185,40 @@ test('checklist rows follow the latest daemon evidence and a missing row stays n
   assert.match(hostBanner(other, true), /^approvals not protected\. Sandbox, approval routing/);
 });
 
+test('a config snapshot shows its source and a later drift fails the row', () => {
+  const hash = 'ab'.repeat(32);
+  const verified = checkEvent(
+    20,
+    'config',
+    'verified',
+    `config snapshot session-start sha256:${hash}`,
+    `SHA-256 ${hash}. Snapshot point session-start.`,
+    1_700_000_000_300,
+  );
+  const config = sessionChecks([verified], 'session-a').find((item) => item.id === 'config');
+  assert.equal(config?.status, 'verified');
+  assert.match(config?.source ?? '', /^config snapshot session-start sha256:[0-9a-f]{64}$/);
+  assert.match(config?.detail ?? '', new RegExp(hash));
+  assert.equal(config?.lastChecked, '2023-11-14T22:13:20.300Z');
+  const drifted = checkEvent(
+    21,
+    'config',
+    'failed',
+    `config snapshot pre-turn sha256:${hash}`,
+    'config drifted: approval_policy',
+    1_700_000_000_400,
+  );
+  const row = sessionChecks([verified, drifted], 'session-a').find((item) => item.id === 'config');
+  assert.equal(row?.status, 'failed');
+  assert.equal(row?.detail, 'config drifted: approval_policy');
+  assert.equal(row?.lastChecked, '2023-11-14T22:13:20.400Z');
+  const sandbox = checkEvent(19, 'sandbox', 'verified', 'thread/start sandbox echo', 'workspace-write', 1_700_000_000_200);
+  const banner = hostBanner(sessionChecks([sandbox, verified, drifted], 'session-a'), true);
+  assert.match(banner, /^approvals not protected\./);
+  assert.match(banner, /config failed/);
+  assert.doesNotMatch(banner, /\d+ of \d+/);
+});
+
 test('an approval card keeps the echoed binding and ignores a redacted hash', () => {
   const hash = 'ab'.repeat(32);
   const cards = approvalsForSession([
