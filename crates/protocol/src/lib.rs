@@ -72,6 +72,12 @@ pub struct ApprovalResponding {
     pub responded_at_ms: i64,
     pub option_class: OptionClass,
     pub client_scope: ClientScope,
+    /// SHA-256 of the canonical approval content. Empty only for records written before binding.
+    #[serde(default)]
+    pub content_hash: String,
+    /// Label of the client that decided, or `daemon` for a timeout.
+    #[serde(default)]
+    pub client_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -89,6 +95,8 @@ pub struct ContractSchema {
     pub daemon_frame: DaemonFrame,
     pub session_create_request: SessionCreateRequest,
     pub session_create_audit: SessionCreateAudit,
+    pub approval_binding: ApprovalBinding,
+    pub session_check_result: SessionCheckResult,
 }
 
 /// First frame on a client connection; authentication completes before streaming.
@@ -116,11 +124,44 @@ pub struct ServerHello {
     pub resync_required: bool,
 }
 
+/// Echo of the pending approval. The daemon rejects any field that does not match.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ApprovalBinding {
+    pub approval_id: Uuid,
+    pub session_id: Uuid,
+    pub turn_id: String,
+    pub provider_request_id: String,
+    pub content_hash: String,
+    pub journal_epoch: Uuid,
+}
+
+/// One per-session checklist row journaled by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCheckStatus {
+    Verified,
+    Failed,
+    NotVerified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SessionCheckResult {
+    pub item_id: String,
+    pub status: SessionCheckStatus,
+    pub source: String,
+    pub checked_at_ms: i64,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalResolutionRequest {
     pub approval_id: Uuid,
     pub option_id: String,
+    pub content_hash: String,
+    pub session_id: Uuid,
+    pub turn_id: String,
+    pub provider_request_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

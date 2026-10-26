@@ -36,14 +36,23 @@ export type ApprovalCard = {
   agentDescription: string;
   allowOnceOptionId: string | null;
   denyOnceOptionId: string | null;
+  binding: ApprovalBindingEcho | null;
+};
+
+export type ApprovalBindingEcho = {
+  sessionId: string;
+  turnId: string;
+  providerRequestId: string;
+  contentHash: string;
 };
 
 export type VerificationCheck = {
   id: string;
   label: string;
-  status: 'verified' | 'not verified' | 'failed' | 'n/a';
+  status: 'verified' | 'not verified' | 'failed';
   source: string;
-  lastChecked: null;
+  detail: string;
+  lastChecked: string | null;
 };
 
 export type TranscriptItem = {
@@ -65,22 +74,68 @@ export type ApprovalFlightAction =
   | { type: 'resolved'; approvalId: string }
   | { type: 'journal'; kind: string; approvalId: string | null };
 
-const NOT_CHECKED = 'not checked in this browser build';
-
-export const VERIFICATION_CHECKS: readonly VerificationCheck[] = [
-  { id: 'sandbox', label: 'Sandbox profile applied', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'bypass', label: 'Bypass / yolo modes off', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'routing', label: 'Approval routing pinned to Shardrail', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'config', label: 'Provider approval config unchanged', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'widening', label: 'No unacknowledged permission-widening mode change', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'containment', label: 'Process containment active', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'credentials', label: 'Agent credential sockets dropped', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'writes', label: 'Writes confined to writable roots', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'identity', label: 'Shardrail socket and identity unreachable', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'mcp', label: 'MCP servers inside the sandbox', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'boundary', label: 'No boundary-breaking approval allowed on this host', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
-  { id: 'gaps', label: 'Known provider gaps', status: 'not verified', source: NOT_CHECKED, lastChecked: null },
+const NO_DAEMON_EVIDENCE = 'no daemon evidence';
+const CHECK_DEFS: readonly { id: string; label: string }[] = [
+  { id: 'sandbox', label: 'Sandbox profile applied' },
+  { id: 'bypass', label: 'Bypass / yolo modes off' },
+  { id: 'routing', label: 'Approval routing pinned to Shardrail' },
+  { id: 'config', label: 'Provider approval config unchanged' },
+  { id: 'widening', label: 'No unacknowledged permission-widening mode change' },
+  { id: 'containment', label: 'Process containment active' },
+  { id: 'credentials', label: 'Agent credential sockets dropped' },
+  { id: 'writes', label: 'Writes confined to writable roots' },
+  { id: 'identity', label: 'Shardrail socket and identity unreachable' },
+  { id: 'mcp', label: 'MCP servers disabled' },
+  { id: 'boundary', label: 'No boundary-breaking approval allowed on this host' },
+  { id: 'gaps', label: 'Known provider gaps' },
 ];
+const BINDING_CHECK_IDS = ['sandbox', 'bypass', 'routing'] as const;
+const UNVERIFIED_BANNER = 'approvals not protected. Sandbox, approval routing, containment, and the other session checks are not verified.';
+
+export function sessionChecks(events: readonly JournalEvent[], sessionId: string): VerificationCheck[] {
+  const latest = new Map<string, { status: string; source: string; detail: string; checkedAt: number }>();
+  for (const event of events) {
+    if (event.sessionId !== sessionId || event.kind !== 'session_check_result') continue;
+    const payload = asRecord(event.payload);
+    const itemId = typeof payload?.item_id === 'string' ? payload.item_id : '';
+    if (!itemId) continue;
+    const checkedAt = typeof payload?.checked_at_ms === 'number' && Number.isFinite(payload.checked_at_ms) ? payload.checked_at_ms : 0;
+    latest.set(itemId, {
+      status: typeof payload?.status === 'string' ? payload.status : '',
+      source: typeof payload?.source === 'string' ? payload.source : '',
+      detail: typeof payload?.detail === 'string' ? payload.detail : '',
+      checkedAt,
+    });
+  }
+  return CHECK_DEFS.map((item) => {
+    const evidence = latest.get(item.id);
+    if (!evidence || evidence.source.length === 0) {
+      return { id: item.id, label: item.label, status: 'not verified' as const, source: NO_DAEMON_EVIDENCE, detail: 'The daemon has not journaled this check.', lastChecked: null };
+    }
+    const status = evidence.status === 'verified' ? 'verified' as const : evidence.status === 'failed' ? 'failed' as const : 'not verified' as const;
+    const lastChecked = activityTimestamp(evidence.checkedAt);
+    if (status === 'verified' && lastChecked === null) {
+      return { id: item.id, label: item.label, status: 'not verified' as const, source: evidence.source, detail: evidence.detail, lastChecked: null };
+    }
+    return { id: item.id, label: item.label, status, source: evidence.source, detail: evidence.detail, lastChecked };
+  });
+}
+
+export const VERIFICATION_CHECKS: readonly VerificationCheck[] = sessionChecks([], '');
+
+export function hostBanner(checks: readonly VerificationCheck[], sessionSelected: boolean) {
+  if (!sessionSelected) return 'approvals not protected. No session is selected.';
+  const verified = checks.filter((item) => item.status === 'verified');
+  if (verified.length === 0) return UNVERIFIED_BANNER;
+  const failed = checks.filter((item) => item.status === 'failed').map((item) => item.id);
+  const open = checks.filter((item) => item.status === 'not verified').map((item) => item.id);
+  const parts = [`${verified.length} of ${checks.length} session checks verified`];
+  if (failed.length > 0) parts.push(`${failed.join(', ')} failed`);
+  if (open.length > 0) parts.push(`${open.join(', ')} not verified`);
+  const summary = `${parts.join('; ')}.`;
+  const bindingVerified = BINDING_CHECK_IDS.every((id) => checks.find((item) => item.id === id)?.status === 'verified');
+  return bindingVerified ? summary : `approvals not protected. ${summary}`;
+}
 
 const TERMINAL_APPROVAL_STATES = new Set(['allowed', 'denied', 'expired', 'withdrawn', 'delivered_unconfirmed']);
 const CONFIRMED_APPROVAL_KINDS = new Set([
@@ -295,6 +350,7 @@ function collectApprovals(events: readonly JournalEvent[], ids: ReadonlySet<stri
         agentDescription: typeof description?.description === 'string' ? description.description : '',
         allowOnceOptionId: onceOption(options, 'allow'),
         denyOnceOptionId: onceOption(options, 'deny'),
+        binding: approvalBinding(payload),
       });
       continue;
     }
@@ -312,6 +368,7 @@ function collectApprovals(events: readonly JournalEvent[], ids: ReadonlySet<stri
       agentDescription: '',
       allowOnceOptionId: null,
       denyOnceOptionId: null,
+      binding: approvalBinding(payload),
     };
     if (!TERMINAL_APPROVAL_STATES.has(card.state)) card.state = nextState;
     if (typeof payload?.decision === 'string') card.decision = payload.decision;
@@ -330,6 +387,16 @@ function formatStatus(lifecycle: string, turn: string | null, process: string | 
   if (turn) parts.push(turn.toLowerCase());
   if (process) parts.push(process.toLowerCase());
   return parts.join(' · ');
+}
+
+function approvalBinding(payload: Record<string, unknown> | null): ApprovalBindingEcho | null {
+  const binding = asRecord(payload?.binding);
+  const sessionId = textValue(binding?.session_id);
+  const turnId = textValue(binding?.turn_id);
+  const providerRequestId = textValue(binding?.provider_request_id);
+  const contentHash = textValue(binding?.content_hash);
+  if (!sessionId || !turnId || !providerRequestId || !contentHash || !/^[0-9a-fA-F]{64}$/.test(contentHash)) return null;
+  return { sessionId, turnId, providerRequestId, contentHash };
 }
 
 function onceOption(options: unknown[], decision: 'allow' | 'deny') {

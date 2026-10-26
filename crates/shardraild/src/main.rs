@@ -10,7 +10,9 @@ use shardrail_coordinator::{
     Coordinator, DaemonDataDir, open_private_data_directory, pin_data_directory,
 };
 use shardrail_journal::Journal;
-use shardrail_protocol::{ApprovalDecision, ApprovalResolutionRequest, DurableEvent, OptionClass};
+use shardrail_protocol::{
+    ApprovalBinding, ApprovalDecision, ApprovalResolutionRequest, DurableEvent, OptionClass,
+};
 use shardrail_protocol::{ClientFrame, ClientHello, ClientScope, DaemonFrame, ServerHello};
 use shardrail_protocol::{CommandRequest, SessionCreateAudit};
 use shardrail_session_core::{Approval, Session};
@@ -36,8 +38,10 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use uuid::Uuid;
 
+mod approval_binding;
 mod codex_app_server;
 mod daemon_log;
+mod session_checks;
 mod session_workdir;
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -103,29 +107,109 @@ async fn resolve_approval(
     client: &AuthorizedClient,
     request: ApprovalResolutionRequest,
 ) -> Result<(), String> {
+    let current_epoch = {
+        let journal = daemon.journal.lock().await;
+        journal.journal_epoch().map_err(|error| error.to_string())?
+    };
+    let snapshot = {
+        let approvals = daemon.approvals.lock().await;
+        approvals.get(&request.approval_id).map(|entry| {
+            (
+                entry.session_id,
+                entry.binding.clone(),
+                entry.approval.state.clone(),
+                entry.provider.is_some(),
+                entry.options.clone(),
+            )
+        })
+    };
+    let Some((session_id, binding, state, has_provider, options)) = snapshot else {
+        let reason = missing_approval_reason(daemon, request.approval_id).await?;
+        return reject_decision(daemon, client, &request, request.session_id, reason).await;
+    };
+    if !has_provider || state != shardrail_protocol::ApprovalState::Pending {
+        let reason = if has_provider {
+            "already_decided"
+        } else {
+            "unavailable"
+        };
+        return reject_decision(daemon, client, &request, session_id, reason).await;
+    }
+    let class = options
+        .iter()
+        .find(|option| option.id == request.option_id)
+        .map(|option| option.class);
+    if let Some(reason) = approval_binding::decision_rejection(
+        client.allow_approvals,
+        client.scope,
+        &request.option_id,
+        class,
+    ) {
+        return reject_decision(daemon, client, &request, session_id, reason).await;
+    }
+    let current_turn = daemon.session_turns.lock().await.get(&session_id).cloned();
+    if let Some(reason) = approval_binding::binding_mismatch(
+        &binding,
+        request.session_id,
+        &request.turn_id,
+        &request.provider_request_id,
+        &request.content_hash,
+        current_epoch,
+        current_turn.as_deref(),
+    ) {
+        return reject_decision(daemon, client, &request, session_id, reason).await;
+    }
+
     let mut approvals = daemon.approvals.lock().await;
-    let entry = approvals
-        .get_mut(&request.approval_id)
-        .ok_or_else(|| "approval is already resolved or unavailable".to_owned())?;
+    let Some(entry) = approvals.get_mut(&request.approval_id) else {
+        drop(approvals);
+        let reason = missing_approval_reason(daemon, request.approval_id).await?;
+        return reject_decision(daemon, client, &request, request.session_id, reason).await;
+    };
     if entry.provider.is_none()
         || entry.approval.state != shardrail_protocol::ApprovalState::Pending
     {
-        return Err("approval is already resolved".into());
+        drop(approvals);
+        return reject_decision(daemon, client, &request, session_id, "already_decided").await;
     }
-    let option = entry
+    let Some(option) = entry
         .options
         .iter()
         .find(|option| option.id == request.option_id)
         .cloned()
-        .ok_or_else(|| "option is not offered for this approval".to_owned())?;
-    if client.scope == ClientScope::Limited && option.class != OptionClass::Once {
-        return Err("limited clients cannot choose widening or boundary-breaking options".into());
+    else {
+        drop(approvals);
+        return reject_decision(daemon, client, &request, session_id, "option_not_offered").await;
+    };
+    if let Some(reason) = approval_binding::decision_rejection(
+        client.allow_approvals,
+        client.scope,
+        &request.option_id,
+        Some(option.class),
+    ) {
+        drop(approvals);
+        return reject_decision(daemon, client, &request, session_id, reason).await;
+    }
+    if let Some(reason) = approval_binding::binding_mismatch(
+        &entry.binding,
+        request.session_id,
+        &request.turn_id,
+        &request.provider_request_id,
+        &request.content_hash,
+        current_epoch,
+        current_turn.as_deref(),
+    ) {
+        drop(approvals);
+        return reject_decision(daemon, client, &request, session_id, reason).await;
     }
     let sender = entry
         .provider
         .as_ref()
         .cloned()
         .ok_or_else(|| "approval is already resolved".to_owned())?;
+    entry.approval.content_hash = entry.binding.content_hash.clone();
+    entry.approval.client_label = sanitize_label(&client.label);
+    let content_hash = entry.approval.content_hash.clone();
     let coordinator = daemon
         .sessions
         .lock()
@@ -135,6 +219,8 @@ async fn resolve_approval(
         .ok_or_else(|| "session coordinator unavailable".to_owned())?;
     let mut coordinator = coordinator.lock().await;
     let write_delay = Duration::from_millis(daemon.test_write_ahead_delay_ms);
+    let approval_id = request.approval_id;
+    let option_id = option.id.clone();
     let result = coordinator.respond_approval(
         &mut entry.approval,
         shardrail_coordinator::ApprovalResponseRequest {
@@ -151,7 +237,7 @@ async fn resolve_approval(
             let (written, result) = std::sync::mpsc::sync_channel(1);
             sender
                 .send(ProviderCommand {
-                    approval_id: request.approval_id,
+                    approval_id,
                     option_id: option_id.map(str::to_owned),
                     written,
                     delay: write_delay,
@@ -170,15 +256,121 @@ async fn resolve_approval(
             return Err("approval is already resolved".into());
         }
         if let Some(provider) = entry.provider.take() {
-            let _ = provider.send(ProviderCommand::cancel(request.approval_id));
+            let _ = provider.send(ProviderCommand::cancel(approval_id));
         }
         return Err(error.to_string());
     }
     if let Some(task) = entry.timeout_task.take() {
         task.abort();
     }
-    approvals.remove(&request.approval_id);
+    approvals.remove(&approval_id);
+    drop(approvals);
+    drop(coordinator);
+    daemon_log::log(
+        "INFO",
+        "approval",
+        &format!(
+            "approval decided approval_id={approval_id} session_id={session_id} client_id={} client_label={} scope={:?} option_id={} content_hash={content_hash}",
+            client.client_id,
+            sanitize_label(&client.label),
+            client.scope,
+            option_id
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(40)
+                .collect::<String>(),
+        ),
+    );
     Ok(())
+}
+
+async fn missing_approval_reason(
+    daemon: &Daemon,
+    approval_id: Uuid,
+) -> Result<&'static str, String> {
+    let disposition = {
+        let journal = daemon.journal.lock().await;
+        journal
+            .approval_disposition(approval_id)
+            .map_err(|error| error.to_string())?
+    };
+    Ok(match disposition {
+        Some((state, _)) if state == "expired" => "expired",
+        Some((state, reason)) if state == "withdrawn" => match reason.as_deref() {
+            Some("turn_end") => "stale_turn",
+            _ => "abandoned",
+        },
+        Some((state, _))
+            if matches!(
+                state.as_str(),
+                "allowed" | "denied" | "responding" | "responded_unacked" | "delivered_unconfirmed"
+            ) =>
+        {
+            "already_decided"
+        }
+        Some(_) => "unavailable",
+        None => "unknown_approval",
+    })
+}
+
+async fn reject_decision(
+    daemon: &Daemon,
+    client: &AuthorizedClient,
+    request: &ApprovalResolutionRequest,
+    session_id: Uuid,
+    reason: &str,
+) -> Result<(), String> {
+    let label = sanitize_label(&client.label);
+    let option_id: String = request
+        .option_id
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(40)
+        .collect();
+    let payload = json!({
+        "approval_id": request.approval_id,
+        "session_id": session_id,
+        "turn_id": request.turn_id,
+        "provider_request_id": request.provider_request_id,
+        "content_hash": request.content_hash,
+        "reason": reason,
+        "client_id": client.client_id,
+        "client_label": label,
+        "client_scope": client.scope,
+        "option_id": option_id,
+    });
+    {
+        let mut journal = daemon.journal.lock().await;
+        journal
+            .record_approval_rejection(request.approval_id, session_id, wall_clock_ms(), &payload)
+            .map_err(|_| "approval rejection could not be journaled".to_owned())?;
+    }
+    daemon
+        .event_generation
+        .send_modify(|generation| *generation += 1);
+    let hash: String = request
+        .content_hash
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .take(64)
+        .collect();
+    daemon_log::log(
+        "WARN",
+        "approval",
+        &format!(
+            "approval rejected approval_id={} session_id={session_id} client_id={} client_label={label} scope={:?} option_id={option_id} reason={reason} content_hash={hash}",
+            request.approval_id, client.client_id, client.scope,
+        ),
+    );
+    Err(approval_binding::rejection_message(reason))
+}
+
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect()
 }
 
 async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
@@ -218,6 +410,7 @@ async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
         }
     }
     drop(approvals);
+    daemon.session_turns.lock().await.remove(&session_id);
     // Chunk wakes can run before approval acknowledgement and process exit.
     daemon
         .event_generation
@@ -277,6 +470,15 @@ async fn run_fake_acp_inner(
         )
         .map_err(io::Error::other)?;
     drop(coordinator);
+    let turn_id = Uuid::now_v7().to_string();
+    daemon
+        .session_turns
+        .lock()
+        .await
+        .insert(session_id, turn_id.clone());
+    session_checks::journal_checks(&daemon, session_id, &session_checks::fake_acp_checks())
+        .await
+        .map_err(io::Error::other)?;
     send_agent_request(&mut input, 1, "initialize", json!({"protocolVersion":1})).await?;
     let _ = read_agent_line(&mut output).await?;
     send_agent_request(&mut input, 2, "session/new", json!({"cwd":"/tmp"})).await?;
@@ -381,16 +583,58 @@ async fn run_fake_acp_inner(
         .as_str()
         .unwrap_or("unknown")
         .to_owned();
+    let disclosed = disclosed_action(params);
+    let argv = disclosed
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let cwd = disclosed
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let content = approval_binding::ApprovalContent {
+        kind: kind.clone(),
+        argv,
+        cwd,
+        paths: Vec::new(),
+        diff: String::new(),
+        reason: params["reason"].as_str().unwrap_or("").to_owned(),
+    };
+    let content_hash = approval_binding::content_hash(&content);
+    let binding = ApprovalBinding {
+        approval_id,
+        session_id,
+        turn_id: turn_id.clone(),
+        provider_request_id: approval_binding::provider_request_id(&permission["id"]),
+        content_hash: content_hash.clone(),
+        journal_epoch,
+    };
+    approval.content_hash = content_hash.clone();
     let mut details = json!({
         "approval_id": approval_id,
         "approval_kind": kind,
         "tool_call_id": params["toolCall"]["toolCallId"],
         "options": options.iter().zip(provider_options.iter()).map(|(raw, option)| json!({"option_id":option.id,"name":raw["name"],"decision":option.decision,"class":option.class})).collect::<Vec<_>>(),
         "agent_description": {"title":params["toolCall"]["title"],"description":params["description"],"reason":params["reason"]},
+        "binding": binding.clone(),
     });
     if let Some(object) = details.as_object_mut() {
-        object.extend(disclosed_action(params));
+        object.extend(disclosed);
     }
+    daemon_log::log(
+        "INFO",
+        "approval",
+        &format!(
+            "approval requested approval_id={approval_id} session_id={session_id} turn_id={turn_id} content_hash={content_hash}"
+        ),
+    );
     daemon
         .journal
         .lock()
@@ -417,6 +661,7 @@ async fn run_fake_acp_inner(
         DaemonApproval {
             session_id,
             approval,
+            binding,
             options: provider_options,
             provider: Some(provider_tx),
             timeout_task: None,
@@ -561,6 +806,11 @@ async fn expire_approval(daemon: &Daemon, approval_id: Uuid) {
     match response {
         Ok(()) => {
             approvals.remove(&approval_id);
+            daemon_log::log(
+                "INFO",
+                "approval",
+                &format!("approval expired approval_id={approval_id}"),
+            );
         }
         Err(_error) => {
             if let Some(provider) = entry.provider.take() {
@@ -785,6 +1035,13 @@ struct AuthorizedClient {
     scope: ClientScope,
     #[serde(default)]
     allow_session_create: bool,
+    /// False for an observer. Missing on older client files, which may still decide.
+    #[serde(default = "default_allow_approvals")]
+    allow_approvals: bool,
+}
+
+fn default_allow_approvals() -> bool {
+    true
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -827,11 +1084,14 @@ pub(crate) struct Daemon {
     pub(crate) codex_status: Mutex<HashMap<Uuid, codex_app_server::CodexStatus>>,
     pub(crate) turn_commands:
         Mutex<HashMap<Uuid, mpsc::UnboundedSender<codex_app_server::SessionCommand>>>,
+    /// Provider turn id of the turn that is open for each session.
+    pub(crate) session_turns: Mutex<HashMap<Uuid, String>>,
 }
 
 pub(crate) struct DaemonApproval {
     pub(crate) session_id: Uuid,
     pub(crate) approval: Approval,
+    pub(crate) binding: ApprovalBinding,
     pub(crate) options: Vec<ProviderOption>,
     pub(crate) provider: Option<mpsc::UnboundedSender<ProviderCommand>>,
     pub(crate) timeout_task: Option<tokio::task::AbortHandle>,
@@ -974,7 +1234,7 @@ async fn run(
     let epoch = journal.journal_epoch()?;
     let host_id = journal.host_id()?;
     let host_key = load_or_create_signing_key(&path.join("host.key"))?;
-    Coordinator::recover_journal(&mut journal)?;
+    let abandoned = Coordinator::recover_journal(&mut journal)?;
     let socket = path.join("shardraild.sock");
     let listener = bind_private_socket(&socket)?;
     let browser_listener = if let Some(address) = browser.address {
@@ -1000,9 +1260,15 @@ async fn run(
         session_workdirs: session_workdirs.clone(),
         codex_status: Mutex::new(HashMap::new()),
         turn_commands: Mutex::new(HashMap::new()),
+        session_turns: Mutex::new(HashMap::new()),
     });
     codex_app_server::install_shutdown_kill();
     daemon_log::log("INFO", "daemon", &startup_message(&socket, host_id, epoch));
+    daemon_log::log(
+        "INFO",
+        "approval",
+        &format!("startup abandoned {abandoned} pending approvals"),
+    );
     daemon_log::log(
         "INFO",
         "daemon",
@@ -1693,6 +1959,7 @@ fn manage_clients(path: &Path, command: ClientCommand) -> io::Result<()> {
                 label,
                 scope: client_scope,
                 allow_session_create: client_scope == ClientScope::Full,
+                allow_approvals: true,
             });
             save_authorized_clients(path, &entries).map_err(|error| {
                 io::Error::new(error.kind(), format!("save client registry: {error}"))
@@ -1828,6 +2095,7 @@ fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serd
         label: enrollment.label,
         scope: ClientScope::Limited,
         allow_session_create: enrollment.allow_session_create,
+        allow_approvals: true,
     });
     save_authorized_clients(path, &clients)?;
     let host_key = load_or_create_signing_key(&path.join("host.key"))?;
@@ -3264,6 +3532,7 @@ mod tests {
         )
         .unwrap();
         assert!(!old_client.allow_session_create);
+        assert!(old_client.allow_approvals);
         let old_enrollment: Enrollment = serde_json::from_str(
             r#"{"code_hash":"ab","expires_at_ms":1,"failed_attempts":0,"label":"browser"}"#,
         )
@@ -3387,7 +3656,11 @@ mod protocol_property_tests {
                 } },
                 2 => ClientFrame::ApprovalResolution { request: ApprovalResolutionRequest {
                     approval_id: id,
-                    option_id: text,
+                    option_id: text.clone(),
+                    content_hash: text,
+                    session_id: id,
+                    turn_id: cursor.to_string(),
+                    provider_request_id: cursor.to_string(),
                 } },
                 _ => ClientFrame::Resume { resume_after: cursor },
             };

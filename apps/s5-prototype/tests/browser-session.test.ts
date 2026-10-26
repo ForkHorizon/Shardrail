@@ -58,7 +58,7 @@ test('reconnect delay backs off and the status labels stay explicit', () => {
 test('resumes from the last cursor without replaying events or sending an approval while down', async () => {
   const statuses: ConnectionPhase[] = [];
   const delivered: JournalEvent[] = [];
-  const sent: { approval_id: string; option_id: string }[] = [];
+  const sent: { approval_id: string; option_id: string; content_hash: string; session_id: string; turn_id: string; provider_request_id: string }[] = [];
   const cursors: Array<number | undefined> = [];
   const timers: { delay: number; run: () => void }[] = [];
   let online = true;
@@ -95,7 +95,9 @@ test('resumes from the last cursor without replaying events or sending an approv
   assert.deepEqual(delivered.map((event) => event.cursor), [1, 2, 4, 3]);
   assert.equal(saved?.cursor, 4);
   assert.deepEqual(statuses, ['connecting', 'connected', 'reconnecting']);
-  assert.equal(session.resolveApproval('approval-1', 'allow_once'), 'blocked');
+  const binding = { sessionId: 'session-a', turnId: 'turn-1', providerRequestId: 'permission-1', contentHash: 'ab'.repeat(32) };
+  assert.equal(session.resolveApproval('approval-1', 'allow_once', null), 'blocked');
+  assert.equal(session.resolveApproval('approval-1', 'allow_once', binding), 'blocked');
   assert.deepEqual(sent, []);
   assert.equal(timers.length, 1);
   assert.equal(timers[0]?.delay, 200);
@@ -104,13 +106,14 @@ test('resumes from the last cursor without replaying events or sending an approv
   assert.deepEqual(cursors, [undefined, 4]);
   assert.deepEqual(delivered.map((event) => event.cursor), [1, 2, 4, 3, 5]);
   assert.equal(statuses.at(-1), 'connected');
-  assert.equal(session.resolveApproval('approval-1', 'allow_once'), 'sent');
+  assert.equal(session.resolveApproval('approval-1', 'allow_once', { ...binding, contentHash: 'nope' }), 'blocked');
+  assert.equal(session.resolveApproval('approval-1', 'allow_once', binding), 'sent');
   assert.equal(session.request({ command_id: 'cmd-1', kind: 'turn.interrupt', payload: { session_id: 'session-a' }, expected_state: null, expected_turn_id: null }), 'sent');
-  assert.deepEqual(sent, [{ approval_id: 'approval-1', option_id: 'allow_once' }]);
+  assert.deepEqual(sent, [{ approval_id: 'approval-1', option_id: 'allow_once', content_hash: binding.contentHash, session_id: 'session-a', turn_id: 'turn-1', provider_request_id: 'permission-1' }]);
   online = false;
   session.setOnline(false);
   assert.equal(statuses.at(-1), 'offline');
-  assert.equal(session.resolveApproval('approval-1', 'allow_once'), 'blocked');
+  assert.equal(session.resolveApproval('approval-1', 'allow_once', binding), 'blocked');
   assert.equal(sent.length, 1);
   session.stop();
 });
@@ -223,7 +226,7 @@ interface FakeSocket extends SessionSocket {
   fail(error: Error): void;
 }
 
-function fakeConnect(scripts: Array<(socket: FakeSocket) => void>, cursors: Array<number | undefined>, sent: { approval_id: string; option_id: string }[], epochs: string[] = []) {
+function fakeConnect(scripts: Array<(socket: FakeSocket) => void>, cursors: Array<number | undefined>, sent: { approval_id: string; option_id: string; content_hash: string; session_id: string; turn_id: string; provider_request_id: string }[], epochs: string[] = []) {
   let call = 0;
   return async (options: { cursor?: number }) => {
     cursors.push(options.cursor);
@@ -236,7 +239,7 @@ function fakeConnect(scripts: Array<(socket: FakeSocket) => void>, cursors: Arra
   };
 }
 
-function openSocket(onResolve: (request: { approval_id: string; option_id: string }) => void, epoch = 'epoch-1'): FakeSocket {
+function openSocket(onResolve: (request: { approval_id: string; option_id: string; content_hash: string; session_id: string; turn_id: string; provider_request_id: string }) => void, epoch = 'epoch-1'): FakeSocket {
   const frames = new Set<(frame: DaemonFrame) => void>();
   const errors = new Set<(error: Error) => void>();
   const socket: FakeSocket = {

@@ -3,6 +3,9 @@
   "title": "ContractSchema",
   "type": "object",
   "properties": {
+    "approval_binding": {
+      "$ref": "#/$defs/ApprovalBinding"
+    },
     "approval_response": {
       "$ref": "#/$defs/ApprovalResponding"
     },
@@ -33,6 +36,9 @@
     "server_hello": {
       "$ref": "#/$defs/ServerHello"
     },
+    "session_check_result": {
+      "$ref": "#/$defs/SessionCheckResult"
+    },
     "session_create_audit": {
       "$ref": "#/$defs/SessionCreateAudit"
     },
@@ -56,9 +62,46 @@
     "client_frame",
     "daemon_frame",
     "session_create_request",
-    "session_create_audit"
+    "session_create_audit",
+    "approval_binding",
+    "session_check_result"
   ],
   "$defs": {
+    "ApprovalBinding": {
+      "description": "Echo of the pending approval. The daemon rejects any field that does not match.",
+      "type": "object",
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "content_hash": {
+          "type": "string"
+        },
+        "journal_epoch": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "provider_request_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turn_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_id",
+        "session_id",
+        "turn_id",
+        "provider_request_id",
+        "content_hash",
+        "journal_epoch"
+      ]
+    },
     "ApprovalDecision": {
       "type": "string",
       "enum": [
@@ -74,14 +117,31 @@
           "type": "string",
           "format": "uuid"
         },
+        "content_hash": {
+          "type": "string"
+        },
         "option_id": {
+          "type": "string"
+        },
+        "provider_request_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turn_id": {
           "type": "string"
         }
       },
       "additionalProperties": false,
       "required": [
         "approval_id",
-        "option_id"
+        "option_id",
+        "content_hash",
+        "session_id",
+        "turn_id",
+        "provider_request_id"
       ]
     },
     "ApprovalResponding": {
@@ -91,8 +151,18 @@
           "type": "string",
           "format": "uuid"
         },
+        "client_label": {
+          "description": "Label of the client that decided, or `daemon` for a timeout.",
+          "type": "string",
+          "default": ""
+        },
         "client_scope": {
           "$ref": "#/$defs/ClientScope"
+        },
+        "content_hash": {
+          "description": "SHA-256 of the canonical approval content. Empty only for records written before binding.",
+          "type": "string",
+          "default": ""
         },
         "decision": {
           "$ref": "#/$defs/ApprovalDecision"
@@ -581,6 +651,43 @@
         "scope",
         "cursor",
         "resync_required"
+      ]
+    },
+    "SessionCheckResult": {
+      "type": "object",
+      "properties": {
+        "checked_at_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "item_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SessionCheckStatus"
+        }
+      },
+      "required": [
+        "item_id",
+        "status",
+        "source",
+        "checked_at_ms",
+        "detail"
+      ]
+    },
+    "SessionCheckStatus": {
+      "description": "One per-session checklist row journaled by the daemon.",
+      "type": "string",
+      "enum": [
+        "verified",
+        "failed",
+        "not_verified"
       ]
     },
     "SessionCreateAudit": {

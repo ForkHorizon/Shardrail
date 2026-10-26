@@ -391,6 +391,8 @@ def main():
             continue
         if method == "thread/start":
             reply(message["id"], thread_result(message.get("params") or {}))
+            if MODE == "settings-updated":
+                notify("thread/settings/updated", {"threadId": "thread-1"})
             if MODE == "mcp-startup":
                 notify(
                     "mcpServer/startupStatus/updated",

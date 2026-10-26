@@ -1,13 +1,11 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, ListBox, ListBoxItem } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, promptClearApplies, revealHiddenCharacters, sessionSummaries, transcriptItems, type TranscriptItem } from './session-model';
+import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, hostBanner, promptClearApplies, revealHiddenCharacters, sessionChecks, sessionSummaries, transcriptItems, type ApprovalBindingEcho, type TranscriptItem, type VerificationCheck } from './session-model';
 import { connectionStatusLabel, type ConnectionPhase } from './browser-session';
 import { isNearLiveTail } from './streaming-view';
 import { useSessionJournalEvents } from './store';
 import { UntrustedMarkdown } from './UntrustedMarkdown';
-
-const checklist = checklistSummary();
 
 export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
   phase: ConnectionPhase;
@@ -21,7 +19,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
   createdSessionId: string | null;
   dismissedSessionId: string | null;
   onReconnect: () => void;
-  onResolveApproval: (approvalId: string, optionId: string) => void;
+  onResolveApproval: (approvalId: string, optionId: string, binding: ApprovalBindingEcho) => void;
   onSendPrompt: (sessionId: string, prompt: string) => void;
   onInterrupt: (sessionId: string) => void;
   onCreateSession: (workdir: string) => void;
@@ -48,6 +46,8 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
   const visible = useMemo(() => selected ? eventsForSession(events, selected.id) : [], [events, selected]);
   const items = useMemo(() => transcriptItems(visible), [visible]);
   const approvals = useMemo(() => selected ? approvalsForSession(events, selected.id) : [], [events, selected]);
+  const checks = useMemo(() => sessionChecks(events, selected?.id ?? ''), [events, selected]);
+  const checklist = useMemo(() => checklistSummary(checks), [checks]);
   return <main className="main-screen">
     <header>
       <div><h1>Shardrail</h1><p>Local sessions from the daemon journal</p></div>
@@ -56,7 +56,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
         <Button onPress={onReconnect}>Reconnect</Button>
       </div>
     </header>
-    <p className="host-banner" role="status">approvals not protected. Sandbox, approval routing, containment, and the other session checks are not verified.</p>
+    <p className="host-banner" role="status">{hostBanner(checks, selected !== null)}</p>
     {keyStorage === 'noble-fallback' ? <p role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}
     <div className="workspace">
       <section className="session-column" aria-labelledby="sessions-heading">
@@ -70,13 +70,16 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
           {createError ? <p role="alert">{createError}</p> : null}
         </section> : null}
         {sessions.length === 0 ? <p>No sessions yet.</p> : <ListBox className="session-list" aria-label="Sessions" selectionMode="single" selectedKeys={selected ? [selected.id] : []} onSelectionChange={(keys) => { if (keys === 'all') return; const next = [...keys][0]; setSelectedId(next == null ? null : String(next)); setConfirmingAllowId(null); }}>
-          {sessions.map((session) => <ListBoxItem key={session.id} id={session.id} textValue={`${session.id} ${session.agentKind ?? 'agent unknown'} ${session.status} ${checklist.unverified} not verified`} onFocus={() => { setSelectedId(session.id); setConfirmingAllowId(null); }}>
+          {sessions.map((session) => {
+            const row = checklistSummary(sessionChecks(events, session.id));
+            return <ListBoxItem key={session.id} id={session.id} textValue={`${session.id} ${session.agentKind ?? 'agent unknown'} ${session.status} ${row.unverified} not verified`} onFocus={() => { setSelectedId(session.id); setConfirmingAllowId(null); }}>
             <span className="session-id">{session.id}</span>
             <span>{session.agentKind ?? 'agent unknown'}</span>
             <span>{session.status}</span>
-            <span>{checklist.unverified} checks not verified</span>
+            <span>{row.unverified} checks not verified</span>
             <ActivityTime ms={session.lastActivityMs}/>
-          </ListBoxItem>)}
+          </ListBoxItem>;
+          })}
         </ListBox>}
       </section>
       <section className="session-detail" aria-labelledby="events-heading">
@@ -84,8 +87,8 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
         {selected ? <SessionTranscript key={selected.id} sessionId={selected.id} items={items}/> : <p>Select a session.</p>}
         {/* The prompt key has to differ from the transcript key. Two siblings with the same key leave the previous transcript mounted. */}
         {selected ? <PromptBox key={`prompt-${selected.id}-${promptClear && promptClearApplies(promptClear.sessionId, selected.id) ? promptClear.commandId : ''}`} sessionId={selected.id} error={promptError} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
-        {selected ? <VerificationChecklist/> : null}
-        {selected ? <Approvals cards={approvals} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval}/> : null}
+        {selected ? <VerificationChecklist checks={checklist.checks}/> : null}
+        {selected ? <Approvals cards={approvals} checklist={checklist} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval}/> : null}
       </section>
     </div>
   </main>;
@@ -145,27 +148,29 @@ function PromptBox({ sessionId, error, onSend, onInterrupt }: {
   </section>;
 }
 
-function VerificationChecklist() {
+function VerificationChecklist({ checks }: { checks: readonly VerificationCheck[] }) {
+  const unverified = checks.filter((item) => item.status === 'not verified').length;
   return <section className="checklist-section" aria-labelledby="checklist-heading">
     <h2 id="checklist-heading" tabIndex={-1}>Verification checklist</h2>
-    <p>{checklist.unverified} not verified. Items are not combined into one verdict.</p>
+    <p>{unverified} not verified. Items are not combined into one verdict.</p>
     <ul className="checklist">
-      {checklist.checks.map((item) => <li key={item.id}>
+      {checks.map((item) => <li key={item.id} data-check={item.id} data-status={item.status}>
         <span>{item.label}</span>
         <span>{item.status}</span>
-        <span>{item.source}. Last checked: never.</span>
+        <span>{item.source}. {item.detail} Last checked: {item.lastChecked ?? 'never'}.</span>
       </li>)}
     </ul>
   </section>;
 }
 
-function Approvals({ cards, inFlight, error, confirmingAllowId, onConfirmAllow, onResolve }: {
+function Approvals({ cards, checklist, inFlight, error, confirmingAllowId, onConfirmAllow, onResolve }: {
   cards: ReturnType<typeof approvalsForSession>;
+  checklist: ReturnType<typeof checklistSummary>;
   inFlight: ReadonlySet<string>;
   error: string | null;
   confirmingAllowId: string | null;
   onConfirmAllow: (approvalId: string | null) => void;
-  onResolve: (approvalId: string, optionId: string) => void;
+  onResolve: (approvalId: string, optionId: string, binding: ApprovalBindingEcho) => void;
 }) {
   return <section className="approvals" aria-labelledby="approvals-heading">
     <h2 id="approvals-heading">Approvals</h2>
@@ -185,12 +190,12 @@ function Approvals({ cards, inFlight, error, confirmingAllowId, onConfirmAllow, 
         <Button onPress={() => document.getElementById('checklist-heading')?.focus()}>Open the full checklist</Button>
         {card.agentTitle || card.agentDescription ? <div className="untrusted"><b>Agent’s description · untrusted</b><UntrustedMarkdown source={[card.agentTitle, card.agentDescription].filter(Boolean).join('\n\n')}/></div> : null}
         {card.state === 'pending' ? <div className="controls">
-          <Button isDisabled={busy || !card.denyOnceOptionId} onPress={() => { if (card.denyOnceOptionId) onResolve(card.approvalId, card.denyOnceOptionId); }}>Deny</Button>
-          <Button isDisabled={busy || !card.allowOnceOptionId} onPress={() => {
-            if (!card.allowOnceOptionId) return;
+          <Button isDisabled={busy || !card.binding || !card.denyOnceOptionId} onPress={() => { if (card.binding && card.denyOnceOptionId) onResolve(card.approvalId, card.denyOnceOptionId, card.binding); }}>Deny</Button>
+          <Button isDisabled={busy || !card.binding || !card.allowOnceOptionId} onPress={() => {
+            if (!card.binding || !card.allowOnceOptionId) return;
             if (!card.actionDisclosed && !confirming) { onConfirmAllow(card.approvalId); return; }
             onConfirmAllow(null);
-            onResolve(card.approvalId, card.allowOnceOptionId);
+            onResolve(card.approvalId, card.allowOnceOptionId, card.binding);
           }}>{confirming ? 'Confirm allow once' : 'Allow once'}</Button>
         </div> : null}
         {confirming ? <p role="note">Allow once sends this response even though the provider did not disclose the action. Choose Confirm allow once to send it, or Deny.</p> : null}

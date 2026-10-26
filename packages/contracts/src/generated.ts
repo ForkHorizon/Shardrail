@@ -85,9 +85,14 @@ export type DaemonFrame =
       workdirs: string[];
       [k: string]: unknown;
     };
+/**
+ * One per-session checklist row journaled by the daemon.
+ */
+export type SessionCheckStatus = "verified" | "failed" | "not_verified";
 export type SessionLifecycle = "open" | "closing" | "closed" | "purging" | "purged";
 
 export interface ContractSchema {
+  approval_binding: ApprovalBinding;
   approval_response: ApprovalResponding;
   approval_state: ApprovalState;
   client_frame: ClientFrame;
@@ -98,14 +103,35 @@ export interface ContractSchema {
   event: DurableEvent;
   option_class: OptionClass;
   server_hello: ServerHello;
+  session_check_result: SessionCheckResult;
   session_create_audit: SessionCreateAudit;
   session_create_request: SessionCreateRequest;
   session_lifecycle: SessionLifecycle;
   [k: string]: unknown;
 }
+/**
+ * Echo of the pending approval. The daemon rejects any field that does not match.
+ */
+export interface ApprovalBinding {
+  approval_id: string;
+  content_hash: string;
+  journal_epoch: string;
+  provider_request_id: string;
+  session_id: string;
+  turn_id: string;
+  [k: string]: unknown;
+}
 export interface ApprovalResponding {
   approval_id: string;
+  /**
+   * Label of the client that decided, or `daemon` for a timeout.
+   */
+  client_label?: string;
   client_scope: ClientScope;
+  /**
+   * SHA-256 of the canonical approval content. Empty only for records written before binding.
+   */
+  content_hash?: string;
   decision: ApprovalDecision;
   option_class: OptionClass;
   option_id?: string | null;
@@ -123,7 +149,11 @@ export interface CommandRequest {
 }
 export interface ApprovalResolutionRequest {
   approval_id: string;
+  content_hash: string;
   option_id: string;
+  provider_request_id: string;
+  session_id: string;
+  turn_id: string;
 }
 /**
  * First frame on a client connection; authentication completes before streaming.
@@ -162,6 +192,14 @@ export interface ServerHello {
   resync_required: boolean;
   scope: ClientScope;
   signature: string;
+  [k: string]: unknown;
+}
+export interface SessionCheckResult {
+  checked_at_ms: number;
+  detail: string;
+  item_id: string;
+  source: string;
+  status: SessionCheckStatus;
   [k: string]: unknown;
 }
 /**

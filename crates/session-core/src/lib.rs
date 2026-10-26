@@ -17,6 +17,12 @@ pub struct Approval {
     pub needs_reconfirmation: bool,
     pub held: bool,
     pub decision: Option<ApprovalDecision>,
+    /// SHA-256 of the canonical approval content. Set when the request is journaled.
+    #[serde(default)]
+    pub content_hash: String,
+    /// Client label copied onto the decision record. Empty until a client answers.
+    #[serde(default)]
+    pub client_label: String,
 }
 
 impl Approval {
@@ -30,6 +36,8 @@ impl Approval {
             needs_reconfirmation: false,
             held: false,
             decision: None,
+            content_hash: String::new(),
+            client_label: String::new(),
         }
     }
 
