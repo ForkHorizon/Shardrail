@@ -53,11 +53,15 @@ export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFli
   return <main className="main-screen">
     <header className="app-header">
       <div className="brand"><Icon name="shardrail"/><div><h1>Shardrail</h1><p>Local sessions from the daemon journal</p></div></div>
-      <div className="controls header-controls">
-        <StatusPill tone={phase === 'connected' ? 'success' : phase === 'key-changed' ? 'danger' : 'warning'}><Icon className="icon" name={phase === 'connected' ? 'connection' : phase === 'key-changed' ? 'error' : 'reconnect'}/><span className={`connection-state connection-${phase}`} role={phase === 'key-changed' ? 'alert' : 'status'}>{connectionStatusLabel(phase)}</span></StatusPill>
-        <ThemeToggle/>
-        {pairedFingerprint ? <span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairedFingerprint}>{pairedFingerprint}</span> : null}
-        <Button className="button-secondary" onPress={onReconnect}>Reconnect</Button>
+      <div className="header-tools">
+        <div className="controls header-controls">
+          <StatusPill tone={phase === 'connected' ? 'success' : phase === 'key-changed' ? 'danger' : 'warning'}><Icon className="icon" name={phase === 'connected' ? 'connection' : phase === 'key-changed' ? 'error' : 'reconnect'}/><span className={`connection-state connection-${phase}`} role={phase === 'key-changed' ? 'alert' : 'status'} aria-label={connectionStatusLabel(phase)}><span className="connection-full">{connectionStatusLabel(phase)}</span><span className="connection-short">{phase === 'connected' ? 'Online' : phase === 'key-changed' ? 'Key changed' : 'Reconnecting'}</span></span></StatusPill>
+          <ThemeToggle/>
+        </div>
+        <div className="header-secondary">
+          {pairedFingerprint ? <span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairedFingerprint}>{pairedFingerprint}</span> : null}
+          <Button className="button-secondary" onPress={onReconnect}>Reconnect</Button>
+        </div>
       </div>
     </header>
     <p className="host-banner" role="status">{hostBanner(checks, selected !== null)}</p>

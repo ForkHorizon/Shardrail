@@ -1,5 +1,5 @@
 import { useLayoutEffect, useState } from 'react';
-import { Button } from 'react-aria-components';
+import { ToggleButton, Tooltip, TooltipTrigger } from 'react-aria-components';
 import { Icon } from './Icon';
 
 const key = 'shardrail-theme';
@@ -16,5 +16,9 @@ export function ThemeToggle() {
     localStorage.setItem(key, next);
     setTheme(next);
   }
-  return <Button className="button-quiet theme-toggle" onPress={toggle} aria-label={`${theme} theme. Use ${theme === 'dark' ? 'light' : 'dark'} theme`}><Icon className="icon" name={theme === 'dark' ? 'sun' : 'moon'}/><span>{theme} theme</span></Button>;
+  const label = `Use ${theme === 'dark' ? 'light' : 'dark'} theme`;
+  return <TooltipTrigger>
+    <ToggleButton className="button-quiet theme-toggle" isSelected={theme === 'dark'} onChange={toggle} aria-label={label}><Icon className="icon" name={theme === 'dark' ? 'sun' : 'moon'}/></ToggleButton>
+    <Tooltip>{label}</Tooltip>
+  </TooltipTrigger>;
 }

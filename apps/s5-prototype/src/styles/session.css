@@ -26,6 +26,16 @@
 .body p, .untrusted p { margin-block: var(--space-1); color: var(--color-text); }
 .untrusted-label { color: var(--color-untrusted) !important; font-size: var(--text-xs); font-weight: 700; }
 .event pre, .approvals pre, .draft-preview pre { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--color-bg); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-3); font: var(--text-xs)/1.55 var(--font-mono); }
+.event-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-1) var(--space-3); align-items: center; }
+.event-summary b { grid-column: 1 / -1; font-size: var(--text-sm); }
+.event-summary code { min-width: 0; overflow-wrap: anywhere; font: var(--text-sm)/1.4 var(--font-mono); }
+.event-summary > span { color: var(--color-muted); font-size: var(--text-xs); }
+.event-summary a { grid-column: 1 / -1; width: fit-content; min-height: 44px; display: inline-flex; align-items: center; color: var(--color-accent); }
+.lifecycle-summary { margin: 0; font-size: var(--text-sm); text-transform: capitalize; }
+.event-raw-preview { display: -webkit-box; margin: var(--space-2) 0 0; overflow: hidden; overflow-wrap: anywhere; color: var(--color-muted); font: var(--text-xs)/1.45 var(--font-mono); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.raw-event { margin-block-start: var(--space-2); }
+.raw-event [slot='trigger'] { min-height: 44px; padding: var(--space-1) var(--space-2); color: var(--color-muted); background: transparent; border-color: var(--color-border); font-size: var(--text-xs); }
+.raw-event pre { max-height: 16rem; overflow: auto; }
 .untrusted { margin-block: var(--space-2); padding: var(--space-3); color: var(--color-untrusted); background: color-mix(in oklch, var(--color-untrusted) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-untrusted) 40%, var(--color-border)); border-inline-start: 3px solid var(--color-untrusted); border-radius: var(--radius-sm); }
 .untrusted b { font-size: var(--text-xs); }
 .checklist-section, .prompt, .approvals { display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
@@ -72,8 +82,10 @@
   .event { padding: var(--space-3); }
   .checklist { grid-template-columns: 1fr; }
   .checklist-section, .prompt, .approvals { padding: var(--space-3); }
+  .approvals article { gap: var(--space-2); padding: var(--space-3); }
   .session-detail .controls > button { min-height: 44px; flex: 1 1 8rem; }
-  .approval-actions > button { flex: 1 1 100%; }
+  .session-detail .approval-actions { align-items: stretch; }
+  .session-detail .approval-actions > button { min-width: 0; min-height: 48px; flex: 1 1 0; white-space: normal; }
   .prompt .controls { justify-content: stretch; }
 }
 @media (prefers-reduced-motion: reduce) { .streaming-indicator span { animation: none; } }

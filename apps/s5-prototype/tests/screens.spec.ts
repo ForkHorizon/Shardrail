@@ -94,7 +94,7 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
       await page.getByRole('button', { name: 'Review fingerprint' }).click();
       await page.getByRole('textbox', { name: 'One-time enrollment code' }).fill(code);
       await page.getByRole('button', { name: 'I verified this fingerprint — pair' }).click();
-      await expect(page.getByText('Connected · browser WebSocket')).toBeVisible();
+      await expect(page.getByRole('status', { name: 'Connected · browser WebSocket' })).toBeVisible();
       await capture('03', 'sessions-empty', () => expect(page.getByText('No sessions yet.')).toBeVisible());
       await capture('04', 'new-session', () => expect(page.getByRole('button', { name: 'New session' })).toBeVisible());
     } catch (error) {
@@ -115,7 +115,9 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
         });
         await capture('06', 'approval-pending', () => expect(page.getByRole('button', { name: 'Allow once' }).first()).toBeVisible());
         await page.getByRole('button', { name: 'Allow once' }).first().click();
+        await page.locator('.approval-actions').evaluate((actions) => { actions.scrollIntoView({ block: 'end' }); if (innerWidth <= 720) { let parent = actions.parentElement; while (parent && parent.scrollHeight <= parent.clientHeight) parent = parent.parentElement; parent?.scrollBy(0, 16); } });
         await capture('07', 'approval-confirm', () => expect(page.getByRole('button', { name: 'Confirm allow once' }).first()).toBeVisible());
+        await page.getByRole('heading', { name: 'Verification checklist' }).evaluate((heading) => heading.scrollIntoView({ block: 'center' }));
         await capture('08', 'checklist', () => expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible());
       } catch (error) {
         results.push(`SKIP remaining session screens ${suffix}: ${String(error).split('\n')[0]}`);
@@ -123,7 +125,7 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
     }
     try { process.kill(state.daemonPid, 'SIGTERM'); } catch { /* already stopped */ }
     for (const { page, capture } of captures) {
-      await capture('09', 'offline', () => expect(page.getByText('Reconnecting · browser WebSocket')).toBeVisible({ timeout: 8_000 }));
+      await capture('09', 'offline', () => expect(page.getByRole('status', { name: 'Reconnecting · browser WebSocket' })).toBeVisible({ timeout: 8_000 }));
       await capture('10', 'error', async () => {
         await page.locator('#session-prompt').fill('screenshot blocked prompt');
         await expect(page.getByRole('button', { name: 'Send prompt' })).toBeDisabled();

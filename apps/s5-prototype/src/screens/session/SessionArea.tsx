@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import { Button, TextArea } from 'react-aria-components';
+import { Button, Disclosure, DisclosurePanel, Heading, Link, TextArea } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { activityTimestamp, approvalsForSession, checklistSummary, promptClearApplies, revealHiddenCharacters, type ApprovalBindingEcho, type TranscriptItem, type VerificationCheck } from '../../session-model';
 import { isNearLiveTail } from '../../streaming-view';
@@ -64,7 +64,8 @@ function SessionEvent({ event }: { event: TranscriptItem }) {
   const iso = activityTimestamp(event.occurredAtMs);
   return <article className="event" data-kind={event.kind}>
     <div className="meta"><b>{event.kind}</b><span>{event.cursorLabel}</span>{iso ? <time dateTime={iso}>{new Date(event.occurredAtMs).toLocaleTimeString()}</time> : null}</div>
-    {event.markdown !== null ? <div className="body"><p className="untrusted-label">Agent message · untrusted</p><UntrustedMarkdown source={event.markdown}/></div> : <pre className="body">{event.plain}</pre>}
+    {event.markdown !== null ? <div className="body"><p className="untrusted-label">Agent message · untrusted</p><UntrustedMarkdown source={event.markdown}/></div> : event.presentation === 'approval' ? <div className="body event-summary"><b>Approval requested</b><span>Pending decision</span>{event.approvalId ? <Link href={`#approval-${encodeURIComponent(event.approvalId)}`}>View approval card</Link> : null}</div> : event.presentation === 'tool' ? <div className="body event-summary"><b>Tool activity · untrusted action data</b><code>{event.summary}</code><span>{event.status}</span></div> : event.presentation === 'lifecycle' ? <p className="body lifecycle-summary">{event.summary}</p> : <p className="body event-raw-preview">{event.plain}</p>}
+    {event.rawEvents.length > 0 ? <Disclosure className="raw-event"><Heading><Button slot="trigger">Raw event{event.rawEvents.length > 1 ? `s (${event.rawEvents.length})` : ''}</Button></Heading><DisclosurePanel>{event.rawEvents.map((raw, index) => <pre key={index}>{raw}</pre>)}</DisclosurePanel></Disclosure> : null}
   </article>;
 }
 
@@ -123,7 +124,7 @@ function Approvals({ cards, checklist, inFlight, error, confirmingAllowId, onCon
       const confirming = confirmingAllowId === card.approvalId && card.state === 'pending' && !card.actionDisclosed;
       const busy = inFlight.has(card.approvalId);
       const stateLabel = ({ pending: 'Pending', responding: 'Sending response', responded_unacked: 'Response sent · awaiting acknowledgement', delivered_unconfirmed: 'Outcome unconfirmed', denied: 'Denied', allowed: 'Allowed once', expired: 'Expired', withdrawn: 'Withdrawn' } as Record<string, string>)[card.state] ?? card.state;
-      return <article key={card.approvalId} className={`approval-card approval-${card.state}`} aria-label={`Approval ${card.approvalId}`}>
+      return <article id={`approval-${card.approvalId}`} key={card.approvalId} className={`approval-card approval-${card.state}`} aria-label={`Approval ${card.approvalId}`}>
         <div className="approval-heading"><h3>Approval request</h3><span className={`approval-state state-${card.state}`}><Icon className="icon" name={card.state === 'denied' || card.state === 'expired' || card.state === 'withdrawn' ? 'deny' : card.state === 'allowed' ? 'verified' : 'pending'}/>{stateLabel}</span></div>
         {card.actionDisclosed ? <DisclosedAction card={card}/> : <p className="caution">action not disclosed by provider</p>}
         <p>Tool {card.toolKind}</p>

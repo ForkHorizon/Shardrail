@@ -100,7 +100,28 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await expect(page.locator('[data-check]')).toHaveCount(12);
   await expect(page.locator('.check-status .icon')).toHaveCount(12);
   await expect(page.locator('.transcript')).toContainText('Agent message · untrusted');
-  await expect(page.getByText('fake streamed response 0')).toHaveCount(1);
+  await expect(page.locator('.transcript .event[data-kind=agent_message_chunk] .body').getByText('fake streamed response 0')).toHaveCount(1);
+  const approvalEvent = page.locator('.event[data-kind="approval_requested"]');
+  await expect(approvalEvent).toContainText('Pending decision');
+  await expect(approvalEvent.locator('.raw-event pre')).toBeHidden();
+  const approvalLink = approvalEvent.getByRole('link', { name: 'View approval card' });
+  await expect(approvalLink).toHaveAttribute('href', /^#approval-/);
+  await approvalEvent.getByRole('button', { name: 'Raw event' }).click();
+  await expect(approvalEvent).toContainText('"approval_id"');
+  await expect(approvalEvent).toContainText('"options"');
+  await approvalEvent.getByRole('button', { name: 'Raw event' }).click();
+  await approvalLink.click();
+  await expect(page.locator(await approvalLink.getAttribute('href') ?? '')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Allow once' }).first().click();
+  const phoneActions = page.locator('.approval-actions button');
+  await expect(phoneActions.nth(0)).toHaveAccessibleName('Deny');
+  await expect(phoneActions.nth(1)).toHaveAccessibleName('Confirm allow once');
+  await phoneActions.first().evaluate((button) => button.scrollIntoView({ block: 'center' }));
+  const phoneActionSizes = await phoneActions.evaluateAll((nodes) => nodes.map((node) => { const rect = node.getBoundingClientRect(); return { size: [rect.width, rect.height], right: rect.right, viewportWidth: innerWidth }; }));
+  expect(phoneActionSizes[0]?.size).toEqual(phoneActionSizes[1]?.size);
+  expect(phoneActionSizes.every(({ size: [, height], right, viewportWidth }) => height >= 44 && right <= viewportWidth)).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 800 });
   const deny = page.getByRole('button', { name: 'Deny' });
   await expect(deny).toBeEnabled();
   await deny.click();
@@ -118,7 +139,7 @@ test('lists a paired session, streams it, denies once, and reconnects without du
     if (stable) settled = count;
     return stable;
   }).toBe(true);
-  expect(await page.getByText('fake streamed response 0').count()).toBe(1);
+  expect(await page.locator('.transcript .event[data-kind=agent_message_chunk] .body').getByText('fake streamed response 0').count()).toBe(1);
 
   await stopDaemon(state.daemonPid);
   await expect(page.getByText('Reconnecting · browser WebSocket')).toBeVisible();
@@ -126,14 +147,14 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await page.getByRole('button', { name: 'Reconnect' }).click();
   await expect(page.getByText('Connected · browser WebSocket')).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => eventCount(page)).toBe(settled);
-  await expect(page.getByText('fake streamed response 0')).toHaveCount(1);
+  await expect(page.locator('.transcript .event[data-kind=agent_message_chunk] .body').getByText('fake streamed response 0')).toHaveCount(1);
 
   const nextSessionId = await createSession();
   const nextOption = page.getByRole('option', { name: new RegExp(nextSessionId) });
   await expect(nextOption).toBeVisible();
   await nextOption.focus();
   await expect(page.getByRole('heading', { name: `Events for ${nextSessionId}` })).toBeVisible();
-  await expect(page.getByText('fake streamed response 0')).toHaveCount(1);
+  await expect(page.locator('.transcript .event[data-kind=agent_message_chunk] .body').getByText('fake streamed response 0')).toHaveCount(1);
   await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('heading', { name: /Events for / })).toBeVisible();
   await expect.poll(() => eventCount(page)).toBeGreaterThan(settled);
@@ -236,7 +257,7 @@ test('the paired main screen has no axe violations', async ({ page }) => {
   await pair(page);
   const sessionId = await createSession();
   await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
-  await expect(page.getByText('fake streamed response 0')).toHaveCount(1);
+  await expect(page.locator('.transcript .event[data-kind=agent_message_chunk] .body').getByText('fake streamed response 0')).toHaveCount(1);
   await expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible();
   const violations = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
   expect(violations, violations.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);

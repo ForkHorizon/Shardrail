@@ -62,6 +62,11 @@ export type TranscriptItem = {
   occurredAtMs: number;
   markdown: string | null;
   plain: string | null;
+  rawEvents: string[];
+  presentation: 'message' | 'approval' | 'tool' | 'lifecycle' | 'raw';
+  summary: string | null;
+  status: string | null;
+  approvalId: string | null;
 };
 
 export type ApprovalFlight = { inFlight: ReadonlySet<string>; error: string | null };
@@ -241,6 +246,7 @@ export function transcriptItems(events: readonly JournalEvent[]): TranscriptItem
     const last = items.at(-1);
     if (text !== null && last?.kind === 'agent_message_chunk' && last.markdown !== null) {
       last.markdown += text;
+      last.rawEvents.push(plainEventText(event));
       last.cursorLabel = `${last.cursorLabel.split('–')[0]}–#${event.cursor}`;
       if (Number.isFinite(event.occurredAtMs) && event.occurredAtMs >= last.occurredAtMs) last.occurredAtMs = event.occurredAtMs;
       continue;
@@ -251,10 +257,38 @@ export function transcriptItems(events: readonly JournalEvent[]): TranscriptItem
       cursorLabel: `#${event.cursor}`,
       occurredAtMs: event.occurredAtMs,
       markdown: text,
-      plain: text === null ? plainEventText(event) : null,
+      plain: plainEventText(event),
+      rawEvents: [plainEventText(event)],
+      ...transcriptPresentation(event),
     });
   }
   return items;
+}
+
+function transcriptPresentation(event: JournalEvent): Pick<TranscriptItem, 'presentation' | 'summary' | 'status' | 'approvalId'> {
+  const payload = asRecord(event.payload);
+  const approvalId = typeof payload?.approval_id === 'string' ? payload.approval_id : null;
+  if (event.kind === 'agent_message_chunk') return { presentation: 'message', summary: null, status: null, approvalId: null };
+  if (event.kind === 'approval_requested') return { presentation: 'approval', summary: 'Approval requested', status: 'Pending decision', approvalId };
+  if (/^(tool|command)_/.test(event.kind)) {
+    const name = [payload?.name, payload?.tool_name, payload?.command]
+      .find((value): value is string => typeof value === 'string' && value.length > 0);
+    const argv = Array.isArray(payload?.argv) ? payload.argv.filter((value): value is string => typeof value === 'string') : [];
+    const label = event.kind.replaceAll('_', ' ');
+    return {
+      presentation: 'tool',
+      summary: name ?? (argv.length ? argv.join(' ') : label),
+      status: /fail|error|reject/i.test(event.kind) ? 'Failed' : /complete|finish|exit|success/i.test(event.kind) ? 'Completed' : /start|begin|running/i.test(event.kind) ? 'Running' : 'Recorded',
+      approvalId,
+    };
+  }
+  if (/^(session|turn|process)_/.test(event.kind)) {
+    return { presentation: 'lifecycle', summary: event.kind.replaceAll('_', ' '), status: null, approvalId };
+  }
+  if (event.kind.startsWith('approval_')) {
+    return { presentation: 'lifecycle', summary: event.kind.replaceAll('_', ' '), status: null, approvalId };
+  }
+  return { presentation: 'raw', summary: null, status: null, approvalId: null };
 }
 
 export function activityTimestamp(ms: number) {

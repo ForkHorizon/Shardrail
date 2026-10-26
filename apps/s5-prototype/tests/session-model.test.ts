@@ -97,7 +97,7 @@ test('approval cards expose once options only and follow the daemon state', () =
   assert.equal(revealHiddenCharacters(disclosed?.command ?? ''), 'curl\\u202e');
 });
 
-test('coalesces chunk text and keeps other events as plain text', () => {
+test('coalesces chunk text and summarizes activity while preserving raw payloads', () => {
   const items = transcriptItems([
     event(1, 'session-a', 'agent_message_chunk', { content: { text: '```python\n' } }),
     event(2, 'session-a', 'agent_message_chunk', { content: { text: 'print(1)\n```' } }),
@@ -107,9 +107,19 @@ test('coalesces chunk text and keeps other events as plain text', () => {
   assert.equal(items.length, 3);
   assert.equal(items[0]?.markdown, '```python\nprint(1)\n```');
   assert.equal(items[0]?.cursorLabel, '#1–#2');
+  assert.deepEqual(items[0]?.rawEvents, ['{"content":{"text":"```python\\n"}}', '{"content":{"text":"print(1)\\n```"}}']);
   assert.equal(items[1]?.plain, plainEventText(event(3, 'session-a', 'tool_call_started', { name: 'echo', argv: ['echo', 'hi'] })));
   assert.equal(items[1]?.markdown, null);
+  assert.equal(items[1]?.presentation, 'tool');
+  assert.equal(items[1]?.summary, 'echo');
+  assert.equal(items[1]?.status, 'Running');
   assert.equal(items[2]?.markdown, 'after');
+  const approval = transcriptItems([event(5, 'session-a', 'approval_requested', { approval_id: 'approval-5' })])[0];
+  assert.equal(approval?.presentation, 'approval');
+  assert.equal(approval?.approvalId, 'approval-5');
+  assert.equal(approval?.plain, '{"approval_id":"approval-5"}');
+  assert.deepEqual(approval?.rawEvents, ['{"approval_id":"approval-5"}']);
+  assert.equal(transcriptItems([event(6, 'session-a', 'unfamiliar_event', { keep: true })])[0]?.presentation, 'raw');
 });
 
 test('activity timestamps reject non-finite values', () => {

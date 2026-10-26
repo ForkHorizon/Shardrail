@@ -7,6 +7,10 @@ main:not(.pairing-page) > header { display: flex; align-items: center; justify-c
 .brand p { margin-top: 2px; font-size: var(--text-sm); }
 .controls { display: flex; align-items: center; gap: var(--space-2); }
 .header-controls { flex-wrap: wrap; justify-content: end; }
+.header-tools { display: flex; align-items: center; gap: var(--space-3); }
+.header-secondary { display: flex; align-items: center; gap: var(--space-2); }
+.connection-short { display: none; }
+.theme-toggle { width: 44px; min-height: 44px; padding: var(--space-2); }
 .connection-state { padding: var(--space-1) var(--space-2); color: var(--color-muted); }
 .paired-fingerprint { display: block; max-width: 180px; overflow-wrap: anywhere; font: var(--text-xs)/1.4 var(--font-mono); color: var(--color-muted); }
 .host-banner { flex: none; margin: 0; border-width: 0 0 1px; border-radius: 0; }
@@ -31,9 +35,16 @@ footer { padding: var(--space-2) var(--space-6); color: var(--color-muted); bord
 .markdown-frame body { color: var(--color-text); }
 @media (max-width: 720px) {
   :where(.react-aria-Button, button) { min-height: 44px; }
-  .app-header { align-items: flex-start; padding-inline: var(--space-3); }
-  .header-controls { max-width: 58%; }
-  .paired-fingerprint { display: none; }
+  .app-header { align-items: stretch; flex-direction: column; gap: var(--space-1); padding: var(--space-2) var(--space-3); }
+  .brand { gap: var(--space-2); }
+  .brand > svg { width: 1.75rem; height: 1.75rem; }
+  .brand p { display: none; }
+  .header-tools { align-items: stretch; flex-direction: column; gap: 0; }
+  .header-controls { max-width: none; justify-content: space-between; }
+  .header-secondary { justify-content: space-between; min-height: 44px; }
+  .paired-fingerprint { display: block; max-width: min(62%, 15rem); max-height: 2.5rem; overflow: hidden; font-size: .625rem; }
+  .connection-full { display: none; }
+  .connection-short { display: inline; }
   .workspace { grid-template-columns: minmax(0, 1fr); }
   .entry-pane, .detail-pane { min-height: 0; overflow: auto; border: 0; }
   .entry-pane.mobile-hidden, .detail-pane:not(.mobile-visible) { display: none; }
