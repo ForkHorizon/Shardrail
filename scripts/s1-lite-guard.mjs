@@ -9,7 +9,11 @@ export function codexThreadIds(events) {
     ...events.map((event) => event.payload?.thread_id),
     ...events.map((event) => event.payload?.method === 'thread/started' ? event.payload?.params?.thread?.id : null),
     ...events.map((event) => event.kind === 'approval_routing_rejected' ? event.payload?.result?.thread?.id : null),
-  ].filter((id) => typeof id === 'string'))];
+  ].filter((id) => typeof id === 'string' && id.length > 0))];
+}
+
+export function rolloutFilenameChecksMarkdown(checks) {
+  return `- Codex rollout filename checks: ${JSON.stringify(checks)}`;
 }
 
 export function summarizeRolloutFiles(date, entries, threadIds) {
@@ -18,7 +22,7 @@ export function summarizeRolloutFiles(date, entries, threadIds) {
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     file_count++;
-    if (threadIds.some((id) => entry.name.includes(id))) matches.push(entry.name);
+    if (threadIds.some((id) => typeof id === 'string' && id.length > 0 && entry.name.includes(id))) matches.push(entry.name);
   }
   return { date, file_count, matches };
 }

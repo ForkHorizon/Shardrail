@@ -12,7 +12,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, summarizeRolloutFiles, turn1Failure } from './s1-lite-guard.mjs';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, rolloutFilenameChecksMarkdown, summarizeRolloutFiles, turn1Failure } from './s1-lite-guard.mjs';
 
 const HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const TURN_WAIT_MS = 8 * 60 * 1000;
@@ -609,7 +609,7 @@ function renderMarkdown(result) {
     `- Shardrail git status unchanged: ${result.shardrail_git_status_unchanged}`,
     `- Codex extensions verified: ${result.extensions?.verified?.length ?? 0}`,
     `- Codex home paths in the journal: ${result.codex_home_paths?.length ?? 0}`,
-    `- Codex rollout filename checks: ${JSON.stringify(result.rollout_filename_checks)}`,
+    rolloutFilenameChecksMarkdown(result.rollout_filename_checks),
     '',
     '## Event counts',
     '',
