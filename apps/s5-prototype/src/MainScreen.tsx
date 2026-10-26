@@ -68,7 +68,7 @@ export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFli
       <div className={`detail-pane${mobileDetail ? ' mobile-visible' : ''}`}>
         {selected ? <>
           <Button className="button-quiet mobile-back" onPress={() => setMobileDetail(false)}><Icon className="icon" name="back"/> Back to sessions</Button>
-          <SessionArea sessionId={selected.id} items={items} approvals={approvals} checklist={checklist} promptError={promptError} promptClear={promptClear} approvalInFlight={approvalInFlight} approvalError={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval} onSendPrompt={onSendPrompt} onInterrupt={onInterrupt}/>
+          <SessionArea sessionId={selected.id} provider={selected.agentKind} status={selected.status} connected={phase === 'connected'} items={items} approvals={approvals} checklist={checklist} promptError={promptError} promptClear={promptClear} approvalInFlight={approvalInFlight} approvalError={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval} onSendPrompt={onSendPrompt} onInterrupt={onInterrupt}/>
         </> : <section className="session-detail empty-detail" aria-labelledby="events-heading"><h2 id="events-heading">Events</h2><p>Select a session to view its events.</p></section>}
       </div>
     </div>
