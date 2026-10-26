@@ -1529,12 +1529,17 @@ impl CodexRun {
                 };
                 match parsed {
                     Ok(snapshot) => {
-                        let changed = crate::config_snapshot::changed_groups(&baseline, &snapshot);
-                        if changed.is_empty() {
+                        // The digest is the match. Group names are only the detail.
+                        if snapshot.hash == baseline.hash {
                             self.note_config_match("pre-turn", &snapshot.hash).await;
                             self.begin_turn(command_id, prompt, done).await;
                             false
                         } else {
+                            let mut changed =
+                                crate::config_snapshot::changed_groups(&baseline, &snapshot);
+                            if changed.is_empty() {
+                                changed.push("unknown");
+                            }
                             let reason = format!("config drifted: {}", changed.join(", "));
                             self.note_config_drift("pre-turn", &snapshot.hash, &changed, &reason)
                                 .await;
@@ -2460,10 +2465,14 @@ impl CodexRun {
                                         self.note_config_failure("session-end", "config snapshot is missing").await;
                                         return;
                                     };
-                                    let changed = crate::config_snapshot::changed_groups(&baseline, &snapshot);
-                                    if changed.is_empty() {
+                                    // The digest is the match. Group names are only the detail.
+                                    if snapshot.hash == baseline.hash {
                                         self.note_config_match("session-end", &snapshot.hash).await;
                                     } else {
+                                        let mut changed = crate::config_snapshot::changed_groups(&baseline, &snapshot);
+                                        if changed.is_empty() {
+                                            changed.push("unknown");
+                                        }
                                         let reason = format!("config drifted: {}", changed.join(", "));
                                         self.note_config_drift("session-end", &snapshot.hash, &changed, &reason).await;
                                     }

@@ -39,16 +39,24 @@ pub(crate) fn snapshot_config(result: &Value) -> Result<Snapshot, &'static str> 
     Ok(Snapshot { hash, canonical })
 }
 
+/// Group names whose canonical values differ.
+///
+/// Empty only when the digests match. A digest mismatch that does not land on
+/// a named group is `unknown`, so an empty result is never a mismatch.
 pub(crate) fn changed_groups(before: &Snapshot, after: &Snapshot) -> Vec<&'static str> {
     if before.hash == after.hash {
         return Vec::new();
     }
     let left: Value = serde_json::from_str(&before.canonical).unwrap_or(Value::Null);
     let right: Value = serde_json::from_str(&after.canonical).unwrap_or(Value::Null);
-    GROUPS
+    let mut changed: Vec<&'static str> = GROUPS
         .into_iter()
         .filter(|group| left.get(*group) != right.get(*group))
-        .collect()
+        .collect();
+    if changed.is_empty() {
+        changed.push("unknown");
+    }
+    changed
 }
 
 const GROUPS: [&str; 10] = [
@@ -501,6 +509,40 @@ mod tests {
             assert!(!next.canonical.contains(SECRET));
         }
         assert!(changed_groups(&base, &base).is_empty());
+    }
+
+    #[test]
+    fn a_digest_mismatch_with_no_named_group_is_unknown() {
+        let base = snapshot_config(&sample("untrusted")).unwrap();
+        let mut same_body = base.clone();
+        same_body.hash = "f".repeat(64);
+        assert_ne!(base.hash, same_body.hash);
+        assert_eq!(changed_groups(&base, &same_body), vec!["unknown"]);
+
+        let broken = Snapshot {
+            hash: "a".repeat(64),
+            canonical: "not-json".into(),
+        };
+        let also_broken = Snapshot {
+            hash: "b".repeat(64),
+            canonical: "{".into(),
+        };
+        assert_eq!(changed_groups(&broken, &also_broken), vec!["unknown"]);
+
+        let mut with_extra: Value = serde_json::from_str(&base.canonical).unwrap();
+        with_extra
+            .as_object_mut()
+            .unwrap()
+            .insert("zz".into(), json!(1));
+        let extra = Snapshot {
+            hash: "c".repeat(64),
+            canonical: with_extra.to_string(),
+        };
+        assert_eq!(changed_groups(&base, &extra), vec!["unknown"]);
+
+        let mut same_digest = base.clone();
+        same_digest.canonical = "{}".into();
+        assert!(changed_groups(&base, &same_digest).is_empty());
     }
 
     #[test]
