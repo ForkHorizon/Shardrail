@@ -12,6 +12,17 @@ export function codexThreadIds(events) {
   ].filter((id) => typeof id === 'string'))];
 }
 
+export function summarizeRolloutFiles(date, entries, threadIds) {
+  let file_count = 0;
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    file_count++;
+    if (threadIds.some((id) => entry.name.includes(id))) matches.push(entry.name);
+  }
+  return { date, file_count, matches };
+}
+
 export function assertResultDirectory(resultDir, { shardrail, worktree, allowedResultDir }) {
   if ([shardrail, worktree].some((root) => resultDir === root || resultDir.startsWith(`${root}/`)) && resultDir !== allowedResultDir) {
     throw new Error('S1_RESULT_DIR must be outside the Shardrail checkouts');
