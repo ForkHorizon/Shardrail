@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, turn1Failure } from './s1-lite-guard.mjs';
+import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, rolloutFilenameChecksMarkdown, summarizeRolloutFiles, turn1Failure } from './s1-lite-guard.mjs';
 
 const FULL = '1bb8838aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -183,7 +183,38 @@ test('thread filename checks collect IDs from started and rejected routing event
     { kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { id: 'thread-started' } } } },
     { kind: 'approval_routing_rejected', payload: { result: { thread: { id: 'thread-rejected' } } } },
   ]), ['thread-started', 'thread-rejected']);
+  assert.deepEqual(codexThreadIds([
+    { kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { id: '' } } } },
+    { kind: 'provider_notice', payload: { thread_id: 'valid-id' } },
+  ]), ['valid-id']);
   assert.deepEqual(codexThreadIds([]), []);
+});
+
+test('rollout results record counts and matching names only in JSON and Markdown', () => {
+  const result = { rollout_filename_checks: [summarizeRolloutFiles('2026/10/26', [
+    { name: 'rollout-unrelated-secret-name.jsonl', isFile: () => true },
+    { name: `rollout-${FULL}.jsonl`, isFile: () => true },
+    { name: 'hidden-directory-name', isFile: () => false },
+  ], [FULL])] };
+  const json = JSON.stringify(result);
+  const markdown = rolloutFilenameChecksMarkdown(result.rollout_filename_checks);
+  assert.deepEqual(result.rollout_filename_checks[0], {
+    date: '2026/10/26', file_count: 2, matches: [`rollout-${FULL}.jsonl`],
+  });
+  assert.equal(json.includes('rollout-unrelated-secret-name.jsonl'), false);
+  assert.equal(markdown.includes('rollout-unrelated-secret-name.jsonl'), false);
+});
+
+test('empty thread IDs cannot match or serialize every sessions filename', () => {
+  const checks = [summarizeRolloutFiles('2026/10/26', [
+    { name: 'rollout-unrelated-secret-name.jsonl', isFile: () => true },
+    { name: `rollout-${FULL}.jsonl`, isFile: () => true },
+  ], ['', FULL])];
+  const json = JSON.stringify({ rollout_filename_checks: checks });
+  const markdown = rolloutFilenameChecksMarkdown(checks);
+  assert.deepEqual(checks[0], { date: '2026/10/26', file_count: 2, matches: [`rollout-${FULL}.jsonl`] });
+  assert.equal(json.includes('rollout-unrelated-secret-name.jsonl'), false);
+  assert.equal(markdown.includes('rollout-unrelated-secret-name.jsonl'), false);
 });
 
 test('the live script gates on the env and resets only through the guard', () => {

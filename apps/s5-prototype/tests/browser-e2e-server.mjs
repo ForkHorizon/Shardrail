@@ -65,18 +65,24 @@ async function cleanup() {
       }
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
   }
   await rm(stateFile, { force: true });
   await rm(dataDir, { recursive: true, force: true });
 }
 try {
+  if (process.env.SHARDRAIL_E2E_TEST_PIDS_FILE) {
+    await writeFile(process.env.SHARDRAIL_E2E_TEST_PIDS_FILE, JSON.stringify({ serverPid: process.pid, daemonPid: daemon.pid }));
+  }
   const baseUrl = await endpoint;
   const ready = await fetch(baseUrl);
   if (!ready.ok) throw new Error(`test daemon served ${ready.status}`);
   const stateTemp = `${stateFile}.${process.pid}.tmp`;
   try {
-    await writeFile(stateTemp, JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint, daemonPid: daemon.pid, assetsDir: dist, browserPort: new URL(baseUrl).port }));
+    const state = process.env.SHARDRAIL_E2E_TEST_INVALID_STATE === '1'
+      ? '{"baseUrl":'
+      : JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint, daemonPid: daemon.pid, assetsDir: dist, browserPort: new URL(baseUrl).port });
+    await writeFile(stateTemp, state);
     await rename(stateTemp, stateFile);
   } catch (error) {
     await rm(stateTemp, { force: true });

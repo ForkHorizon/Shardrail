@@ -12,7 +12,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, turn1Failure } from './s1-lite-guard.mjs';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, rolloutFilenameChecksMarkdown, summarizeRolloutFiles, turn1Failure } from './s1-lite-guard.mjs';
 
 const HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const TURN_WAIT_MS = 8 * 60 * 1000;
@@ -576,15 +576,13 @@ async function codexRolloutFilenameChecks(threadIds, now = new Date()) {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const datePath = `${year}/${month}/${day}`;
-    let files = [];
+    let entries = [];
     try {
-      files = (await readdir(join(homedir(), '.codex', 'sessions', year, month, day), { withFileTypes: true }))
-        .filter((entry) => entry.isFile())
-        .map((entry) => entry.name);
+      entries = await readdir(join(homedir(), '.codex', 'sessions', year, month, day), { withFileTypes: true });
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
-    return { date: datePath, files, matches: files.filter((name) => threadIds.some((id) => name.includes(id))) };
+    return summarizeRolloutFiles(datePath, entries, threadIds);
   }));
 }
 
@@ -611,7 +609,7 @@ function renderMarkdown(result) {
     `- Shardrail git status unchanged: ${result.shardrail_git_status_unchanged}`,
     `- Codex extensions verified: ${result.extensions?.verified?.length ?? 0}`,
     `- Codex home paths in the journal: ${result.codex_home_paths?.length ?? 0}`,
-    `- Codex rollout filename checks: ${JSON.stringify(result.rollout_filename_checks)}`,
+    rolloutFilenameChecksMarkdown(result.rollout_filename_checks),
     '',
     '## Event counts',
     '',
