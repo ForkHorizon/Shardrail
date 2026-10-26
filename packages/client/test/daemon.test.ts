@@ -15,10 +15,27 @@ const root = resolve(import.meta.dirname, "../../..");
 const daemonBin = process.env.SHARDRAILD_BIN ?? join(root, "target/debug/shardraild");
 const fakeBin = process.env.SHARDRAIL_FAKE_ACP_BIN ?? join(root, "target/debug/shardrail-fake-acp");
 const children: ChildProcess[] = [];
-after(async () => { for (const child of children) child.kill("SIGKILL"); });
+const withDeadline = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+after(async () => {
+  for (const child of children) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    try { process.kill(-child.pid!, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+    await withDeadline(once(child, "exit"), 5_000, "daemon shutdown");
+  }
+});
 
 test("rejects a fake daemon that presents its own unpinned identity", async () => {
-  const data = await mkdtemp(join(tmpdir(), "shardrail-fake-daemon-"));
+  const data = await withDeadline(mkdtemp(join(tmpdir(), "shardrail-fake-daemon-")), 10_000, "fake daemon temp dir");
   const socketPath = join(data, "fake.sock");
   const server = createServer((socket) => {
     socket.once("data", () => socket.write(`${JSON.stringify({
@@ -26,38 +43,38 @@ test("rejects a fake daemon that presents its own unpinned identity", async () =
     })}\n`));
   });
   try {
-    await new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject));
-    await assert.rejects(connect({
+    await withDeadline(new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject)), 5_000, "fake daemon listen");
+    await withDeadline(assert.rejects(connect({
       socketPath, clientId: "fake", privateKey: new Uint8Array(32), hostPublicKey: "11".repeat(32),
-    }), /does not match the pinned key/);
+    }), /does not match the pinned key/), 5_000, "fake daemon authentication rejection");
   } finally {
-    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-    await rm(data, { recursive: true, force: true });
+    await withDeadline(new Promise<void>((resolveClose) => server.close(() => resolveClose())), 5_000, "fake daemon server close");
+    await withDeadline(rm(data, { recursive: true, force: true }), 5_000, "fake daemon temp cleanup");
   }
 });
 
 test("surfaces daemon authentication errors", async () => {
-  const data = await mkdtemp(join(tmpdir(), "shardrail-auth-error-"));
+  const data = await withDeadline(mkdtemp(join(tmpdir(), "shardrail-auth-error-")), 10_000, "auth error temp dir");
   const socketPath = join(data, "auth-error.sock");
   const server = createServer((socket) => {
     socket.once("data", () => socket.write(`${JSON.stringify({ error: "client is not registered" })}\n`));
   });
   try {
-    await new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject));
-    await assert.rejects(connect({
+    await withDeadline(new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject)), 5_000, "auth error server listen");
+    await withDeadline(assert.rejects(connect({
       socketPath, clientId: "unknown", privateKey: new Uint8Array(32), hostPublicKey: "11".repeat(32),
-    }), /client is not registered/);
+    }), /client is not registered/), 5_000, "auth error rejection");
   } finally {
-    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-    await rm(data, { recursive: true, force: true });
+    await withDeadline(new Promise<void>((resolveClose) => server.close(() => resolveClose())), 5_000, "auth error server close");
+    await withDeadline(rm(data, { recursive: true, force: true }), 5_000, "auth error temp cleanup");
   }
 });
 
 test("reports bounded replay overflow once with an explicit reconnect error", async () => {
-  const data = await mkdtemp(join(tmpdir(), "shardrail-overflow-daemon-"));
+  const data = await withDeadline(mkdtemp(join(tmpdir(), "shardrail-overflow-daemon-")), 10_000, "overflow temp dir");
   const socketPath = join(data, "overflow.sock");
   const hostSeed = new Uint8Array(32).fill(9);
-  const hostPublicKey = Buffer.from(await ed.getPublicKeyAsync(hostSeed)).toString("hex");
+  const hostPublicKey = Buffer.from(await withDeadline(ed.getPublicKeyAsync(hostSeed), 5_000, "overflow test key generation")).toString("hex");
   const server = createServer((socket) => {
     socket.on("error", () => {});
     let buffer = "";
@@ -89,11 +106,11 @@ test("reports bounded replay overflow once with an explicit reconnect error", as
   let client: Awaited<ReturnType<typeof connect>> | undefined;
   let timeout: NodeJS.Timeout | undefined;
   try {
-    await new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject));
-    client = await connect({ socketPath, clientId: randomUUID(), privateKey: new Uint8Array(32), hostPublicKey });
+    await withDeadline(new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once("error", reject)), 5_000, "overflow server listen");
+    client = await withDeadline(connect({ socketPath, clientId: randomUUID(), privateKey: new Uint8Array(32), hostPublicKey }), 5_000, "overflow client connect");
     let prematureError: Error | undefined;
     client.onError((error) => { prematureError = error; });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await withDeadline(new Promise((resolve) => setTimeout(resolve, 20)), 1_000, "overflow handler settle");
     assert.equal(prematureError, undefined, "registering an error handler must not resume frame reads");
     let errorCount = 0;
     const overflow = new Promise<Error>((resolveError, reject) => {
@@ -102,52 +119,56 @@ test("reports bounded replay overflow once with an explicit reconnect error", as
     });
     let unsubscribe = () => {};
     unsubscribe = client.onFrame(() => unsubscribe());
-    assert.match((await overflow).message, /replay buffer overflow.*reconnect to resync/);
+    assert.match((await withDeadline(overflow, 3_000, "overflow notification")).message, /replay buffer overflow.*reconnect to resync/);
     client.onError(() => { errorCount++; });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await withDeadline(new Promise((resolve) => setTimeout(resolve, 20)), 1_000, "overflow duplicate handler settle");
     assert.equal(errorCount, 1);
   } finally {
     clearTimeout(timeout);
     client?.close();
-    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-    await rm(data, { recursive: true, force: true });
+    await withDeadline(new Promise<void>((resolveClose) => server.close(() => resolveClose())), 5_000, "overflow server close");
+    await withDeadline(rm(data, { recursive: true, force: true }), 5_000, "overflow temp cleanup");
   }
 });
 
-test("authenticates, sends a command, resumes and reconnects to the real daemon", async () => {
-  const data = await mkdtemp(join(tmpdir(), "shardrail-client-"));
+test("authenticates, sends a command, resumes and reconnects to the real daemon", { timeout: 120_000 }, async () => {
+  const data = await withDeadline(mkdtemp(join(tmpdir(), "shardrail-client-")), 10_000, "client daemon temp dir");
   let client: Awaited<ReturnType<typeof connect>> | undefined;
+  let daemon: ChildProcess | undefined;
+  let daemonStderr = "";
   try {
-    const registration = spawnSync(daemonBin, ["--data-dir", data, "client", "add", "--label", "client-test", "--scope", "full"], { encoding: "utf8" });
+    const registration = spawnSync(daemonBin, ["--data-dir", data, "client", "add", "--label", "client-test", "--scope", "full"], { encoding: "utf8", timeout: 15_000 });
     assert.equal(registration.status, 0, registration.stderr);
     const values = Object.fromEntries(registration.stdout.trim().split(/\s+/).map((part) => part.split("=")));
     const clientId = values.client_id;
     assert.ok(clientId);
-    const privateKey = new Uint8Array(await readFile(join(data, `client-${clientId}.key`)));
-    const daemon = spawn(daemonBin, ["--data-dir", data, "--no-file-log", "--fake-acp-path", fakeBin], { stdio: ["ignore", "ignore", "pipe"] });
+    const privateKey = new Uint8Array(await withDeadline(readFile(join(data, `client-${clientId}.key`)), 5_000, "client private key read"));
+    daemon = spawn(daemonBin, ["--data-dir", data, "--no-file-log", "--fake-acp-path", fakeBin], { stdio: ["ignore", "ignore", "pipe"], detached: true });
+    daemon.stderr?.setEncoding("utf8");
+    daemon.stderr?.on("data", (chunk: string) => { daemonStderr += chunk; });
     const daemonExit = once(daemon, "exit");
     children.push(daemon);
-    await new Promise<void>((resolveSocket, reject) => {
+    await withDeadline(new Promise<void>((resolveSocket, reject) => {
       const deadline = setTimeout(() => reject(new Error("daemon socket did not become ready")), 10_000);
       const check = () => {
         if (existsSync(join(data, "shardraild.sock"))) { clearTimeout(deadline); resolveSocket(); }
-        else if (daemon.exitCode !== null) { clearTimeout(deadline); reject(new Error(`daemon exited before socket was ready: ${daemon.exitCode}`)); }
+        else if (daemon?.exitCode !== null) { clearTimeout(deadline); reject(new Error(`daemon exited before socket was ready: ${daemon?.exitCode}`)); }
         else setTimeout(check, 25);
       };
       check();
-    });
+    }), 15_000, "daemon socket startup");
 
     const options = { socketPath: join(data, "shardraild.sock"), clientId, privateKey, hostPublicKey: values.host_public_key! };
-    await assert.rejects(connect({ ...options, hostPublicKey: "00".repeat(32) }), /does not match the pinned key/);
-    await assert.rejects(connect({ ...options, privateKey: new Uint8Array(32).fill(7) }), /client key is not authorized/);
-    client = await connect(options);
+    await withDeadline(assert.rejects(connect({ ...options, hostPublicKey: "00".repeat(32) }), /does not match the pinned key/), 15_000, "wrong host key rejection");
+    await withDeadline(assert.rejects(connect({ ...options, privateKey: new Uint8Array(32).fill(7) }), /client key is not authorized/), 15_000, "wrong client key rejection");
+    client = await withDeadline(connect(options), 15_000, "client connect");
     assert.equal(client.host.scope, "full");
     const firstEvent = new Promise<Extract<import("@shardrail/contracts").DaemonFrame, { kind: "durable_event" }>>((resolveEvent) => {
       const off = client!.onFrame((frame) => { if (frame.kind === "durable_event") { off(); resolveEvent(frame); } });
     });
     const commandId = randomUUID();
     client.request({ command_id: commandId, kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
-    const event = await firstEvent;
+    const event = await withDeadline(firstEvent, 15_000, "first durable event");
     assert.equal(event.event.kind, "session_created");
     assert.equal(typeof event.receipt_wall_clock_ms, "number");
 
@@ -163,7 +184,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
         resolveApproval({ approvalId: payload.approval_id, rejectOptionId: rejectOption.option_id, binding: payload.binding });
       });
     });
-    const { approvalId, rejectOptionId, binding } = await approval;
+    const { approvalId, rejectOptionId, binding } = await withDeadline(approval, 15_000, "approval request");
     const resolved = new Promise<void>((resolveApproval, reject) => {
       const deadline = setTimeout(() => { offResolved(); reject(new Error("approval resolution was not acknowledged")); }, 10_000);
       const offResolved = client!.onFrame((frame) => {
@@ -175,21 +196,25 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
       });
     });
     client.resolveApproval({ approval_id: approvalId, option_id: rejectOptionId, content_hash: binding.content_hash, session_id: binding.session_id, turn_id: binding.turn_id, provider_request_id: binding.provider_request_id });
-    await resolved;
+    await withDeadline(resolved, 15_000, "approval resolution");
 
-    client.resume(0);
-    const replay = new Promise<void>((resolveReplay) => {
-      const off = client!.onFrame((frame) => { if (frame.kind === "durable_event" && frame.cursor === event.cursor) { off(); resolveReplay(); } });
+    const replay = new Promise<void>((resolveReplay, rejectReplay) => {
+      const off = client!.onFrame((frame) => {
+        if (frame.kind === "durable_event" && frame.cursor > event.cursor) { clearTimeout(timer); off(); offError(); resolveReplay(); }
+      });
+      const offError = client!.onError((error) => { clearTimeout(timer); off(); offError(); rejectReplay(error); });
+      const timer = setTimeout(() => { off(); offError(); rejectReplay(new Error(`resume did not deliver an event after cursor ${event.cursor}`)); }, 5_000);
     });
-    await replay;
+    client.resume(event.cursor);
+    await withDeadline(replay, 15_000, "journal resume replay");
     const journalEpoch = client.host.journal_epoch;
     client.close();
-    client = await connect({ socketPath: join(data, "shardraild.sock"), clientId, privateKey, hostPublicKey: values.host_public_key, cursor: event.cursor - 1, journalEpoch });
+    client = await withDeadline(connect({ socketPath: join(data, "shardraild.sock"), clientId, privateKey, hostPublicKey: values.host_public_key, cursor: event.cursor - 1, journalEpoch }), 15_000, "reconnect with cursor");
     const reconnected = new Promise<void>((resolveReplay) => {
       const off = client!.onFrame((frame) => { if (frame.kind === "durable_event" && frame.cursor === event.cursor) { off(); resolveReplay(); } });
     });
-    await reconnected;
-    const resumed = await client.reconnect();
+    await withDeadline(reconnected, 15_000, "reconnect replay");
+    const resumed = await withDeadline(client.reconnect(), 15_000, "client reconnect handshake");
     assert.equal(resumed.host.journal_epoch, journalEpoch);
     resumed.close();
 
@@ -198,7 +223,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     for (let i = 0; i < 40; i++) {
       client.request({ command_id: randomUUID(), kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
     }
-    await new Promise<void>((resolveCreated, reject) => {
+    await withDeadline(new Promise<void>((resolveCreated, reject) => {
       const deadline = setTimeout(() => reject(new Error(`created ${created}/40 sessions`)), 10_000);
       let checkTimer: NodeJS.Timeout;
       const check = () => {
@@ -206,10 +231,10 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
         else checkTimer = setTimeout(check, 10);
       };
       check();
-    });
+    }), 15_000, "40 session creation events");
     offCreated();
     client.close();
-    client = await connect({ ...options, cursor: 0, journalEpoch });
+    client = await withDeadline(connect({ ...options, cursor: 0, journalEpoch }), 15_000, "full journal replay connect");
     const replayed = new Promise<[number[], number[]]>((resolveReplay, reject) => {
       const cursors: number[][] = [[], []];
       const deadline = setTimeout(() => { off(); reject(new Error(`replayed ${cursors[0]?.length ?? 0}/41 durable events`)); }, 10_000);
@@ -223,7 +248,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
       }));
       const off = () => listeners.forEach((unsubscribe) => unsubscribe());
     });
-    const [firstListenerCursors, secondListenerCursors] = await replayed;
+    const [firstListenerCursors, secondListenerCursors] = await withDeadline(replayed, 15_000, "full journal replay");
     assert.deepEqual(firstListenerCursors, Array.from({ length: 41 }, (_, index) => index + 1));
     assert.deepEqual(secondListenerCursors, firstListenerCursors);
     const allowedApproval = new Promise<{ approvalId: string; optionId: string; binding: { content_hash: string; session_id: string; turn_id: string; provider_request_id: string } }>((resolveApproval, reject) => {
@@ -239,7 +264,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
       });
     });
     client.request({ command_id: randomUUID(), kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
-    const { approvalId: allowedId, optionId, binding: allowBinding } = await allowedApproval;
+    const { approvalId: allowedId, optionId, binding: allowBinding } = await withDeadline(allowedApproval, 15_000, "allow approval request");
     const allowed = new Promise<void>((resolveApproval, reject) => {
       const deadline = setTimeout(() => { offAllowed(); reject(new Error("allow approval resolution was not acknowledged")); }, 10_000);
       const offAllowed = client!.onFrame((frame) => {
@@ -251,19 +276,25 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
       });
     });
     client.resolveApproval({ approval_id: allowedId, option_id: optionId, content_hash: allowBinding.content_hash, session_id: allowBinding.session_id, turn_id: allowBinding.turn_id, provider_request_id: allowBinding.provider_request_id });
-    await allowed;
+    await withDeadline(allowed, 15_000, "allow resolution");
     let disconnectCount = 0;
     const connectionError = new Promise<Error>((resolveError) => {
       client!.onError((error) => { disconnectCount++; resolveError(error); });
     });
-    daemon.kill("SIGKILL");
-    await daemonExit;
-    assert.match((await connectionError).message, /socket closed|ECONNRESET/);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    try { process.kill(-daemon.pid!, "SIGKILL"); } catch { daemon.kill("SIGKILL"); }
+    await withDeadline(daemonExit, 5_000, "daemon exit after disconnect");
+    assert.match((await withDeadline(connectionError, 5_000, "client disconnect notification")).message, /socket closed|ECONNRESET/);
+    await withDeadline(new Promise((resolve) => setTimeout(resolve, 20)), 1_000, "disconnect handler settle");
     assert.equal(disconnectCount, 1);
     client.close();
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\ndaemon stderr:\n${daemonStderr || "(empty)"}`, { cause: error });
   } finally {
     client?.close();
-    await rm(data, { recursive: true, force: true });
+    if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
+      try { process.kill(-daemon.pid!, "SIGKILL"); } catch { daemon.kill("SIGKILL"); }
+      await withDeadline(once(daemon, "exit"), 5_000, "daemon cleanup exit");
+    }
+    await withDeadline(rm(data, { recursive: true, force: true }), 5_000, "client daemon temp cleanup");
   }
 });
