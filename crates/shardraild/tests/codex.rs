@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shardrail_journal::Journal;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,6 +19,26 @@ struct TestClient {
 }
 
 struct DaemonGuard(Child);
+
+struct KillThese(Vec<u32>);
+
+impl Drop for KillThese {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+    }
+}
+
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
@@ -96,6 +117,15 @@ fn codex_dirs() -> CodexDirs {
 }
 
 fn start_codex(dirs: &CodexDirs, mode: &str, timeout_secs: u64) -> DaemonGuard {
+    start_codex_with(dirs, mode, timeout_secs, &[])
+}
+
+fn start_codex_with(
+    dirs: &CodexDirs,
+    mode: &str,
+    timeout_secs: u64,
+    extra: &[&str],
+) -> DaemonGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
     command
         .arg("--data-dir")
@@ -112,8 +142,15 @@ fn start_codex(dirs: &CodexDirs, mode: &str, timeout_secs: u64) -> DaemonGuard {
         .env("SHARDRAIL_CODEX_FAKE_MODE", mode)
         .env("SHARDRAIL_CODEX_TRACE", &dirs.trace)
         .env("SHARDRAIL_CODEX_ARGV_OUT", &dirs.argv)
+        .env("SHARDRAIL_CODEX_PID_OUT", pid_path(dirs))
+        .env("SHARDRAIL_CODEX_FD_OUT", fd_path(dirs))
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::from(
+            std::fs::File::create(dirs.data.path().join("daemon.stderr")).unwrap(),
+        ));
+    for arg in extra {
+        command.arg(arg);
+    }
     DaemonGuard(command.spawn().unwrap())
 }
 
@@ -1102,22 +1139,28 @@ fn codex_recorded_extensions_are_disabled_before_thread_start() {
         .collect::<Vec<_>>()
         .join(",");
     expected.push(format!("skills.config=[{disabled}]"));
+    expected.push("mcp_servers.node_repl.enabled=false".into());
+    expected.push("mcp_servers.\"odd.server\".enabled=false".into());
+    expected.push("mcp_servers.soma.enabled=false".into());
     assert_eq!(values, expected);
     let skills = extension_indexes(&trace, "skills/list");
     let hooks = extension_indexes(&trace, "hooks/list");
     let plugins = extension_indexes(&trace, "plugin/installed");
     let apps = extension_indexes(&trace, "app/list");
+    let configs = extension_indexes(&trace, "config/read");
     let threads = extension_indexes(&trace, "thread/start");
     assert_eq!(skills.len(), 2, "preflight and session both list skills");
     assert_eq!(hooks.len(), 1);
     assert_eq!(plugins.len(), 1);
     assert_eq!(apps.len(), 1);
+    assert_eq!(configs.len(), 2, "preflight and session both read config");
     assert_eq!(threads.len(), 1);
     assert!(
         skills[1] < hooks[0]
             && hooks[0] < plugins[0]
             && plugins[0] < apps[0]
-            && apps[0] < threads[0]
+            && apps[0] < configs[1]
+            && configs[1] < threads[0]
     );
     assert_extension_exchange(&trace);
     let verified = journal_events(dirs.data.path())
@@ -1129,6 +1172,10 @@ fn codex_recorded_extensions_are_disabled_before_thread_start() {
     assert_eq!(verified.payload["hooks"], 0);
     assert_eq!(verified.payload["enabled_plugins"], 0);
     assert_eq!(verified.payload["apps"], 0);
+    assert_eq!(verified.payload["mcp_servers"], 0);
+    let decoy = "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b";
+    assert!(!verified.payload.to_string().contains(decoy));
+    assert_no_decoy(&dirs, decoy);
 }
 
 #[test]
@@ -1151,8 +1198,290 @@ fn codex_extension_list_error_fails_closed() {
     assert_extension_rejected(&codex_dirs(), "list-error", "skills/list failed");
 }
 
+#[test]
+fn codex_mcp_left_enabled_fails_closed() {
+    assert_extension_rejected(&codex_dirs(), "mcp-enabled", "enabled mcp servers remain");
+}
+
+#[test]
+fn codex_config_read_error_fails_closed() {
+    assert_extension_rejected(&codex_dirs(), "config-read-error", "config/read failed");
+}
+
+#[test]
+fn codex_mcp_startup_after_thread_start_stops_the_session() {
+    assert_mcp_activity_stops(&codex_dirs(), "mcp-startup", false);
+}
+
+#[test]
+fn codex_mcp_request_after_thread_start_stops_the_session() {
+    assert_mcp_activity_stops(&codex_dirs(), "mcp-request", false);
+}
+
+#[test]
+fn codex_mcp_startup_during_a_turn_interrupts_and_stops() {
+    assert_mcp_activity_stops(&codex_dirs(), "mcp-during-turn", true);
+}
+
+#[test]
+fn codex_replaced_path_after_pin_refuses_to_start() {
+    let dirs = codex_dirs();
+    let replaced = replaced_workdir(&dirs);
+    let _cleanup = RemoveDir(replaced);
+    let _daemon = start_codex_with(&dirs, "happy", 30, &["--test-replace-workdir-after-pin"]);
+    expect_extension_rejection(
+        &dirs,
+        "chdir-fd: directory identity does not match the pinned workdir",
+    );
+}
+
+#[test]
+fn codex_child_does_not_inherit_the_workdir_directory_fd() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "happy", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let workdir = std::fs::canonicalize(dirs.work.path()).unwrap();
+    let metadata = std::fs::metadata(&workdir).unwrap();
+    let report = std::fs::read_to_string(fd_path(&dirs)).expect("codex fd report");
+    let mut rows = 0usize;
+    for line in report.lines() {
+        let value: Value = serde_json::from_str(line).unwrap();
+        let fds = value["fds"].as_array().expect("fd rows");
+        rows += fds.len();
+        for fd in fds {
+            let target = fd["target"].as_str().unwrap_or("");
+            let path = Path::new(target);
+            let same_path = !target.is_empty()
+                && (path == workdir
+                    || std::fs::canonicalize(path).ok().as_deref() == Some(workdir.as_path()));
+            let same_dir = fd["dir"] == true
+                && fd["dev"].as_u64() == Some(metadata.dev())
+                && fd["ino"].as_u64() == Some(metadata.ino());
+            assert!(
+                !same_path && !same_dir,
+                "fd {} points at the workdir ({target}): {fd}",
+                fd["fd"]
+            );
+        }
+    }
+    assert!(rows > 0, "codex reported no open fds: {report}");
+}
+
+#[test]
+fn codex_parent_stdin_eof_stops_the_daemon_and_the_child() {
+    let dirs = codex_dirs();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
+        .arg("--data-dir")
+        .arg(dirs.data.path())
+        .arg("--no-file-log")
+        .arg("--exit-with-stdin")
+        .arg("--codex-app-server")
+        .arg(fake_program())
+        .arg("--codex-workdir")
+        .arg(dirs.work.path())
+        .arg("--approval-timeout-secs")
+        .arg("30")
+        .env("SHARDRAIL_CODEX_FAKE_MODE", "idle")
+        .env("SHARDRAIL_CODEX_TRACE", &dirs.trace)
+        .env("SHARDRAIL_CODEX_PID_OUT", pid_path(&dirs))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(
+            std::fs::File::create(dirs.data.path().join("daemon.stderr")).unwrap(),
+        ));
+    let mut daemon = command.spawn().unwrap();
+    let mut kill = KillThese(vec![daemon.id()]);
+    let stdin = daemon.stdin.take();
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let child_pid = read_pid_file(&pid_path(&dirs));
+    kill.0.push(child_pid.trim().parse().expect("codex pid"));
+    drop(stdin);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match daemon.try_wait() {
+            Ok(Some(status)) => {
+                assert!(status.success(), "daemon exit status {status}");
+                break;
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            other => panic!("daemon did not exit after stdin closed: {other:?}"),
+        }
+    }
+    wait_until_pid_gone(&child_pid);
+    assert!(
+        !pid_alive(daemon.id()),
+        "daemon {} was still running",
+        daemon.id()
+    );
+    kill.0.clear();
+}
+
+fn assert_mcp_activity_stops(dirs: &CodexDirs, mode: &str, during_turn: bool) {
+    let daemon = start_codex(dirs, mode, 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = journal_session_id(dirs.data.path());
+    if during_turn {
+        send_command(
+            &mut stream,
+            "turn.start",
+            json!({"session_id": session_id, "prompt": "hello"}),
+        );
+        let started = command_reply(&mut reader);
+        assert_eq!(started["kind"], "command_accepted", "{started}");
+    }
+    let events = wait_for_journal(dirs.data.path(), "codex_extensions_rejected");
+    let event = events
+        .iter()
+        .find(|event| event.kind == "codex_extensions_rejected")
+        .unwrap();
+    let reason = event.payload["reason"].as_str().unwrap();
+    assert!(reason.contains("mcp server activity"), "{reason}");
+    assert!(
+        events.iter().all(|event| {
+            event.kind != "provider_notice"
+                || event.payload["method"]
+                    .as_str()
+                    .is_none_or(|method| !method.starts_with("mcpServer"))
+        }),
+        "mcp activity was journaled as a notice"
+    );
+    if during_turn {
+        let trace = trace_messages(&dirs.trace);
+        assert!(
+            extension_indexes(&trace, "turn/interrupt").len() == 1,
+            "running turn was not interrupted: {trace:?}"
+        );
+    }
+    let _ = wait_for_journal(dirs.data.path(), "process_exited");
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "again"}),
+    );
+    let later = command_reply(&mut reader);
+    assert_eq!(later["kind"], "command_rejected", "{later}");
+    assert!(
+        later["error"]
+            .as_str()
+            .unwrap()
+            .contains("mcp server activity"),
+        "{}",
+        later["error"]
+    );
+    let child_pid = std::fs::read_to_string(pid_path(dirs)).unwrap_or_default();
+    assert!(!child_pid.trim().is_empty(), "codex pid was not recorded");
+    wait_until_pid_gone(&child_pid);
+    drop(daemon);
+    assert_no_decoy(dirs, "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b");
+}
+
+fn fd_path(dirs: &CodexDirs) -> PathBuf {
+    dirs.data.path().join("codex.fds")
+}
+
+fn pid_path(dirs: &CodexDirs) -> PathBuf {
+    dirs.data.path().join("codex.pid")
+}
+
+fn replaced_workdir(dirs: &CodexDirs) -> PathBuf {
+    let path =
+        std::fs::canonicalize(dirs.work.path()).unwrap_or_else(|_| dirs.work.path().to_path_buf());
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{name}-replaced"))
+}
+
+fn read_pid_file(path: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return text;
+        }
+        assert!(Instant::now() < deadline, "codex pid was not recorded");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn journal_session_id(path: &Path) -> String {
+    journal_events(path)
+        .into_iter()
+        .find(|event| event.kind == "session_created")
+        .expect("session_created")
+        .session_id
+        .to_string()
+}
+
+fn wait_for_journal(path: &Path, kind: &str) -> Vec<shardrail_protocol::DurableEvent> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = journal_events(path);
+        if events.iter().any(|event| event.kind == kind) || Instant::now() > deadline {
+            assert!(
+                events.iter().any(|event| event.kind == kind),
+                "missing {kind}"
+            );
+            return events;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_until_pid_gone(text: &str) {
+    let pid = text.trim();
+    if pid.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let alive = Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !alive {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("codex child {pid} was still running");
+}
+
+fn assert_no_decoy(dirs: &CodexDirs, decoy: &str) {
+    let journal = std::fs::read(dirs.data.path().join("journal.sqlite3")).unwrap_or_default();
+    let log = std::fs::read(dirs.data.path().join("daemon.stderr")).unwrap_or_default();
+    let trace = std::fs::read(&dirs.trace).unwrap_or_default();
+    for (name, bytes) in [("journal", journal), ("log", log), ("trace", trace)] {
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(decoy),
+            "{name} contains the config/read decoy"
+        );
+    }
+}
+
 fn assert_extension_rejected(dirs: &CodexDirs, mode: &str, reason: &str) {
     let _daemon = start_codex(dirs, mode, 30);
+    expect_extension_rejection(dirs, reason);
+}
+
+fn expect_extension_rejection(dirs: &CodexDirs, reason: &str) {
     let client = add_client(dirs.data.path(), "full");
     let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
     send_command(&mut stream, "session.create", json!({}));

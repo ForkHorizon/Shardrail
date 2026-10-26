@@ -6,24 +6,51 @@
 //! those canonical paths exactly: relative paths, `.` / `..`, and any symlink
 //! component are rejected before the canonical comparison.
 //!
-//! The admitted directory is an open file descriptor. Child processes start in
-//! that directory object via `chdir-fd`, which calls `fchdir` before `exec`.
-//! Replacing the path after admission does not move the child.
+//! The admitted directory is an open file descriptor kept for its device and
+//! inode. `chdir-fd` opens the path itself, checks that identity, then
+//! `fchdir`s and execs. A swapped path does not match, so the child refuses
+//! to start, and no directory fd is cleared of `FD_CLOEXEC` in the daemon.
 
-use nix::fcntl::{AT_FDCWD, FcntlArg, FdFlag, OFlag, fcntl, openat};
+use nix::fcntl::{AT_FDCWD, OFlag, openat};
 use nix::sys::stat::Mode;
 use std::env;
 use std::fs::{self, File};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
-const SHARDRAIL_PREFIX: &str = "/Users/daliys/Daliys/Shardrail";
-const SHARDRAIL_GIT: &str = "/Users/daliys/Daliys/Shardrail/.git";
-const S1_TESTREPO: &str = "/Users/daliys/Daliys/Shardrail/spikes/s1-testrepo";
 const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+struct Checkout {
+    root: PathBuf,
+    git: PathBuf,
+    testrepo: PathBuf,
+}
+
+static REPO_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Tests and the daemon pass an explicit root. The compiled checkout is the default.
+pub(crate) fn install_repo_root(path: PathBuf) {
+    let _ = REPO_OVERRIDE.set(path);
+}
+
+fn checkout() -> Checkout {
+    if let Some(root) = REPO_OVERRIDE.get() {
+        return Checkout {
+            git: root.join(".git"),
+            testrepo: root.join("spikes/s1-testrepo"),
+            root: root.clone(),
+        };
+    }
+    Checkout {
+        root: PathBuf::from(env!("SHARDRAIL_REPO_ROOT")),
+        git: PathBuf::from(env!("SHARDRAIL_GIT_DIR")),
+        testrepo: PathBuf::from(env!("SHARDRAIL_S1_TESTREPO")),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct AllowedWorkdir {
@@ -43,29 +70,6 @@ impl std::fmt::Debug for PinnedWorkdir {
             .debug_struct("PinnedWorkdir")
             .field("path", &self.path)
             .finish_non_exhaustive()
-    }
-}
-
-/// Clears `FD_CLOEXEC` for the duration of one spawn so the child inherits the
-/// directory descriptor. The flag is restored when this guard drops.
-pub(crate) struct InheritedDirFd<'a> {
-    file: &'a File,
-}
-
-impl<'a> InheritedDirFd<'a> {
-    pub(crate) fn acquire(file: &'a File) -> io::Result<Self> {
-        fcntl(file.as_fd(), FcntlArg::F_SETFD(FdFlag::empty())).map_err(io::Error::from)?;
-        Ok(Self { file })
-    }
-
-    pub(crate) fn raw(&self) -> i32 {
-        self.file.as_raw_fd()
-    }
-}
-
-impl Drop for InheritedDirFd<'_> {
-    fn drop(&mut self) {
-        let _ = fcntl(self.file.as_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
     }
 }
 
@@ -234,22 +238,22 @@ fn shardrail_prefix_rejected(canonical: &Path) -> bool {
     if s1_testrepo_exception(canonical) {
         return false;
     }
-    let prefix = Path::new(SHARDRAIL_PREFIX);
-    canonical == prefix || canonical.starts_with(prefix) || inside_directory(canonical, prefix)
+    let prefix = checkout().root;
+    canonical == prefix || canonical.starts_with(&prefix) || inside_directory(canonical, &prefix)
 }
 
 fn s1_testrepo_exception(canonical: &Path) -> bool {
-    let exception = Path::new(S1_TESTREPO);
-    if canonical == exception || canonical.starts_with(exception) {
+    let exception = checkout().testrepo;
+    if canonical == exception || canonical.starts_with(&exception) {
         return true;
     }
-    if let Ok(real) = fs::canonicalize(exception) {
+    if let Ok(real) = fs::canonicalize(&exception) {
         let real = logical_path(&real);
         if canonical == real || canonical.starts_with(&real) {
             return true;
         }
     }
-    inside_directory(canonical, exception)
+    inside_directory(canonical, &exception)
 }
 
 fn logical_path(canonical: &Path) -> PathBuf {
@@ -334,11 +338,11 @@ fn git_common_dir_with(git: &Path, dir: &Path) -> io::Result<Option<PathBuf>> {
 
 fn common_is_shardrail_git(common: &Path) -> bool {
     let common = logical_path(&fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf()));
-    let expected = Path::new(SHARDRAIL_GIT);
-    if common == expected || same_dir(&common, expected) {
+    let expected = checkout().git;
+    if common == expected || same_dir(&common, &expected) {
         return true;
     }
-    fs::canonicalize(expected).is_ok_and(|real| {
+    fs::canonicalize(&expected).is_ok_and(|real| {
         let real = logical_path(&real);
         common == real || same_dir(&common, &real)
     })
@@ -429,19 +433,19 @@ mod tests {
         );
         assert!(git_common_is_shardrail(&worktree).unwrap());
 
-        let repo_root = Path::new(SHARDRAIL_PREFIX);
-        let repo_root_error = validate_session_workdir(repo_root).unwrap_err();
+        let repo_root = checkout().root;
+        let repo_root_error = validate_session_workdir(&repo_root).unwrap_err();
         assert!(
             repo_root_error
                 .to_string()
                 .contains("refusing a path inside the Shardrail repository")
         );
 
-        let testrepo = Path::new(S1_TESTREPO);
+        let testrepo = checkout().testrepo;
         if testrepo.is_dir() {
-            let accepted = validate_session_workdir(testrepo).unwrap();
-            assert_eq!(accepted.path, canonical_path(testrepo));
-            assert!(!git_common_is_shardrail(testrepo).unwrap());
+            let accepted = validate_session_workdir(&testrepo).unwrap();
+            assert_eq!(accepted.path, canonical_path(&testrepo));
+            assert!(!git_common_is_shardrail(&testrepo).unwrap());
         }
 
         let directory = tempfile::tempdir().unwrap();
@@ -472,7 +476,7 @@ mod tests {
             "{home_error}"
         );
 
-        let repo = Path::new(SHARDRAIL_PREFIX);
+        let repo = checkout().root;
         let data_repo = Path::new(DATA_VOLUME).join(repo.strip_prefix("/").unwrap());
         let repo_error = validate_session_workdir(&data_repo).unwrap_err();
         assert!(
@@ -494,11 +498,11 @@ mod tests {
             );
         }
 
-        let testrepo = Path::new(S1_TESTREPO);
+        let testrepo = checkout().testrepo;
         let data_testrepo = Path::new(DATA_VOLUME).join(testrepo.strip_prefix("/").unwrap());
-        if data_testrepo.is_dir() && same_dir(testrepo, &data_testrepo) {
+        if data_testrepo.is_dir() && same_dir(&testrepo, &data_testrepo) {
             let accepted = validate_session_workdir(&data_testrepo).unwrap();
-            assert_eq!(accepted.path, canonical_path(testrepo));
+            assert_eq!(accepted.path, canonical_path(&testrepo));
         }
     }
 
@@ -509,14 +513,11 @@ mod tests {
             Some("refusing a Shardrail worktree")
         );
         assert_eq!(
-            rejection_message(
-                Path::new("/Users/daliys/Daliys/Shardrail/spikes/wt-w8"),
-                false
-            ),
+            rejection_message(&checkout().root.join("spikes/wt-w8"), false),
             Some("refusing a path inside the Shardrail repository")
         );
-        assert_eq!(rejection_message(Path::new(S1_TESTREPO), false), None);
-        assert!(common_is_shardrail_git(Path::new(SHARDRAIL_GIT)));
+        assert_eq!(rejection_message(&checkout().testrepo, false), None);
+        assert!(common_is_shardrail_git(&checkout().git));
         assert!(!common_is_shardrail_git(Path::new("/tmp/other/.git")));
     }
 
@@ -620,11 +621,59 @@ mod tests {
     }
 
     #[test]
-    fn pinned_directory_survives_replacement_before_spawn() {
+    fn helper_enters_the_pinned_directory_and_refuses_a_swap() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("PINNED"), b"yes").unwrap();
         let allowed = validate_session_workdir(directory.path()).unwrap();
         let pinned = pin_allowed(&allowed).unwrap();
+        let metadata = pinned.directory.metadata().unwrap();
+        let list_fds = r#"
+import fcntl, os, stat
+print("PINNED" if os.path.isfile("PINNED") else "MISSING")
+cwd = os.stat(".")
+fds = set(range(0, 64))
+try:
+    fds.update(int(name) for name in os.listdir("/dev/fd") if name.isdigit())
+except OSError:
+    pass
+for fd in sorted(fds):
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        continue
+    target = ""
+    try:
+        raw = fcntl.fcntl(fd, 50, b"\0" * 1024)
+        if isinstance(raw, bytes):
+            target = raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+    except OSError:
+        target = ""
+    leaked = stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (cwd.st_dev, cwd.st_ino)
+    print(f"fd {fd} target={target} leak={int(leaked)}")
+"#;
+        let entered = Command::new(chdir_helper())
+            .arg(&pinned.path)
+            .arg(metadata.dev().to_string())
+            .arg(metadata.ino().to_string())
+            .arg("python3")
+            .arg("-c")
+            .arg(list_fds)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&entered.stdout);
+        assert!(
+            entered.status.success(),
+            "status {:?} stderr {}",
+            entered.status,
+            String::from_utf8_lossy(&entered.stderr)
+        );
+        assert!(text.contains("PINNED"), "{text}");
+        assert!(
+            !text.contains("leak=1"),
+            "child inherited a directory fd: {text}"
+        );
+
         let saved = pinned.path.with_file_name(format!(
             "{}-saved",
             pinned.path.file_name().unwrap().to_string_lossy()
@@ -632,25 +681,23 @@ mod tests {
         fs::rename(&pinned.path, &saved).unwrap();
         fs::create_dir(&pinned.path).unwrap();
         fs::write(pinned.path.join("SWAPPED"), b"yes").unwrap();
-
-        let held = InheritedDirFd::acquire(&pinned.directory).unwrap();
-        let output = Command::new(chdir_helper())
-            .arg(held.raw().to_string())
+        let refused = Command::new(chdir_helper())
+            .arg(&pinned.path)
+            .arg(metadata.dev().to_string())
+            .arg(metadata.ino().to_string())
             .arg("/bin/sh")
             .arg("-c")
-            .arg("if test -f PINNED; then echo PINNED; fi; if test -f SWAPPED; then echo SWAPPED; fi")
+            .arg("echo STARTED")
             .stdin(Stdio::null())
             .output()
             .unwrap();
-        drop(held);
-        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!refused.status.success());
+        let err = String::from_utf8_lossy(&refused.stderr);
         assert!(
-            output.status.success(),
-            "status {:?} stderr {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+            err.contains("directory identity does not match the pinned workdir"),
+            "{err}"
         );
-        assert!(text.contains("PINNED"), "{text}");
-        assert!(!text.contains("SWAPPED"), "{text}");
+        assert!(!String::from_utf8_lossy(&refused.stdout).contains("STARTED"));
+        let _ = fs::remove_dir_all(&saved);
     }
 }

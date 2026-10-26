@@ -79,6 +79,16 @@ struct Args {
     /// Extra Codex `-c` override, placed before the mandatory safety overrides.
     #[arg(long = "codex-config", value_name = "KEY=VALUE")]
     codex_config: Vec<String>,
+    /// Exit when stdin reaches EOF, after stopping Codex children.
+    /// The parent holds the write end of that pipe.
+    #[arg(long)]
+    exit_with_stdin: bool,
+    /// Checkout refused as a session workdir. Defaults to this build's repository.
+    #[arg(long, value_name = "DIR")]
+    shardrail_root: Option<PathBuf>,
+    /// Test hook: replace the pinned workdir path before the helper opens it.
+    #[arg(long, hide = true)]
+    test_replace_workdir_after_pin: bool,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
 }
@@ -872,6 +882,7 @@ fn codex_config(
         workdir,
         extra: args.codex_config.clone(),
         directory: None,
+        replace_after_pin: args.test_replace_workdir_after_pin,
     }))
 }
 
@@ -898,6 +909,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         None => {
+            if let Some(root) = args
+                .shardrail_root
+                .clone()
+                .or_else(|| std::env::var_os("SHARDRAIL_REPO_ROOT").map(PathBuf::from))
+            {
+                session_workdir::install_repo_root(root);
+            }
             let session_workdirs = session_workdir::collect_session_workdirs(
                 args.codex_workdir.as_deref(),
                 &args.session_workdir,
@@ -917,6 +935,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 codex,
                 session_workdirs,
+                args.exit_with_stdin,
             )
             .await?
         }
@@ -938,6 +957,7 @@ async fn run(
     browser: BrowserListenerOptions,
     codex: Option<codex_app_server::CodexConfig>,
     session_workdirs: Vec<session_workdir::AllowedWorkdir>,
+    exit_with_stdin: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -1031,18 +1051,45 @@ async fn run(
             }
         });
     }
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            if let Err(error) = serve_client(stream, daemon).await {
-                daemon_log::log(
-                    "WARN",
-                    "client",
-                    &format!("connection ended: {:?}", error.kind()),
-                );
+    let parent_closed = async move {
+        if !exit_with_stdin {
+            std::future::pending::<()>().await;
+            return;
+        }
+        let _ = tokio::task::spawn_blocking(|| {
+            let mut stdin = io::stdin();
+            let mut buffer = [0u8; 256];
+            loop {
+                match stdin.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
             }
-        });
+        })
+        .await;
+    };
+    tokio::pin!(parent_closed);
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    if let Err(error) = serve_client(stream, daemon).await {
+                        daemon_log::log(
+                            "WARN",
+                            "client",
+                            &format!("connection ended: {:?}", error.kind()),
+                        );
+                    }
+                });
+            }
+            _ = &mut parent_closed => {
+                daemon_log::log("INFO", "daemon", "parent stdin closed; stopping");
+                codex_app_server::shutdown_children();
+                return Ok(());
+            }
+        }
     }
 }
 

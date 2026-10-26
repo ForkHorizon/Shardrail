@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Scripted Codex app-server for shardraild tests. Speaks newline JSON-RPC only."""
 
+import fcntl
 import json
 import os
 import select
+import stat
 import sys
 import time
 
@@ -11,16 +13,72 @@ MODE = os.environ.get("SHARDRAIL_CODEX_FAKE_MODE", "happy")
 TRACE = os.environ.get("SHARDRAIL_CODEX_TRACE")
 ARGV_OUT = os.environ.get("SHARDRAIL_CODEX_ARGV_OUT")
 PID_OUT = os.environ.get("SHARDRAIL_CODEX_PID_OUT")
+FD_OUT = os.environ.get("SHARDRAIL_CODEX_FD_OUT")
 HERE = os.path.dirname(os.path.abspath(__file__))
 AUTOWRITE = os.path.join(HERE, "codex-0.160.0-on-request-autowrite.jsonl")
 SECRET = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A"
+# Present on the config/read wire. The daemon must not copy it into a journal,
+# log, or trace. The fixture redacts env and headers before it writes a trace.
+DECOY_SECRET = "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b"
+
+
+def scrub(node):
+    if isinstance(node, dict):
+        for key in ("env", "headers"):
+            if isinstance(node.get(key), dict):
+                node[key] = {name: "[redacted]" for name in node[key]}
+        for value in node.values():
+            scrub(value)
+    elif isinstance(node, list):
+        for item in node:
+            scrub(item)
 
 
 def log(message):
     if not TRACE:
         return
+    cloned = json.loads(json.dumps(message))
+    scrub(cloned)
     with open(TRACE, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(message) + "\n")
+        handle.write(json.dumps(cloned) + "\n")
+
+
+def fd_target(fd):
+    # macOS readlink("/dev/fd/N") returns EINVAL. F_GETPATH is the path lookup.
+    try:
+        raw = fcntl.fcntl(fd, 50, b"\0" * 1024)
+    except OSError:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.split(b"\0", 1)[0].decode("utf-8", "replace")
+    return ""
+
+
+def report_fds():
+    if not FD_OUT:
+        return
+    numbers = set(range(0, 64))
+    try:
+        numbers.update(int(name) for name in os.listdir("/dev/fd") if name.isdigit())
+    except OSError:
+        pass
+    rows = []
+    for fd in sorted(numbers):
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            continue
+        rows.append(
+            {
+                "fd": fd,
+                "target": fd_target(fd),
+                "dir": stat.S_ISDIR(info.st_mode),
+                "dev": info.st_dev,
+                "ino": info.st_ino,
+            }
+        )
+    with open(FD_OUT, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"pid": os.getpid(), "fds": rows}) + "\n")
 
 
 def send(message):
@@ -148,6 +206,27 @@ def empty_apps():
     return {"data": [], "nextCursor": None}
 
 
+def config_servers(child):
+    # Wire shape measured on codex-cli 0.160.0: result.config.mcp_servers is an
+    # object keyed by server name. env and headers carry the decoy on purpose.
+    servers = {
+        "node_repl": {"enabled": True, "command": "node", "env": {"TOKEN": DECOY_SECRET}},
+        "odd.server": {"enabled": True, "command": "odd", "env": {"TOKEN": DECOY_SECRET}},
+        "soma": {
+            "enabled": True,
+            "command": "soma",
+            "env": {"TOKEN": DECOY_SECRET},
+            "headers": {"Authorization": DECOY_SECRET},
+        },
+    }
+    if child:
+        for server in servers.values():
+            server["enabled"] = False
+        if MODE == "mcp-enabled":
+            servers["soma"]["enabled"] = True
+    return {"config": {"mcp_servers": servers, "model": "fake"}, "origins": {}}
+
+
 def command_hook():
     return {
         "currentHash": "fixture",
@@ -247,6 +326,7 @@ def complete(turn_id, status):
 
 
 def main():
+    report_fds()
     if ARGV_OUT:
         with open(ARGV_OUT, "w", encoding="utf-8") as handle:
             json.dump(sys.argv, handle)
@@ -284,6 +364,18 @@ def main():
                 {"environmentId": None, "installationId": "00000000-0000-4000-8000-000000000000", "serverName": "fake", "status": "disabled"},
             )
             continue
+        if method == "config/read":
+            if MODE == "config-read-error" and session_child():
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "error": {"code": -32000, "message": "config/read failed"},
+                    }
+                )
+            else:
+                reply(message["id"], config_servers(session_child()))
+            continue
         if method in ("skills/list", "hooks/list", "plugin/installed", "app/list"):
             result = extension_result(method, message)
             if result == "error":
@@ -299,6 +391,17 @@ def main():
             continue
         if method == "thread/start":
             reply(message["id"], thread_result(message.get("params") or {}))
+            if MODE == "mcp-startup":
+                notify(
+                    "mcpServer/startupStatus/updated",
+                    {"name": "soma", "status": "starting", "threadId": "thread-1"},
+                )
+            if MODE == "mcp-request":
+                request(
+                    "mcp-1",
+                    "mcpServer/elicitation/request",
+                    {"message": "no", "serverName": "soma"},
+                )
             if MODE == "idle":
                 time.sleep(30)
             continue
@@ -309,6 +412,15 @@ def main():
             if MODE == "slow-turn":
                 time.sleep(2)
             reply(message["id"], turn_result(turn_id))
+            if MODE == "mcp-during-turn":
+                notify(
+                    "mcpServer/startupStatus/updated",
+                    {"name": "soma", "status": "ready", "threadId": "thread-1"},
+                )
+                nxt = read_message()
+                if nxt and nxt.get("method") == "turn/interrupt":
+                    reply(nxt["id"], {})
+                return
             if MODE == "slow-turn":
                 complete(turn_id, "completed")
                 continue
