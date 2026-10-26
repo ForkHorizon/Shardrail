@@ -85,7 +85,9 @@ fn start_daemon(path: &Path) -> DaemonGuard {
     command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);
@@ -100,8 +102,10 @@ fn daemon_startup_writes_to_log_directory_override() {
     command
         .arg("--data-dir")
         .arg(data.path())
+        .arg("--exit-with-stdin")
         .arg("--log-dir")
         .arg(logs.path())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command.process_group(0);
@@ -128,6 +132,7 @@ fn start_browser_daemon(path: &Path, port: u16) -> DaemonGuard {
     command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
@@ -136,6 +141,7 @@ fn start_browser_daemon(path: &Path, port: u16) -> DaemonGuard {
         )
         .arg("--browser-listen")
         .arg(format!("127.0.0.1:{port}"))
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);
@@ -274,6 +280,7 @@ fn start_fake_daemon_with(
     command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--fake-acp-path")
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -288,6 +295,7 @@ fn start_fake_daemon_with(
     }
     command
         .arg("--no-file-log")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);
@@ -299,6 +307,7 @@ fn start_disconnect_after_approval_daemon(path: &Path) -> DaemonGuard {
     command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
@@ -306,6 +315,7 @@ fn start_disconnect_after_approval_daemon(path: &Path) -> DaemonGuard {
                 .join("../../target/debug/shardrail-fake-acp"),
         )
         .arg("--fake-acp-disconnect-after-permission")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);
@@ -1117,6 +1127,7 @@ fn fake_agent_stream_chunks_are_durable_events_with_receipt_timestamps() {
     command
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
@@ -1124,6 +1135,7 @@ fn fake_agent_stream_chunks_are_durable_events_with_receipt_timestamps() {
                 .join("../../target/debug/shardrail-fake-acp"),
         )
         .env("SHARDRAIL_FAKE_ACP_STREAM_EVENTS", "3")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);
@@ -1398,9 +1410,11 @@ fn early_provider_exit_finishes_the_turn_and_process_lifecycle() {
     command
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg("/usr/bin/false")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);

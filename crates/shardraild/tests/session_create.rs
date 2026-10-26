@@ -246,7 +246,11 @@ fn redeem(path: &Path, code: &str, key: SigningKey) -> TestClient {
 }
 
 fn spawn_logged(command: &mut Command) -> (DaemonGuard, thread::JoinHandle<String>) {
-    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    command
+        .arg("--exit-with-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let reader = thread::spawn(move || {
@@ -417,6 +421,7 @@ fn startup_logs_the_canonical_allowlist_and_codex_workdir_is_first() {
     command
         .arg("--data-dir")
         .arg(data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-workdir")
         .arg(first.path())
@@ -424,6 +429,7 @@ fn startup_logs_the_canonical_allowlist_and_codex_workdir_is_first() {
         .arg(&link)
         .arg("--codex-app-server")
         .arg(fake_program())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
@@ -513,11 +519,13 @@ fn overridden_checkout_refuses_itself_and_allows_its_test_repo() {
     command
         .arg("--data-dir")
         .arg(data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--shardrail-root")
         .arg(root.path())
         .arg("--session-workdir")
         .arg(&testrepo)
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
