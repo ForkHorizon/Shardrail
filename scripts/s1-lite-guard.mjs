@@ -4,6 +4,14 @@ import { spawnSync } from 'node:child_process';
 
 export const INITIAL_COMMIT_PREFIX = '1bb8838';
 
+export function codexThreadIds(events) {
+  return [...new Set([
+    ...events.map((event) => event.payload?.thread_id),
+    ...events.map((event) => event.payload?.method === 'thread/started' ? event.payload?.params?.thread?.id : null),
+    ...events.map((event) => event.kind === 'approval_routing_rejected' ? event.payload?.result?.thread?.id : null),
+  ].filter((id) => typeof id === 'string'))];
+}
+
 export function assertResultDirectory(resultDir, { shardrail, worktree, allowedResultDir }) {
   if ([shardrail, worktree].some((root) => resultDir === root || resultDir.startsWith(`${root}/`)) && resultDir !== allowedResultDir) {
     throw new Error('S1_RESULT_DIR must be outside the Shardrail checkouts');

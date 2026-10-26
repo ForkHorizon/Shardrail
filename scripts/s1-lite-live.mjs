@@ -12,7 +12,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, turn1Failure } from './s1-lite-guard.mjs';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, turn1Failure } from './s1-lite-guard.mjs';
 
 const HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const TURN_WAIT_MS = 8 * 60 * 1000;
@@ -183,10 +183,7 @@ async function main() {
     const mcpServers = verifiedExtensions.map((event) => event.payload?.mcp_servers);
     const refused = events.filter((event) => event.kind === 'provider_request_refused');
     const usage = events.filter((event) => JSON.stringify(event.payload ?? {}).toLowerCase().includes('token'));
-    const threadIds = [...new Set([
-      ...uniqueStrings(events, 'thread_id'),
-      ...events.map((event) => event.payload?.method === 'thread/started' ? event.payload?.params?.thread?.id : null),
-    ].filter((id) => typeof id === 'string'))];
+    const threadIds = codexThreadIds(events);
     const rolloutFilenameChecks = await codexRolloutFilenameChecks(threadIds);
     const statusAfter = { shardrail: porcelain(SHARDRAIL), worktree: porcelain(worktree) };
     const shardrailUnchanged = statusBefore.shardrail === statusAfter.shardrail && statusBefore.worktree === statusAfter.worktree;
@@ -223,6 +220,9 @@ async function main() {
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
     if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');
+    if (events.some((event) => event.kind === 'process_started') && threadIds.length === 0) {
+      throw new Error('no Codex thread id was recorded for rollout filename checks');
+    }
     if (codexHomeHits.length) throw new Error(`journal references ${[...new Set(codexHomeHits.flatMap((hit) => hit.markers))].join(', ')}: ${JSON.stringify(codexHomeHits)}`);
     if (rejectedExtensions.length) throw new Error('codex extensions were rejected');
     if (!verifiedExtensions.length) throw new Error('codex extension verification was not journaled');
