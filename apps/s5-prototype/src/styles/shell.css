@@ -1,0 +1,42 @@
+main:not(.pairing-page) { height: 100dvh; display: flex; flex-direction: column; }
+main:not(.pairing-page) > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-6); background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
+.main-screen { height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.app-header { position: relative; z-index: var(--z-sticky); display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-6); background: var(--color-surface); border-bottom: 1px solid var(--color-border); }
+.brand { display: flex; align-items: center; gap: var(--space-3); }
+.brand > svg { width: 2rem; height: 2rem; color: var(--color-accent); }
+.brand p { margin-top: 2px; font-size: var(--text-sm); }
+.controls { display: flex; align-items: center; gap: var(--space-2); }
+.header-controls { flex-wrap: wrap; justify-content: end; }
+.connection-state { padding: var(--space-1) var(--space-2); color: var(--color-muted); }
+.paired-fingerprint { display: block; max-width: 180px; overflow-wrap: anywhere; font: var(--text-xs)/1.4 var(--font-mono); color: var(--color-muted); }
+.host-banner { flex: none; margin: 0; border-width: 0 0 1px; border-radius: 0; }
+.inline-note { padding: var(--space-2) var(--space-6); background: var(--color-surface); }
+.workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(220px, 24vw, 320px) minmax(0, 1fr); }
+.entry-pane { min-height: 0; border-inline-end: 1px solid var(--color-border); }
+.detail-pane { min-width: 0; min-height: 0; }
+.mobile-back { display: none !important; }
+.main-screen header p { max-width: 36rem; }
+.status { display: flex; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-6); color: var(--color-muted); background: var(--color-surface); border-bottom: 1px solid var(--color-border); font-size: var(--text-xs); }
+.composer { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-6); border-bottom: 1px solid var(--color-border); }
+.composer input { flex: 1; }
+.draft-preview { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-xs); }
+footer { padding: var(--space-2) var(--space-6); color: var(--color-muted); border-top: 1px solid var(--color-border); font-size: var(--text-xs); }
+.pairing-page { min-height: 100dvh; display: grid; place-items: center; padding: var(--space-6); }
+.pairing-card { width: min(100%, 520px); display: grid; gap: var(--space-4); padding: var(--space-8); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
+.pairing-card h1 { font-size: var(--text-2xl); }
+.pairing-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.pairing-card .react-aria-Checkbox { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; cursor: pointer; }
+.fingerprint { display: block; overflow-wrap: anywhere; padding: var(--space-4); background: var(--color-bg); border: 1px solid var(--color-border); border-radius: var(--radius-md); font: var(--text-sm)/1.6 var(--font-mono); letter-spacing: .04em; }
+.markdown-frame { display: block; width: 100%; height: 74px; border: 0; color: var(--color-text); font: inherit; background: transparent; }
+.markdown-frame body { color: var(--color-text); }
+@media (max-width: 720px) {
+  :where(.react-aria-Button, button) { min-height: 44px; }
+  .app-header { align-items: flex-start; padding-inline: var(--space-3); }
+  .header-controls { max-width: 58%; }
+  .paired-fingerprint { display: none; }
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .entry-pane, .detail-pane { min-height: 0; overflow: auto; border: 0; }
+  .entry-pane.mobile-hidden, .detail-pane:not(.mobile-visible) { display: none; }
+  .mobile-back { display: inline-flex !important; margin: var(--space-2) var(--space-3) 0; min-height: 44px !important; }
+  .host-banner, .inline-note { padding-inline: var(--space-3); }
+}

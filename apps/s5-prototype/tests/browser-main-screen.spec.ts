@@ -253,3 +253,28 @@ test('a prompt draft stays on its session and survives a rejected send', async (
   await expect(page.locator('#session-prompt')).toHaveValue('keep this prompt');
   await expect(page.getByText('Connected · browser WebSocket')).toBeVisible();
 });
+
+test('theme choice persists and the paired shell passes axe in both themes', async ({ page }) => {
+  await pair(page);
+  const sessionId = await createSession();
+  await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
+  await expect(page.getByRole('heading', { name: `Events for ${sessionId}` })).toBeVisible();
+  await expect(page.locator('html')).not.toHaveAttribute('data-theme', 'light');
+  const initial = await page.locator('html').getAttribute('data-theme');
+  const firstViolations = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
+  expect(firstViolations, firstViolations.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);
+  const next = initial === 'dark' ? 'light' : 'dark';
+  await page.getByRole('button', { name: `Use ${next} theme` }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', next);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('shardrail-theme'))).toBe(next);
+  const nextViolations = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
+  expect(nextViolations, nextViolations.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', next);
+  await expect(page.getByRole('button', { name: `Use ${next === 'dark' ? 'light' : 'dark'} theme` })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const buttons = await page.getByRole('button').evaluateAll((nodes) => nodes.map((node) => { const rect = node.getBoundingClientRect(); return [rect.width, rect.height]; }));
+  expect(buttons.every(([width, height]) => width >= 44 && height >= 44)).toBe(true);
+  const phoneViolations = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
+  expect(phoneViolations, phoneViolations.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);
+});

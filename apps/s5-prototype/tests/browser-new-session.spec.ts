@@ -72,8 +72,11 @@ test.afterAll(async () => {
 test('a browser with session.create can start a session and send a prompt', async ({ page }) => {
   test.setTimeout(60_000);
   await pair(page, true);
-  await expect(page.locator('#session-workdir')).toBeVisible();
-  await expect(page.locator('#session-workdir option')).toHaveCount(1);
+  const workdir = page.getByRole('button', { name: /Workdir/ });
+  await expect(workdir).toBeVisible();
+  await workdir.click();
+  await expect(page.getByRole('option')).toHaveCount(1);
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'New session' }).click();
   const option = page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ });
   await expect(option).toBeVisible({ timeout: 15_000 });
@@ -248,7 +251,7 @@ test('a browser without session.create has no New session button', async ({ brow
   try {
     await pair(page, false);
     await expect(page.getByRole('button', { name: 'New session' })).toHaveCount(0);
-    await expect(page.locator('#session-workdir')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Workdir/ })).toHaveCount(0);
   } finally {
     await context.close();
   }

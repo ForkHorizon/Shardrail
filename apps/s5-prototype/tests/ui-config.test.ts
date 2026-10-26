@@ -16,5 +16,10 @@ test('all form controls use React Aria components', async () => {
   assert.match(source, /<Select\b/);
   assert.match(source, /<Input\b/);
   assert.match(source, /<Button\b/);
-  assert.doesNotMatch(source, /<(?:select|input)\b/);
+  assert.doesNotMatch(source, /<(?:select|input|textarea)\b/);
+  for (const file of ['MainScreen.tsx', 'screens/entry/EntryArea.tsx', 'screens/entry/PairingScreen.tsx', 'screens/session/SessionArea.tsx']) {
+    const component = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
+    assert.match(component, /from 'react-aria-components'/);
+    assert.doesNotMatch(component, /<(?:select|input|textarea)\b/);
+  }
 });

@@ -1,0 +1,11 @@
+@layer base {
+  body { min-height: 100dvh; background: var(--color-bg); color: var(--color-text); font: 14px/1.5 var(--font-ui); }
+  h1, h2, h3, p { margin-block: 0; }
+  p { color: var(--color-muted); }
+  h1 { font-size: var(--text-xl); line-height: 1.25; }
+  h2 { font-size: var(--text-lg); line-height: 1.35; }
+  :focus-visible { outline: 3px solid var(--color-focus); outline-offset: 3px; }
+  ::selection { background: var(--color-accent); color: white; }
+  * { scrollbar-color: var(--color-muted) transparent; scrollbar-width: thin; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+}

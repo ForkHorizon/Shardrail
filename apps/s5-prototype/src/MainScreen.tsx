@@ -1,15 +1,18 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Button, ListBox, ListBoxItem } from 'react-aria-components';
-import { useVirtualizer } from '@tanstack/react-virtual';
-import { activityTimestamp, approvalsForSession, checklistSummary, eventsForSession, hostBanner, promptClearApplies, revealHiddenCharacters, sessionChecks, sessionSummaries, transcriptItems, type ApprovalBindingEcho, type TranscriptItem, type VerificationCheck } from './session-model';
+import { useMemo, useState } from 'react';
+import { Button } from 'react-aria-components';
+import { approvalsForSession, checklistSummary, eventsForSession, hostBanner, sessionChecks, sessionSummaries, transcriptItems, type ApprovalBindingEcho } from './session-model';
 import { connectionStatusLabel, type ConnectionPhase } from './browser-session';
-import { isNearLiveTail } from './streaming-view';
 import { useSessionJournalEvents } from './store';
-import { UntrustedMarkdown } from './UntrustedMarkdown';
+import { EntryArea } from './screens/entry/EntryArea';
+import { SessionArea } from './screens/session/SessionArea';
+import { ThemeToggle } from './ui/ThemeToggle';
+import { Icon } from './ui/Icon';
+import { StatusPill } from './ui/StatusPill';
 
-export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
+export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
+  pairedFingerprint?: string;
   approvalInFlight: ReadonlySet<string>;
   approvalError: string | null;
   promptError: string | null;
@@ -30,188 +33,44 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
   const [appliedCreateId, setAppliedCreateId] = useState<string | null>(null);
   const [appliedDismissId, setAppliedDismissId] = useState<string | null>(null);
   let nextSelected = selectedId;
-  if (createdSessionId && createdSessionId !== appliedCreateId) {
-    setAppliedCreateId(createdSessionId);
-    nextSelected = createdSessionId;
-  }
+  if (createdSessionId && createdSessionId !== appliedCreateId) { setAppliedCreateId(createdSessionId); nextSelected = createdSessionId; }
   if (dismissedSessionId && dismissedSessionId !== appliedDismissId) {
     setAppliedDismissId(dismissedSessionId);
     if (nextSelected === dismissedSessionId) nextSelected = null;
   }
   if (nextSelected !== selectedId) setSelectedId(nextSelected);
   const [pickedWorkdir, setPickedWorkdir] = useState('');
-  const selectedWorkdir = workdirs?.includes(pickedWorkdir) ? pickedWorkdir : (workdirs?.[0] ?? '');
   const [confirmingAllowId, setConfirmingAllowId] = useState<string | null>(null);
+  const [mobileDetail, setMobileDetail] = useState(false);
   const selected = sessions.find((session) => session.id === selectedId) ?? null;
   const visible = useMemo(() => selected ? eventsForSession(events, selected.id) : [], [events, selected]);
   const items = useMemo(() => transcriptItems(visible), [visible]);
   const approvals = useMemo(() => selected ? approvalsForSession(events, selected.id) : [], [events, selected]);
   const checks = useMemo(() => sessionChecks(events, selected?.id ?? ''), [events, selected]);
   const checklist = useMemo(() => checklistSummary(checks), [checks]);
+  const selectSession = (id: string | null) => { setSelectedId(id); setConfirmingAllowId(null); if (id) setMobileDetail(true); };
   return <main className="main-screen">
-    <header>
-      <div><h1>Shardrail</h1><p>Local sessions from the daemon journal</p></div>
-      <div className="controls">
-        <p role={phase === 'key-changed' ? 'alert' : 'status'}>{connectionStatusLabel(phase)}</p>
-        <Button onPress={onReconnect}>Reconnect</Button>
+    <header className="app-header">
+      <div className="brand"><Icon name="shardrail"/><div><h1>Shardrail</h1><p>Local sessions from the daemon journal</p></div></div>
+      <div className="controls header-controls">
+        <StatusPill tone={phase === 'connected' ? 'success' : phase === 'key-changed' ? 'danger' : 'warning'}><Icon className="icon" name={phase === 'connected' ? 'connection' : phase === 'key-changed' ? 'error' : 'reconnect'}/><span className={`connection-state connection-${phase}`} role={phase === 'key-changed' ? 'alert' : 'status'}>{connectionStatusLabel(phase)}</span></StatusPill>
+        <ThemeToggle/>
+        {pairedFingerprint ? <span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairedFingerprint}>{pairedFingerprint}</span> : null}
+        <Button className="button-secondary" onPress={onReconnect}>Reconnect</Button>
       </div>
     </header>
     <p className="host-banner" role="status">{hostBanner(checks, selected !== null)}</p>
-    {keyStorage === 'noble-fallback' ? <p role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}
+    {keyStorage === 'noble-fallback' ? <p className="inline-note" role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}
     <div className="workspace">
-      <section className="session-column" aria-labelledby="sessions-heading">
-        <h2 id="sessions-heading">Sessions</h2>
-        {workdirs !== null ? <section className="new-session" aria-label="New session">
-          <label htmlFor="session-workdir">Workdir</label>
-          <select id="session-workdir" value={selectedWorkdir} onChange={(event) => setPickedWorkdir(event.currentTarget.value)}>
-            {workdirs.map((dir) => <option key={dir} value={dir}>{dir}</option>)}
-          </select>
-          <Button isDisabled={selectedWorkdir.length === 0} onPress={() => onCreateSession(selectedWorkdir)}>New session</Button>
-          {createError ? <p role="alert">{createError}</p> : null}
-        </section> : null}
-        {sessions.length === 0 ? <p>No sessions yet.</p> : <ListBox className="session-list" aria-label="Sessions" selectionMode="single" selectedKeys={selected ? [selected.id] : []} onSelectionChange={(keys) => { if (keys === 'all') return; const next = [...keys][0]; setSelectedId(next == null ? null : String(next)); setConfirmingAllowId(null); }}>
-          {sessions.map((session) => {
-            const row = checklistSummary(sessionChecks(events, session.id));
-            return <ListBoxItem key={session.id} id={session.id} textValue={`${session.id} ${session.agentKind ?? 'agent unknown'} ${session.status} ${row.unverified} not verified`} onFocus={() => { setSelectedId(session.id); setConfirmingAllowId(null); }}>
-            <span className="session-id">{session.id}</span>
-            <span>{session.agentKind ?? 'agent unknown'}</span>
-            <span>{session.status}</span>
-            <span>{row.unverified} checks not verified</span>
-            <ActivityTime ms={session.lastActivityMs}/>
-          </ListBoxItem>;
-          })}
-        </ListBox>}
-      </section>
-      <section className="session-detail" aria-labelledby="events-heading">
-        <h2 id="events-heading">{selected ? `Events for ${selected.id}` : 'Events'}</h2>
-        {selected ? <SessionTranscript key={selected.id} sessionId={selected.id} items={items}/> : <p>Select a session.</p>}
-        {/* The prompt key has to differ from the transcript key. Two siblings with the same key leave the previous transcript mounted. */}
-        {selected ? <PromptBox key={`prompt-${selected.id}-${promptClear && promptClearApplies(promptClear.sessionId, selected.id) ? promptClear.commandId : ''}`} sessionId={selected.id} error={promptError} onSend={onSendPrompt} onInterrupt={onInterrupt}/> : null}
-        {selected ? <VerificationChecklist checks={checklist.checks}/> : null}
-        {selected ? <Approvals cards={approvals} checklist={checklist} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval}/> : null}
-      </section>
+      <div className={`entry-pane${mobileDetail ? ' mobile-hidden' : ''}`}>
+        <EntryArea sessions={sessions} events={events} selectedId={selected?.id ?? null} workdirs={workdirs} pickedWorkdir={pickedWorkdir} createError={createError} onSelect={selectSession} onPickWorkdir={setPickedWorkdir} onCreateSession={onCreateSession}/>
+      </div>
+      <div className={`detail-pane${mobileDetail ? ' mobile-visible' : ''}`}>
+        {selected ? <>
+          <Button className="button-quiet mobile-back" onPress={() => setMobileDetail(false)}><Icon className="icon" name="back"/> Back to sessions</Button>
+          <SessionArea sessionId={selected.id} items={items} approvals={approvals} checklist={checklist} promptError={promptError} promptClear={promptClear} approvalInFlight={approvalInFlight} approvalError={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval} onSendPrompt={onSendPrompt} onInterrupt={onInterrupt}/>
+        </> : <section className="session-detail empty-detail" aria-labelledby="events-heading"><h2 id="events-heading">Events</h2><p>Select a session to view its events.</p></section>}
+      </div>
     </div>
   </main>;
-}
-
-function ActivityTime({ ms }: { ms: number }) {
-  const iso = activityTimestamp(ms);
-  if (!iso) return <time>no activity yet</time>;
-  return <time dateTime={iso}>{new Date(ms).toLocaleString()}</time>;
-}
-
-function SessionTranscript({ sessionId, items }: { sessionId: string; items: readonly TranscriptItem[] }) {
-  const parent = useRef<HTMLDivElement>(null);
-  const followTail = useRef(true);
-  // TanStack Virtual returns imperative methods that React Compiler cannot safely memoize.
-  // eslint-disable-next-line react-hooks/incompatible-library
-  const virtualizer = useVirtualizer({ count: items.length, getScrollElement: () => parent.current, estimateSize: () => 72, overscan: 8, measureElement: (element) => element.getBoundingClientRect().height });
-  const virtualizerRef = useRef(virtualizer);
-  virtualizerRef.current = virtualizer;
-  const virtualItems = virtualizer.getVirtualItems();
-  useLayoutEffect(() => {
-    if (followTail.current && items.length > 0) virtualizerRef.current.scrollToIndex(items.length - 1, { align: 'end' });
-  }, [sessionId, items.length]);
-  // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable transcript needs keyboard focus
-  return <div ref={parent} className="transcript" role="region" aria-label="Session events" tabIndex={0} onScroll={() => { const el = parent.current; if (!el) return; followTail.current = isNearLiveTail(el.scrollHeight, el.scrollTop, el.clientHeight); }}>
-    {items.length === 0 ? <p>No events yet.</p> : <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((item) => {
-      const event = items[item.index];
-      return event ? <div key={event.key} data-index={item.index} ref={virtualizer.measureElement} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}><SessionEvent event={event}/></div> : null;
-    })}</div>}
-  </div>;
-}
-
-function SessionEvent({ event }: { event: TranscriptItem }) {
-  const iso = activityTimestamp(event.occurredAtMs);
-  return <article className="event">
-    <div className="meta"><b>{event.kind}</b><span>{event.cursorLabel}</span>{iso ? <time dateTime={iso}>{new Date(event.occurredAtMs).toLocaleTimeString()}</time> : null}</div>
-    {event.markdown !== null ? <div className="body"><UntrustedMarkdown source={event.markdown}/></div> : <pre className="body">{event.plain}</pre>}
-  </article>;
-}
-
-function PromptBox({ sessionId, error, onSend, onInterrupt }: {
-  sessionId: string;
-  error: string | null;
-  onSend: (sessionId: string, prompt: string) => void;
-  onInterrupt: (sessionId: string) => void;
-}) {
-  const [text, setText] = useState('');
-  return <section className="prompt" aria-labelledby="prompt-heading">
-    <h2 id="prompt-heading">Prompt</h2>
-    {error ? <p role="alert">{error}</p> : null}
-    <label htmlFor="session-prompt">Prompt</label>
-    <textarea id="session-prompt" value={text} onChange={(event) => setText(event.currentTarget.value)}/>
-    <div className="controls">
-      <Button isDisabled={text.trim() === ''} onPress={() => { const prompt = text.trim(); if (!prompt) return; onSend(sessionId, prompt); }}>Send prompt</Button>
-      <Button onPress={() => onInterrupt(sessionId)}>Interrupt</Button>
-    </div>
-  </section>;
-}
-
-function VerificationChecklist({ checks }: { checks: readonly VerificationCheck[] }) {
-  const unverified = checks.filter((item) => item.status === 'not verified').length;
-  return <section className="checklist-section" aria-labelledby="checklist-heading">
-    <h2 id="checklist-heading" tabIndex={-1}>Verification checklist</h2>
-    <p>{unverified} not verified. Items are not combined into one verdict.</p>
-    <ul className="checklist">
-      {checks.map((item) => <li key={item.id} data-check={item.id} data-status={item.status}>
-        <span>{item.label}</span>
-        <span>{item.status}</span>
-        <span>{item.source}. {item.detail} Last checked: {item.lastChecked ?? 'never'}.</span>
-      </li>)}
-    </ul>
-  </section>;
-}
-
-function Approvals({ cards, checklist, inFlight, error, confirmingAllowId, onConfirmAllow, onResolve }: {
-  cards: ReturnType<typeof approvalsForSession>;
-  checklist: ReturnType<typeof checklistSummary>;
-  inFlight: ReadonlySet<string>;
-  error: string | null;
-  confirmingAllowId: string | null;
-  onConfirmAllow: (approvalId: string | null) => void;
-  onResolve: (approvalId: string, optionId: string, binding: ApprovalBindingEcho) => void;
-}) {
-  return <section className="approvals" aria-labelledby="approvals-heading">
-    <h2 id="approvals-heading">Approvals</h2>
-    {error ? <p role="alert">{error}</p> : null}
-    {cards.length === 0 ? <p>No approvals for this session.</p> : null}
-    {cards.map((card) => {
-      const confirming = confirmingAllowId === card.approvalId && card.state === 'pending' && !card.actionDisclosed;
-      const busy = inFlight.has(card.approvalId);
-      return <article key={card.approvalId} aria-label={`Approval ${card.approvalId}`}>
-        {card.actionDisclosed ? <DisclosedAction card={card}/> : <p className="caution">action not disclosed by provider</p>}
-        <p>Tool {card.toolKind}</p>
-        <p>Sandbox: {card.sandbox ? revealHiddenCharacters(card.sandbox) : 'not disclosed'}</p>
-        <p>Approval axis: once</p>
-        {card.toolCallId ? <p>Tool call id <span className="session-id">{card.toolCallId}</span></p> : null}
-        <p>{card.state}{card.decision ? ` · ${card.decision}` : ''}</p>
-        <p>Checklist: {checklist.failed} failed, {checklist.unverified} not verified.</p>
-        <Button onPress={() => document.getElementById('checklist-heading')?.focus()}>Open the full checklist</Button>
-        {card.agentTitle || card.agentDescription ? <div className="untrusted"><b>Agent’s description · untrusted</b><UntrustedMarkdown source={[card.agentTitle, card.agentDescription].filter(Boolean).join('\n\n')}/></div> : null}
-        {card.state === 'pending' ? <div className="controls">
-          <Button isDisabled={busy || !card.binding || !card.denyOnceOptionId} onPress={() => { if (card.binding && card.denyOnceOptionId) onResolve(card.approvalId, card.denyOnceOptionId, card.binding); }}>Deny</Button>
-          <Button isDisabled={busy || !card.binding || !card.allowOnceOptionId} onPress={() => {
-            if (!card.binding || !card.allowOnceOptionId) return;
-            if (!card.actionDisclosed && !confirming) { onConfirmAllow(card.approvalId); return; }
-            onConfirmAllow(null);
-            onResolve(card.approvalId, card.allowOnceOptionId, card.binding);
-          }}>{confirming ? 'Confirm allow once' : 'Allow once'}</Button>
-        </div> : null}
-        {confirming ? <p role="note">Allow once sends this response even though the provider did not disclose the action. Choose Confirm allow once to send it, or Deny.</p> : null}
-      </article>;
-    })}
-  </section>;
-}
-
-function DisclosedAction({ card }: { card: ReturnType<typeof approvalsForSession>[number] }) {
-  return <>
-    {card.command ? <pre>{revealHiddenCharacters(card.command)}</pre> : null}
-    {card.argv ? <pre>{card.argv.map((arg) => revealHiddenCharacters(arg)).join('\n')}</pre> : null}
-    {card.rawInput ? <pre>{revealHiddenCharacters(card.rawInput)}</pre> : null}
-    {card.cwd ? <p>cwd <span className="session-id">{revealHiddenCharacters(card.cwd)}</span></p> : null}
-    {card.locations ? <pre>{revealHiddenCharacters(card.locations)}</pre> : null}
-    {card.changes ? <pre>{revealHiddenCharacters(card.changes)}</pre> : null}
-    {card.network ? <p>Network <span className="session-id">{revealHiddenCharacters(card.network)}</span></p> : null}
-  </>;
 }
