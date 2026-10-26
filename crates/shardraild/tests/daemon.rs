@@ -1928,6 +1928,116 @@ fn observer_cannot_decide_and_a_reconnect_can_answer_once() {
 }
 
 #[test]
+fn rejection_for_a_decided_approval_stays_on_its_session() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let stored = Uuid::parse_str(approval["binding"]["session_id"].as_str().unwrap()).unwrap();
+    let foreign = Uuid::now_v7();
+    send_resolution(&mut stream, &approval, "allow_once");
+    assert_eq!(read_command_reply(&mut reader)["kind"], "approval_resolved");
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "reject_once",
+        json!({"session_id": foreign}),
+    );
+    let reply = read_command_reply(&mut reader);
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("already resolved"),
+        "{reply}"
+    );
+    let journal = Journal::open(dir.path().join("journal.sqlite3")).unwrap();
+    assert!(
+        journal
+            .events_for_session(stored)
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event.kind == "approval_rejected"
+                    && event.payload["reason"] == "already_decided"
+                    && event.payload["session_id"] == stored.to_string()
+                    && event.payload["approval_id"] == approval_id.to_string()
+                    && event.session_id == stored
+            })
+    );
+    assert!(
+        journal
+            .events_for_session(foreign)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "approval_rejected")
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn missing_binding_is_journaled_and_does_not_answer() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let stored = Uuid::parse_str(approval["binding"]["session_id"].as_str().unwrap()).unwrap();
+    let foreign = Uuid::now_v7();
+    writeln!(
+        stream,
+        "{}",
+        json!({
+            "kind": "approval_resolution",
+            "request": {
+                "approval_id": approval_id,
+                "option_id": "allow_once",
+                "session_id": foreign,
+                "turn_id": approval["binding"]["turn_id"],
+                "provider_request_id": approval["binding"]["provider_request_id"],
+            }
+        })
+    )
+    .unwrap();
+    let mut line = String::new();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0, "{line}");
+    let journal = Journal::open(dir.path().join("journal.sqlite3")).unwrap();
+    let events = journal.events_for_session(stored).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == "approval_rejected"
+            && event.payload["reason"] == "missing_binding"
+            && event.payload["approval_id"] == approval_id.to_string()
+            && event.session_id == stored
+    }));
+    assert!(events.iter().all(|event| {
+        event.kind != "approval_responding" && event.kind != "allowed" && event.kind != "denied"
+    }));
+    assert!(
+        journal
+            .events_for_session(foreign)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "approval_rejected")
+    );
+    assert_eq!(
+        journal.approval_state(approval_id).unwrap().as_deref(),
+        Some("pending")
+    );
+    let (disposition_session, state, _) =
+        journal.approval_disposition(approval_id).unwrap().unwrap();
+    assert_eq!(disposition_session, stored);
+    assert_eq!(state, "pending");
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn fake_acp_checklist_stays_not_verified() {
     let dir = tempdir().unwrap();
     let client = add_client(dir.path());

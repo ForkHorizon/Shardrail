@@ -124,8 +124,7 @@ async fn resolve_approval(
         })
     };
     let Some((session_id, binding, state, has_provider, options)) = snapshot else {
-        let reason = missing_approval_reason(daemon, request.approval_id).await?;
-        return reject_decision(daemon, client, &request, request.session_id, reason).await;
+        return reject_missing(daemon, client, &request).await;
     };
     if !has_provider || state != shardrail_protocol::ApprovalState::Pending {
         let reason = if has_provider {
@@ -163,8 +162,7 @@ async fn resolve_approval(
     let mut approvals = daemon.approvals.lock().await;
     let Some(entry) = approvals.get_mut(&request.approval_id) else {
         drop(approvals);
-        let reason = missing_approval_reason(daemon, request.approval_id).await?;
-        return reject_decision(daemon, client, &request, request.session_id, reason).await;
+        return reject_missing(daemon, client, &request).await;
     };
     if entry.provider.is_none()
         || entry.approval.state != shardrail_protocol::ApprovalState::Pending
@@ -287,7 +285,7 @@ async fn resolve_approval(
 async fn missing_approval_reason(
     daemon: &Daemon,
     approval_id: Uuid,
-) -> Result<&'static str, String> {
+) -> Result<(Option<Uuid>, &'static str), String> {
     let disposition = {
         let journal = daemon.journal.lock().await;
         journal
@@ -295,22 +293,41 @@ async fn missing_approval_reason(
             .map_err(|error| error.to_string())?
     };
     Ok(match disposition {
-        Some((state, _)) if state == "expired" => "expired",
-        Some((state, reason)) if state == "withdrawn" => match reason.as_deref() {
-            Some("turn_end") => "stale_turn",
-            _ => "abandoned",
-        },
-        Some((state, _))
+        Some((session_id, state, _)) if state == "expired" => (Some(session_id), "expired"),
+        Some((session_id, state, reason)) if state == "withdrawn" => {
+            let reason = match reason.as_deref() {
+                Some("turn_end") => "stale_turn",
+                _ => "abandoned",
+            };
+            (Some(session_id), reason)
+        }
+        Some((session_id, state, _))
             if matches!(
                 state.as_str(),
                 "allowed" | "denied" | "responding" | "responded_unacked" | "delivered_unconfirmed"
             ) =>
         {
-            "already_decided"
+            (Some(session_id), "already_decided")
         }
-        Some(_) => "unavailable",
-        None => "unknown_approval",
+        Some((session_id, _, _)) => (Some(session_id), "unavailable"),
+        None => (None, "unknown_approval"),
     })
+}
+
+async fn reject_missing(
+    daemon: &Daemon,
+    client: &AuthorizedClient,
+    request: &ApprovalResolutionRequest,
+) -> Result<(), String> {
+    let (stored_session, reason) = missing_approval_reason(daemon, request.approval_id).await?;
+    reject_decision(
+        daemon,
+        client,
+        request,
+        stored_session.unwrap_or(request.session_id),
+        reason,
+    )
+    .await
 }
 
 async fn reject_decision(
@@ -584,29 +601,8 @@ async fn run_fake_acp_inner(
         .unwrap_or("unknown")
         .to_owned();
     let disclosed = disclosed_action(params);
-    let argv = disclosed
-        .get("argv")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let cwd = disclosed
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    let content = approval_binding::ApprovalContent {
-        kind: kind.clone(),
-        argv,
-        cwd,
-        paths: Vec::new(),
-        diff: String::new(),
-        reason: params["reason"].as_str().unwrap_or("").to_owned(),
-    };
+    let content =
+        approval_content_from_disclosed(&kind, &disclosed, params["reason"].as_str().unwrap_or(""));
     let content_hash = approval_binding::content_hash(&content);
     let binding = ApprovalBinding {
         approval_id,
@@ -903,6 +899,178 @@ fn classify_option(kind: &str) -> OptionClass {
         OptionClass::BoundaryBreaking
     } else {
         OptionClass::Widening
+    }
+}
+
+struct MalformedApproval {
+    approval_id: Uuid,
+    option_id: String,
+    content_hash: String,
+    session_id: Uuid,
+    turn_id: String,
+    provider_request_id: String,
+    reason: &'static str,
+}
+
+fn malformed_approval_attempt(line: &str) -> Option<MalformedApproval> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let object = value.as_object()?;
+    if object.get("kind").and_then(serde_json::Value::as_str) != Some("approval_resolution") {
+        return None;
+    }
+    let request = object.get("request")?.as_object()?;
+    let approval_id = request
+        .get("approval_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| Uuid::parse_str(text).ok())?;
+    let text = |key: &str| {
+        request
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    let session_id = request
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| Uuid::parse_str(text).ok())
+        .unwrap_or(Uuid::nil());
+    let required = [
+        "option_id",
+        "content_hash",
+        "session_id",
+        "turn_id",
+        "provider_request_id",
+    ];
+    let reason = if required.iter().any(|key| {
+        request
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+    }) {
+        "missing_binding"
+    } else {
+        "malformed_binding"
+    };
+    Some(MalformedApproval {
+        approval_id,
+        option_id: text("option_id"),
+        content_hash: text("content_hash"),
+        session_id,
+        turn_id: text("turn_id"),
+        provider_request_id: text("provider_request_id"),
+        reason,
+    })
+}
+
+async fn record_malformed_approval(
+    daemon: &Daemon,
+    client: &AuthorizedClient,
+    attempt: &MalformedApproval,
+) -> Result<(), String> {
+    let request = ApprovalResolutionRequest {
+        approval_id: attempt.approval_id,
+        option_id: attempt.option_id.clone(),
+        content_hash: attempt.content_hash.clone(),
+        session_id: attempt.session_id,
+        turn_id: attempt.turn_id.clone(),
+        provider_request_id: attempt.provider_request_id.clone(),
+    };
+    let (stored_session, _) = missing_approval_reason(daemon, attempt.approval_id).await?;
+    reject_decision(
+        daemon,
+        client,
+        &request,
+        stored_session.unwrap_or(attempt.session_id),
+        attempt.reason,
+    )
+    .await
+}
+
+fn approval_content_from_disclosed(
+    kind: &str,
+    disclosed: &serde_json::Map<String, serde_json::Value>,
+    reason: &str,
+) -> approval_binding::ApprovalContent {
+    let argv = disclosed
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut paths = Vec::new();
+    let mut diff = String::new();
+    if let Some(locations) = disclosed.get("locations") {
+        push_displayed_paths(locations, &mut paths);
+    }
+    if let Some(changes) = disclosed.get("changes") {
+        push_change_paths(changes, &mut paths, &mut diff);
+    }
+    approval_binding::ApprovalContent {
+        kind: kind.to_owned(),
+        command: disclosed
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        argv,
+        cwd: disclosed
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        paths,
+        diff,
+        raw_input: disclosed
+            .get("raw_input")
+            .map(approval_binding::canonical_json)
+            .unwrap_or_default(),
+        reason: reason.to_owned(),
+        network: disclosed
+            .get("network")
+            .map(approval_binding::canonical_json)
+            .unwrap_or_default(),
+    }
+}
+
+fn push_displayed_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if !text.is_empty() => paths.push(text.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                push_displayed_paths(item, paths);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(path) = object.get("path").and_then(serde_json::Value::as_str)
+                && !path.is_empty()
+            {
+                paths.push(path.to_owned());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_change_paths(value: &serde_json::Value, paths: &mut Vec<String>, diff: &mut String) {
+    let Some(items) = value.as_array() else {
+        push_displayed_paths(value, paths);
+        return;
+    };
+    for item in items {
+        if let Some(path) = item.get("path").and_then(serde_json::Value::as_str) {
+            paths.push(path.to_owned());
+        }
+        if let Some(text) = item.get("diff").and_then(serde_json::Value::as_str) {
+            if !diff.is_empty() {
+                diff.push('\n');
+            }
+            diff.push_str(text);
+        }
     }
 }
 
@@ -2593,7 +2761,21 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
                 continue;
             }
         };
-        let frame = parse_client_frame(&line)?;
+        let frame = match parse_client_frame(&line) {
+            Ok(frame) => frame,
+            Err(error) => {
+                if let Some(attempt) = malformed_approval_attempt(&line)
+                    && let Ok(Some(current)) = authorized_client(
+                        daemon.data.directory_path(),
+                        client.client_id,
+                        &client.public_key,
+                    )
+                {
+                    let _ = record_malformed_approval(&daemon, &current, &attempt).await;
+                }
+                return Err(error);
+            }
+        };
         let client = authorized_client(
             daemon.data.directory_path(),
             client.client_id,
@@ -3601,6 +3783,39 @@ mod tests {
     fn rejects_forged_root_policy_fields() {
         let frame = r#"{"kind":"approval_resolution","scope":"full","request":{"approval_id":"019b0000-0000-7000-8000-000000000001","option_id":"allow_once"}}"#;
         assert!(parse_client_frame(frame).is_err());
+        assert_eq!(
+            malformed_approval_attempt(frame).unwrap().reason,
+            "missing_binding"
+        );
+        assert!(malformed_approval_attempt(r#"{"kind":"resume","resume_after":0}"#).is_none());
+        let extra = r#"{"kind":"approval_resolution","request":{"approval_id":"019b0000-0000-7000-8000-000000000001","option_id":"allow_once","content_hash":"ab","session_id":"019b0000-0000-7000-8000-000000000002","turn_id":"t","provider_request_id":"1","extra":"no"}}"#;
+        assert!(parse_client_frame(extra).is_err());
+        assert_eq!(
+            malformed_approval_attempt(extra).unwrap().reason,
+            "malformed_binding"
+        );
+    }
+
+    #[test]
+    fn disclosed_approval_content_keeps_provider_argv_and_raw_command_text() {
+        let disclosed = disclosed_action(&json!({
+            "toolCall": {
+                "command": "echo \"a  b\"",
+                "argv": ["echo", "a  b"],
+                "rawInput": {"cmd": "echo"},
+                "network": "https example.com:443"
+            }
+        }));
+        let content = approval_content_from_disclosed("execute", &disclosed, "because");
+        assert_eq!(content.command, "echo \"a  b\"");
+        assert_eq!(content.argv, ["echo".to_owned(), "a  b".to_owned()]);
+        assert!(content.network.contains("example.com:443"));
+        let mut other = content.clone();
+        other.command = "echo \"a b\"".into();
+        assert_ne!(
+            approval_binding::content_hash(&content),
+            approval_binding::content_hash(&other)
+        );
     }
 
     #[test]

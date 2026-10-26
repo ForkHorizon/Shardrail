@@ -2903,11 +2903,6 @@ fn codex_approval_content(
     grant_root: Option<&str>,
 ) -> crate::approval_binding::ApprovalContent {
     let command = command_text(params).unwrap_or_default();
-    let argv = if command.is_empty() {
-        Vec::new()
-    } else {
-        command.split_whitespace().map(str::to_owned).collect()
-    };
     let mut paths = Vec::new();
     let mut diff = String::new();
     if let Some(items) = changes.and_then(Value::as_array) {
@@ -2926,6 +2921,14 @@ fn codex_approval_content(
     if let Some(root) = grant_root.filter(|text| !text.is_empty()) {
         paths.push(root.to_owned());
     }
+    let raw_input = match params.get("commandActions") {
+        Some(value) if !value.is_null() => crate::approval_binding::canonical_json(value),
+        _ => String::new(),
+    };
+    let network = match params.get("networkApprovalContext") {
+        Some(value) if !value.is_null() => crate::approval_binding::canonical_json(value),
+        _ => String::new(),
+    };
     crate::approval_binding::ApprovalContent {
         kind: if method == FILE_APPROVAL {
             "file_change"
@@ -2933,7 +2936,8 @@ fn codex_approval_content(
             "command_execution"
         }
         .to_owned(),
-        argv,
+        command,
+        argv: Vec::new(),
         cwd: params
             .get("cwd")
             .and_then(Value::as_str)
@@ -2941,11 +2945,13 @@ fn codex_approval_content(
             .to_owned(),
         paths,
         diff,
+        raw_input,
         reason: params
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        network,
     }
 }
 
@@ -2964,12 +2970,23 @@ fn command_text(params: &Value) -> Option<String> {
 
 fn network_label(value: Option<&Value>) -> Option<String> {
     let object = value?.as_object()?;
-    let host = object.get("host").and_then(Value::as_str)?;
+    let host = object
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())?;
     let protocol = object.get("protocol").and_then(Value::as_str).unwrap_or("");
+    let port = object
+        .get("port")
+        .and_then(Value::as_u64)
+        .filter(|port| *port <= u64::from(u16::MAX));
+    let host_port = match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
     let label = if protocol.is_empty() {
-        host.to_owned()
+        host_port
     } else {
-        format!("{protocol} {host}")
+        format!("{protocol} {host_port}")
     };
     Some(label)
 }
@@ -3035,6 +3052,67 @@ fn spawn_ack(daemon: Arc<Daemon>, session_id: Uuid, approval_id: Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_content_binds_raw_command_text_and_network_endpoint() {
+        let params = json!({
+            "command": "echo \"a b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"type": "unknown", "command": "echo \"a b\""}],
+            "networkApprovalContext": {"protocol": "https", "host": "example.com", "port": 443}
+        });
+        let content = codex_approval_content(COMMAND_APPROVAL, &params, None, None);
+        assert_eq!(content.command, "echo \"a b\"");
+        assert!(content.argv.is_empty());
+        assert!(content.network.contains("\"port\":443"));
+        assert_eq!(
+            network_label(params.get("networkApprovalContext")).as_deref(),
+            Some("https example.com:443")
+        );
+        let spaced = json!({
+            "command": "echo \"a  b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"type": "unknown", "command": "echo \"a b\""}],
+            "networkApprovalContext": {"host": "example.com", "port": 443, "protocol": "https"}
+        });
+        let spaced_content = codex_approval_content(COMMAND_APPROVAL, &spaced, None, None);
+        assert_ne!(
+            crate::approval_binding::content_hash(&content),
+            crate::approval_binding::content_hash(&spaced_content)
+        );
+        let other_port = json!({
+            "command": "echo \"a b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"command": "echo \"a b\"", "type": "unknown"}],
+            "networkApprovalContext": {"host": "example.com", "protocol": "https", "port": 80}
+        });
+        let other_content = codex_approval_content(COMMAND_APPROVAL, &other_port, None, None);
+        assert_eq!(content.raw_input, other_content.raw_input);
+        assert_ne!(
+            crate::approval_binding::content_hash(&content),
+            crate::approval_binding::content_hash(&other_content)
+        );
+        assert_eq!(
+            network_label(other_port.get("networkApprovalContext")).as_deref(),
+            Some("https example.com:80")
+        );
+        assert_eq!(content.network, spaced_content.network);
+        let same_endpoint = json!({
+            "command": "echo \"a b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"command": "echo \"a b\"", "type": "unknown"}],
+            "networkApprovalContext": {"host": "example.com", "port": 443, "protocol": "https"}
+        });
+        let same = codex_approval_content(COMMAND_APPROVAL, &same_endpoint, None, None);
+        assert_eq!(
+            crate::approval_binding::content_hash(&content),
+            crate::approval_binding::content_hash(&same)
+        );
+    }
 
     #[test]
     fn safety_overrides_follow_extra_config_and_disable_web_search() {

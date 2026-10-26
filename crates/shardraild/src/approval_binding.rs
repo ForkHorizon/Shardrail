@@ -7,11 +7,18 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ApprovalContent {
     pub(crate) kind: String,
+    /// Provider command text, not a whitespace split of that text.
+    pub(crate) command: String,
+    /// Argv the provider supplied. Empty when the provider sent command text only.
     pub(crate) argv: Vec<String>,
     pub(crate) cwd: String,
     pub(crate) paths: Vec<String>,
     pub(crate) diff: String,
+    /// Canonical JSON of the raw input or command actions shown on the card.
+    pub(crate) raw_input: String,
     pub(crate) reason: String,
+    /// Canonical JSON of the network context, including host, protocol, and port.
+    pub(crate) network: String,
 }
 
 pub(crate) fn content_hash(content: &ApprovalContent) -> String {
@@ -20,14 +27,40 @@ pub(crate) fn content_hash(content: &ApprovalContent) -> String {
     paths.dedup();
     let canonical = serde_json::json!({
         "argv": content.argv,
+        "command": content.command,
         "cwd": content.cwd,
         "diff": content.diff,
         "kind": content.kind,
+        "network": content.network,
         "paths": paths,
+        "raw_input": content.raw_input,
         "reason": content.reason,
     });
     let bytes = serde_json::to_vec(&canonical).expect("canonical approval content serializes");
     encode_hex(&Sha256::digest(bytes))
+}
+
+/// Compact JSON with object keys sorted at every level. Array order is kept.
+pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(&sorted_json(value)).unwrap_or_default()
+}
+
+fn sorted_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for key in keys {
+                sorted.insert(key.clone(), sorted_json(&map[key]));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(sorted_json).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 pub(crate) fn provider_request_id(id: &serde_json::Value) -> String {
@@ -103,6 +136,9 @@ pub(crate) fn rejection_message(reason: &str) -> String {
         "abandoned" => "approval was abandoned".to_owned(),
         "stale_turn" => "approval is from an earlier turn".to_owned(),
         "unknown_approval" => "approval is already resolved or unavailable".to_owned(),
+        "missing_binding" | "malformed_binding" => {
+            "approval binding is missing or malformed".to_owned()
+        }
         _ => "approval binding does not match".to_owned(),
     }
 }
@@ -118,22 +154,72 @@ mod tests {
     fn sample() -> ApprovalContent {
         ApprovalContent {
             kind: "command_execution".into(),
+            command: String::new(),
             argv: vec!["python3".into(), "-m".into(), "unittest".into()],
             cwd: "/work".into(),
             paths: vec![],
             diff: String::new(),
+            raw_input: String::new(),
             reason: "run tests".into(),
+            network: String::new(),
         }
     }
 
     #[test]
     fn content_hash_is_sha256_of_the_canonical_json() {
-        let raw = br#"{"argv":["python3","-m","unittest"],"cwd":"/work","diff":"","kind":"command_execution","paths":[],"reason":"run tests"}"#;
+        let raw = br#"{"argv":["python3","-m","unittest"],"command":"","cwd":"/work","diff":"","kind":"command_execution","network":"","paths":[],"raw_input":"","reason":"run tests"}"#;
         let expected = encode_hex(&Sha256::digest(raw));
         assert_eq!(content_hash(&sample()), expected);
         let mut changed = sample();
         changed.reason = "other".into();
         assert_ne!(content_hash(&changed), expected);
+    }
+
+    #[test]
+    fn quoted_commands_and_network_endpoints_do_not_collide() {
+        let mut spaced = sample();
+        spaced.argv.clear();
+        spaced.command = "echo \"a b\"".into();
+        let mut wider = spaced.clone();
+        wider.command = "echo \"a  b\"".into();
+        assert_eq!(
+            spaced.command.split_whitespace().collect::<Vec<_>>(),
+            wider.command.split_whitespace().collect::<Vec<_>>()
+        );
+        assert_ne!(content_hash(&spaced), content_hash(&wider));
+
+        let mut actions = spaced.clone();
+        actions.command = "echo hi".into();
+        actions.raw_input =
+            canonical_json(&serde_json::json!([{"command":"echo hi","type":"unknown"}]));
+        let mut other_actions = actions.clone();
+        other_actions.raw_input =
+            canonical_json(&serde_json::json!([{"type":"unknown","command":"echo hi "}]));
+        assert_ne!(content_hash(&actions), content_hash(&other_actions));
+
+        let https = canonical_json(
+            &serde_json::json!({"protocol":"https","host":"example.com","port":443}),
+        );
+        let reordered = canonical_json(
+            &serde_json::json!({"host":"example.com","port":443,"protocol":"https"}),
+        );
+        assert_eq!(https, reordered);
+        let mut endpoint = sample();
+        endpoint.network = https;
+        let mut other_port = endpoint.clone();
+        other_port.network =
+            canonical_json(&serde_json::json!({"host":"example.com","port":80,"protocol":"https"}));
+        let mut other_host = endpoint.clone();
+        other_host.network = canonical_json(
+            &serde_json::json!({"host":"example.org","port":443,"protocol":"https"}),
+        );
+        let mut no_port = endpoint.clone();
+        no_port.network =
+            canonical_json(&serde_json::json!({"host":"example.com","protocol":"https"}));
+        assert_ne!(content_hash(&endpoint), content_hash(&other_port));
+        assert_ne!(content_hash(&endpoint), content_hash(&other_host));
+        assert_ne!(content_hash(&endpoint), content_hash(&no_port));
+        assert_ne!(content_hash(&endpoint), content_hash(&sample()));
     }
 
     #[test]
