@@ -111,9 +111,7 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await expect(approvalEvent).toContainText('"options"');
   await approvalEvent.getByRole('button', { name: 'Raw event' }).click();
   const untrustedDescription = page.locator('.approval-card .untrusted');
-  await expect(untrustedDescription.getByRole('button', { name: 'Agent’s description · untrusted' })).toBeVisible();
-  await expect(untrustedDescription.getByText('Run fixture command')).toBeHidden();
-  await untrustedDescription.getByRole('button', { name: 'Agent’s description · untrusted' }).click();
+  await expect(untrustedDescription.getByText('Agent’s description · untrusted')).toBeVisible();
   await expect(untrustedDescription.getByText('Run fixture command')).toBeVisible();
   await approvalLink.click();
   await expect(page.locator(await approvalLink.getAttribute('href') ?? '')).toBeVisible();

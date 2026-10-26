@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import { Button, Disclosure, DisclosurePanel, Heading, Link, TextArea } from 'react-aria-components';
+import { Button, Disclosure, DisclosurePanel, Heading, Link, TextArea, ToggleButton } from 'react-aria-components';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { activityTimestamp, approvalsForSession, checklistSummary, promptClearApplies, revealHiddenCharacters, type ApprovalBindingEcho, type TranscriptItem, type VerificationCheck } from '../../session-model';
 import { isNearLiveTail } from '../../streaming-view';
@@ -53,20 +53,28 @@ function SessionTranscript({ sessionId, items, status }: { sessionId: string; it
     if (followTail.current && items.length > 0) virtualizerRef.current.scrollToIndex(items.length - 1, { align: 'end' });
   }, [sessionId, items.length]);
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable transcript needs keyboard focus
-  return <div ref={parent} className="transcript" role="region" aria-label="Session events" tabIndex={0} onScroll={() => { const el = parent.current; if (!el) return; followTail.current = isNearLiveTail(el.scrollHeight, el.scrollTop, el.clientHeight); }}>
-    <div className="transcript-heading"><h3>Activity</h3>{/running|active|in.progress/i.test(status) ? <span className="streaming-indicator"><span aria-hidden="true"/> Streaming</span> : null}</div>
+  const scrollRegion = <div ref={parent} className="transcript-scroll" role="region" aria-label="Session events" tabIndex={0} onScroll={() => { const el = parent.current; if (!el) return; followTail.current = isNearLiveTail(el.scrollHeight, el.scrollTop, el.clientHeight); }}>
     {items.length === 0 ? <EmptyState>No events yet.</EmptyState> : <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((item) => {
       const event = items[item.index];
       return event ? <div key={event.key} data-index={item.index} ref={virtualizer.measureElement} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}><SessionEvent event={event}/></div> : null;
     })}</div>}
   </div>;
+  return <section className="transcript" aria-labelledby="activity-heading">
+    <div className="transcript-heading"><h3 id="activity-heading">Activity</h3>{/running|active|in.progress/i.test(status) ? <span className="streaming-indicator"><span aria-hidden="true"/> Streaming</span> : null}</div>
+    {scrollRegion}
+  </section>;
 }
 
 function SessionEvent({ event }: { event: TranscriptItem }) {
   const iso = activityTimestamp(event.occurredAtMs);
+  if (event.presentation === 'lifecycle') return <article className="event event-lifecycle" data-kind={event.kind}>
+    <p className="lifecycle-summary">{event.summary}</p>
+    <span className="lifecycle-meta">{event.cursorLabel}{iso ? <> · <time dateTime={iso}>{new Date(event.occurredAtMs).toLocaleTimeString()}</time></> : null}</span>
+    {event.rawEvents.length > 0 ? <Disclosure className="raw-event"><Heading><Button slot="trigger">Raw</Button></Heading><DisclosurePanel>{event.rawEvents.map((raw, index) => <pre key={index}>{raw}</pre>)}</DisclosurePanel></Disclosure> : null}
+  </article>;
   return <article className="event" data-kind={event.kind}>
     <div className="meta"><b>{event.presentation === 'raw' ? 'Unrecognized event' : event.presentation === 'message' ? 'Agent message' : event.presentation === 'approval' ? 'Approval' : event.presentation === 'tool' ? 'Tool activity' : 'Session update'}</b><span>{event.cursorLabel}</span>{iso ? <time dateTime={iso}>{new Date(event.occurredAtMs).toLocaleTimeString()}</time> : null}</div>
-    {event.markdown !== null ? <div className="body"><p className="untrusted-label">Agent message · untrusted</p><UntrustedMarkdown source={event.markdown}/></div> : event.presentation === 'approval' ? <div className="body event-summary"><b>Approval requested</b><span>Pending decision</span>{event.approvalId ? <Link href={`#approval-${encodeURIComponent(event.approvalId)}`}>View approval card</Link> : null}</div> : event.presentation === 'tool' ? <div className="body event-summary"><b>Tool activity · untrusted action data</b><code>{event.summary}</code><span>{event.status}</span></div> : event.presentation === 'lifecycle' ? <p className="body lifecycle-summary">{event.summary}</p> : <p className="body event-raw-preview">{event.plain}</p>}
+    {event.markdown !== null ? <div className="body"><p className="untrusted-label">Agent message · untrusted</p><UntrustedMarkdown source={event.markdown}/></div> : event.presentation === 'approval' ? <div className="body event-summary"><b>Approval requested</b><span>Pending decision</span>{event.approvalId ? <Link href={`#approval-${encodeURIComponent(event.approvalId)}`}>View approval card</Link> : null}</div> : event.presentation === 'tool' ? <div className="body event-summary"><b>Tool activity · untrusted action data</b><code>{event.summary}</code><span>{event.status}</span></div> : <p className="body event-raw-preview">{event.plain}</p>}
     {event.rawEvents.length > 0 ? <Disclosure className="raw-event"><Heading><Button slot="trigger">Raw event{event.rawEvents.length > 1 ? `s (${event.rawEvents.length})` : ''}</Button></Heading><DisclosurePanel>{event.rawEvents.map((raw, index) => <pre key={index}>{raw}</pre>)}</DisclosurePanel></Disclosure> : null}
   </article>;
 }
@@ -145,7 +153,7 @@ function Approvals({ cards, checklist, connected, inFlight, error, confirmingAll
         </dl>
         <p className="approval-meta">{card.decision ? `${card.state} · ${card.decision}` : null}</p>
         <div className="approval-checklist"><p>Checklist: {checklist.failed} failed, {checklist.unverified} not verified.</p><Button aria-label="Open full verification checklist" className="button-quiet checklist-link" onPress={() => document.getElementById('checklist-heading')?.scrollIntoView({ block: 'start' })}><Icon className="icon" name="checklist"/></Button></div>
-        {card.agentTitle || card.agentDescription ? <Disclosure className="untrusted"><Heading><Button slot="trigger">Agent’s description · untrusted</Button></Heading><DisclosurePanel><UntrustedMarkdown source={[card.agentTitle, card.agentDescription].filter(Boolean).join('\n\n')}/></DisclosurePanel></Disclosure> : null}
+        <AgentDescription title={card.agentTitle} description={card.agentDescription}/>
         {confirming ? <p ref={confirmNote} tabIndex={-1} className="allow-confirm-note" role="note"><Icon className="icon" name="warning"/> Allow once sends this response even though the provider did not disclose the action. Choose Confirm allow once to send it, or Deny.</p> : null}
         {card.state === 'pending' ? <div className="controls approval-actions" onKeyDownCapture={(event) => { if (event.target instanceof HTMLElement && event.target.classList.contains('button-allow') && (event.key === 'Enter' || event.key === 'NumpadEnter')) { allowEnterPressed.current = true; event.preventDefault(); } }}>
           <Button className="button-danger" isDisabled={!connected || busy || !card.binding || !card.denyOnceOptionId} onPress={() => { if (card.binding && card.denyOnceOptionId) onResolve(card.approvalId, card.denyOnceOptionId, card.binding); }}><Icon className="icon" name="deny"/> Deny</Button>
@@ -160,6 +168,17 @@ function Approvals({ cards, checklist, connected, inFlight, error, confirmingAll
         </div> : null}
       </article>;
     })}
+  </section>;
+}
+
+export function AgentDescription({ title, description }: { title: string | null; description: string | null }) {
+  const source = [title, description].filter(Boolean).join('\n\n');
+  const long = source.length > 240;
+  const [expanded, setExpanded] = useState(false);
+  return <section className="untrusted" aria-label="Agent’s description · untrusted">
+    <p className="untrusted-label">Agent’s description · untrusted</p>
+    {source ? <div className={`untrusted-content${long && !expanded ? ' clamped' : ''}`}><UntrustedMarkdown source={source}/></div> : <p className="description-empty">No description provided</p>}
+    {long ? <ToggleButton className="description-toggle" isSelected={expanded} onChange={setExpanded}>{expanded ? 'Show less' : 'Show more'}</ToggleButton> : null}
   </section>;
 }
 

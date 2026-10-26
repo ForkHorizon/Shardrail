@@ -58,7 +58,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
           <StatusPill tone={phase === 'connected' ? 'success' : phase === 'key-changed' ? 'danger' : 'warning'}><Icon className="icon" name={phase === 'connected' ? 'connection' : phase === 'key-changed' ? 'error' : 'reconnect'}/><span className={`connection-state connection-${phase}`} role={phase === 'key-changed' ? 'alert' : 'status'} aria-label={connectionStatusLabel(phase)}><span className="connection-full">{connectionStatusLabel(phase)}</span><span className="connection-short">{phase === 'connected' ? 'Online' : phase === 'key-changed' ? 'Key changed' : 'Reconnecting'}</span></span></StatusPill>
         </div>
         <div className="header-secondary">
-          <Button className="button-secondary" onPress={onReconnect}>Reconnect</Button>
+          <Button className="button-secondary reconnect-button" aria-label="Reconnect" onPress={onReconnect}><Icon className="icon" name="reconnect"/><span>Reconnect</span></Button>
           <ThemeToggle/>
         </div>
       </div>

@@ -35,13 +35,16 @@ footer { padding: var(--space-2) var(--space-6); color: var(--color-muted); bord
 .markdown-frame body { color: var(--color-text); }
 @media (max-width: 720px) {
   :where(.react-aria-Button, button) { min-height: 44px; }
-  .app-header { align-items: stretch; flex-direction: column; gap: var(--space-1); padding: var(--space-2) var(--space-3); }
+  .app-header { gap: var(--space-2); padding: var(--space-1) var(--space-3); }
   .brand { gap: var(--space-2); }
   .brand > svg { width: 1.75rem; height: 1.75rem; }
   .brand p { display: none; }
-  .header-tools { align-items: stretch; flex-direction: column; gap: 0; }
-  .header-controls { max-width: none; justify-content: space-between; }
-  .header-secondary { justify-content: space-between; min-height: 44px; }
+  .header-tools { gap: var(--space-1); }
+  .header-controls { flex-wrap: nowrap; }
+  .header-secondary { gap: 0; }
+  .reconnect-button { width: 44px; padding: var(--space-2); }
+  .reconnect-button span { display: none; }
+  .reconnect-button .icon { width: 1.25rem; height: 1.25rem; }
   .connection-full { display: none; }
   .connection-short { display: inline; }
   .workspace { grid-template-columns: minmax(0, 1fr); }

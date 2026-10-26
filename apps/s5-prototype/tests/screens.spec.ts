@@ -114,6 +114,9 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
         });
         await capture('06', 'approval-pending', async () => {
           await expect(page.getByRole('button', { name: 'Allow once' }).first()).toBeVisible();
+          await page.locator('.approvals').first().evaluate((section) => section.scrollIntoView({ block: 'start' }));
+          await expect(page.locator('.approval-card').first().getByRole('heading', { name: 'Approval request' })).toBeVisible();
+          await expect(page.locator('.approval-card').first().getByText('Run fixture command')).toBeVisible();
           if (size === 'phone') {
             const actionBounds = await page.locator('.approval-actions button').evaluateAll((nodes) => nodes.map((node) => { const rect = node.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom }; }));
             const viewportHeight = await page.evaluate(() => window.innerHeight);
@@ -121,7 +124,11 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
           }
         });
         await page.getByRole('button', { name: 'Allow once' }).first().click();
-        await capture('07', 'approval-confirm', () => expect(page.getByRole('button', { name: 'Confirm allow once' }).first()).toBeVisible());
+        await capture('07', 'approval-confirm', async () => {
+          await page.locator('.approvals').first().evaluate((section) => section.scrollIntoView({ block: 'start' }));
+          await expect(page.locator('.approval-card').first().getByRole('heading', { name: 'Approval request' })).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Confirm allow once' }).first()).toBeVisible();
+        });
         await page.getByRole('heading', { name: 'Verification checklist' }).evaluate((heading) => heading.scrollIntoView({ block: 'start' }));
         await capture('08', 'checklist', () => expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible());
       } catch (error) {
