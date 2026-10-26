@@ -9,7 +9,7 @@ import { ThemeToggle } from './ui/ThemeToggle';
 import { Icon } from './ui/Icon';
 import { StatusPill } from './ui/StatusPill';
 
-export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
+export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createPending, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
   pairedFingerprint?: string;
@@ -19,6 +19,7 @@ export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFli
   promptClear: { commandId: string; sessionId: string } | null;
   workdirs: readonly string[] | null;
   createError: string | null;
+  createPending: boolean;
   createdSessionId: string | null;
   dismissedSessionId: string | null;
   onReconnect: () => void;
@@ -63,7 +64,7 @@ export function MainScreen({ phase, keyStorage, pairedFingerprint, approvalInFli
     {keyStorage === 'noble-fallback' ? <p className="inline-note" role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}
     <div className="workspace">
       <div className={`entry-pane${mobileDetail ? ' mobile-hidden' : ''}`}>
-        <EntryArea sessions={sessions} events={events} selectedId={selected?.id ?? null} workdirs={workdirs} pickedWorkdir={pickedWorkdir} createError={createError} onSelect={selectSession} onPickWorkdir={setPickedWorkdir} onCreateSession={onCreateSession}/>
+        <EntryArea sessions={sessions} events={events} selectedId={selected?.id ?? null} workdirs={workdirs} pickedWorkdir={pickedWorkdir} createError={createError} createPending={createPending} phase={phase} onSelect={selectSession} onPickWorkdir={setPickedWorkdir} onCreateSession={onCreateSession}/>
       </div>
       <div className={`detail-pane${mobileDetail ? ' mobile-visible' : ''}`}>
         {selected ? <>
