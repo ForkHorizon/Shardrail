@@ -41,7 +41,7 @@ The hash is SHA-256 of one canonical JSON object. Object keys are sorted at ever
 
 - `approval_policy` — a short token, or `{granular: {mcp_elicitations, request_permissions, rules, sandbox_approval, skill_approval}}` with explicit nulls for the optional bools
 - `approvals_reviewer` — token or null
-- `sandbox` — `mode` from `sandbox_mode`, and `network_access` from `sandbox_workspace_write.network_access`
+- `sandbox` — `mode` from `sandbox_mode`, and `network_access`, `exclude_slash_tmp`, and `exclude_tmpdir_env_var` from `sandbox_workspace_write`. Each bool is null when that object or field is absent
 - `workspace_roots` — sorted, de-duplicated `sandbox_workspace_write.writable_roots`
 - `model` and `model_provider`
 - `extensions` — `apps`, `connectors`, `hooks`, and `plugins` as name to `enabled` only; `skills` as `bundled_enabled`, `include_instructions`, and `{name, enabled}` rows

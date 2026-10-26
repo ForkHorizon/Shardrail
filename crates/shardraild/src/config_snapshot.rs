@@ -6,7 +6,8 @@
 //! Canonical groups, always present, with sorted object keys and explicit nulls:
 //! - `approval_policy` — string or granular bools, else null
 //! - `approvals_reviewer` — string or null
-//! - `sandbox` — `mode` and `network_access`
+//! - `sandbox` — `mode`, `network_access`, `exclude_slash_tmp`, and
+//!   `exclude_tmpdir_env_var`
 //! - `workspace_roots` — sorted `sandbox_workspace_write.writable_roots`
 //! - `model` and `model_provider`
 //! - `extensions` — apps, connectors, hooks, and plugins as name → enabled;
@@ -74,10 +75,9 @@ const GROUPS: [&str; 10] = [
 
 fn canonical_config(config: &Map<String, Value>) -> Result<Value, &'static str> {
     let sandbox_write = optional_object(config, "sandbox_workspace_write")?;
-    let network = match sandbox_write {
-        None => Value::Null,
-        Some(write) => optional_bool(write, "network_access")?,
-    };
+    let network = sandbox_bool(sandbox_write, "network_access")?;
+    let exclude_slash_tmp = sandbox_bool(sandbox_write, "exclude_slash_tmp")?;
+    let exclude_tmpdir_env_var = sandbox_bool(sandbox_write, "exclude_tmpdir_env_var")?;
     let roots = workspace_roots(sandbox_write)?;
     Ok(json!({
         "approval_policy": approval_policy(config.get("approval_policy"))?,
@@ -94,6 +94,8 @@ fn canonical_config(config: &Map<String, Value>) -> Result<Value, &'static str> 
         "model": short_string(config.get("model"), 128)?,
         "model_provider": short_string(config.get("model_provider"), 128)?,
         "sandbox": {
+            "exclude_slash_tmp": exclude_slash_tmp,
+            "exclude_tmpdir_env_var": exclude_tmpdir_env_var,
             "mode": short_string(config.get("sandbox_mode"), 64)?,
             "network_access": network,
         },
@@ -346,6 +348,13 @@ fn optional_object<'a>(
     }
 }
 
+fn sandbox_bool(write: Option<&Map<String, Value>>, key: &str) -> Result<Value, &'static str> {
+    match write {
+        None => Ok(Value::Null),
+        Some(write) => optional_bool(write, key),
+    }
+}
+
 fn optional_bool(map: &Map<String, Value>, key: &str) -> Result<Value, &'static str> {
     match map.get(key) {
         None | Some(Value::Null) => Ok(Value::Null),
@@ -465,6 +474,16 @@ mod tests {
                 value["config"]["sandbox_mode"] = json!("danger-full-access");
                 value
             }),
+            ("sandbox", {
+                let mut value = sample("untrusted");
+                value["config"]["sandbox_workspace_write"]["exclude_slash_tmp"] = json!(true);
+                value
+            }),
+            ("sandbox", {
+                let mut value = sample("untrusted");
+                value["config"]["sandbox_workspace_write"]["exclude_tmpdir_env_var"] = json!(true);
+                value
+            }),
             ("approvals_reviewer", {
                 let mut value = sample("untrusted");
                 value["config"]["approvals_reviewer"] = json!("auto_review");
@@ -555,6 +574,12 @@ mod tests {
         assert!(snapshot.canonical.contains("\"approval_policy\":null"));
         assert!(snapshot.canonical.contains("\"model\":null"));
         assert!(snapshot.canonical.contains("\"network_access\":null"));
+        assert!(snapshot.canonical.contains("\"exclude_slash_tmp\":null"));
+        assert!(
+            snapshot
+                .canonical
+                .contains("\"exclude_tmpdir_env_var\":null")
+        );
         assert!(snapshot.canonical.contains("\"workspace_roots\":null"));
         assert!(snapshot.canonical.contains("\"features\":null"));
         assert!(snapshot_config(&json!({"origins": {}})).is_err());
@@ -571,5 +596,11 @@ mod tests {
         assert!(
             snapshot_config(&json!({"config": {"mcp_servers": {}, "web_search": SECRET}})).is_err()
         );
+        let mut bad_flag = sample("untrusted");
+        bad_flag["config"]["sandbox_workspace_write"]["exclude_slash_tmp"] = json!("false");
+        assert!(snapshot_config(&bad_flag).is_err());
+        bad_flag["config"]["sandbox_workspace_write"]["exclude_slash_tmp"] = json!(false);
+        bad_flag["config"]["sandbox_workspace_write"]["exclude_tmpdir_env_var"] = json!(0);
+        assert!(snapshot_config(&bad_flag).is_err());
     }
 }
