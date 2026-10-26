@@ -140,9 +140,9 @@ pub(crate) fn codex_ready_checks(sandbox_label: &str) -> Vec<CheckDraft> {
         ),
         row(
             "config",
-            SessionCheckStatus::Verified,
-            "codex_extensions_verified",
-            "per-run -c overrides only; config writes are not issued; extension verification passed",
+            SessionCheckStatus::NotVerified,
+            "not checked",
+            "Per-run -c overrides are used and config writes are not issued. A hash of the provider approval config at session start, before every turn, and at session end is not taken.",
         ),
         row(
             "widening",
@@ -191,6 +191,14 @@ pub(crate) fn codex_echo_failure(item_id: &'static str, detail: &str) -> Vec<Che
                 "blocked before this echo was accepted",
             );
         }
+    }
+    if let Some(widening) = checks.iter_mut().find(|check| check.item_id == "widening") {
+        *widening = row(
+            "widening",
+            SessionCheckStatus::NotVerified,
+            "not checked",
+            "session was rejected on startup before settings monitoring began",
+        );
     }
     checks
 }

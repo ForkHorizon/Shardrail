@@ -402,13 +402,14 @@ fn codex_journals_verified_checks_and_keeps_the_rest_not_verified() {
     )
     .unwrap();
     let events = journal_events(dirs.data.path());
-    for item in ["sandbox", "bypass", "routing", "config", "widening", "mcp"] {
+    for item in ["sandbox", "bypass", "routing", "widening", "mcp"] {
         let check = latest_check(&events, session_id, item);
         assert_eq!(check["status"], "verified", "{item} {check}");
         assert!(!check["source"].as_str().unwrap().is_empty());
         assert!(check["checked_at_ms"].as_i64().unwrap() > 0);
     }
     for (item, needle) in [
+        ("config", "hash"),
         ("containment", "process group"),
         ("credentials", "SSH_AUTH_SOCK"),
         ("writes", "workspace-write"),
@@ -648,6 +649,15 @@ fn codex_bad_reviewer_blocks_turns() {
     assert_eq!(
         latest_check(&events, session, "routing")["status"],
         "failed"
+    );
+    let widening = latest_check(&events, session, "widening");
+    assert_eq!(widening["status"], "not_verified", "{widening}");
+    assert!(
+        widening["detail"]
+            .as_str()
+            .unwrap()
+            .contains("settings monitoring"),
+        "{widening}"
     );
     send_command(
         &mut stream,
