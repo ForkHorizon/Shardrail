@@ -233,6 +233,10 @@ test('the live script gates on the env and resets only through the guard', () =>
   assert.match(source, /expected 12 checklist items/);
   assert.match(source, /banner dropped approvals not protected/);
   assert.match(source, /banner adds checklist rows into one verdict/);
+  assert.match(source, /config check is not verified/);
+  assert.match(source, /missing session-start config snapshot/);
+  assert.match(source, /missing pre-turn config snapshot/);
+  assert.match(source, /pre-turn config snapshot did not match/);
   assert.doesNotMatch(source, /banner still says approvals are not protected while/);
   assert.doesNotMatch(source, /\/Users\/daliys/);
   const guardAt = source.indexOf('assertRepoIdentity(');

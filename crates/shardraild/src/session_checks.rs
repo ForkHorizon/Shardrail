@@ -165,6 +165,15 @@ pub(crate) fn failed_check(item_id: &'static str, source: &str, detail: &str) ->
     row(item_id, SessionCheckStatus::Failed, source, detail)
 }
 
+pub(crate) fn config_verified(point: &str, hash: &str) -> CheckDraft {
+    row(
+        "config",
+        SessionCheckStatus::Verified,
+        &format!("config snapshot {point} sha256:{hash}"),
+        &format!("SHA-256 {hash}. Snapshot point {point}."),
+    )
+}
+
 /// Echo checks run in order: routing, then bypass, then sandbox.
 /// A failure leaves the later echo items not verified.
 pub(crate) fn codex_echo_failure(item_id: &'static str, detail: &str) -> Vec<CheckDraft> {

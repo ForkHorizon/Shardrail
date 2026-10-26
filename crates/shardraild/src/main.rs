@@ -40,6 +40,7 @@ use uuid::Uuid;
 
 mod approval_binding;
 mod codex_app_server;
+mod config_snapshot;
 mod daemon_log;
 mod session_checks;
 mod session_workdir;
@@ -1520,7 +1521,7 @@ async fn run(
             }
             _ = &mut parent_closed => {
                 daemon_log::log("INFO", "daemon", "parent stdin closed; stopping");
-                codex_app_server::shutdown_children();
+                codex_app_server::shutdown_sessions().await;
                 return Ok(());
             }
         }

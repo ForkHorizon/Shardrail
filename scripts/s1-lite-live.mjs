@@ -248,6 +248,26 @@ async function main() {
     if (/\d+ of \d+ session checks verified/.test(result.banner)) {
       throw new Error(`banner adds checklist rows into one verdict: ${result.banner}`);
     }
+    const snapshots = events.filter((event) => event.kind === 'config_snapshot' && event.session_id === sessionId);
+    result.config_snapshots = {
+      count: snapshots.length,
+      hash_prefixes: snapshots.map((event) => {
+        const text = String(event.payload?.hash ?? '');
+        const hex = text.startsWith('sha256:') ? text.slice('sha256:'.length) : text;
+        return hex.slice(0, 12);
+      }),
+      matched: snapshots.length > 0 && snapshots.filter((event) => event.payload?.point === 'pre-turn' || event.payload?.point === 'session-start').every((event) => event.payload?.matched === true),
+      points: snapshots.map((event) => event.payload?.point ?? null),
+    };
+    const configRow = result.checklist.find((row) => row.item_id === 'config');
+    if (!configRow || configRow.status !== 'verified') throw new Error(`config check is not verified: ${JSON.stringify(configRow)}`);
+    const preTurn = snapshots.filter((event) => event.payload?.point === 'pre-turn');
+    const turnStarts = events.filter((event) => event.kind === 'turn_started' && event.session_id === sessionId);
+    if (!snapshots.some((event) => event.payload?.point === 'session-start' && event.payload?.matched === true)) {
+      throw new Error('missing session-start config snapshot');
+    }
+    if (preTurn.length < turnStarts.length) throw new Error('missing pre-turn config snapshot');
+    if (preTurn.some((event) => event.payload?.matched !== true)) throw new Error('pre-turn config snapshot did not match');
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
     if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');
