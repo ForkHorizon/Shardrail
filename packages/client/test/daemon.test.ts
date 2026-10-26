@@ -25,6 +25,28 @@ const withDeadline = async <T>(promise: Promise<T>, ms: number, label: string): 
     clearTimeout(timer);
   }
 };
+const pollUntil = (check: () => boolean, ms: number, label: string | (() => string)) => new Promise<void>((resolvePoll, reject) => {
+  let poll: NodeJS.Timeout | undefined;
+  const deadline = setTimeout(() => { clearTimeout(poll); reject(new Error(`${typeof label === "function" ? label() : label} exceeded ${ms}ms`)); }, ms);
+  const run = () => {
+    try {
+      if (check()) { clearTimeout(deadline); resolvePoll(); }
+      else poll = setTimeout(run, 25);
+    } catch (error) {
+      clearTimeout(deadline);
+      reject(error);
+    }
+  };
+  run();
+});
+
+test("poll deadline stops scheduling checks", async () => {
+  let checks = 0;
+  await assert.rejects(pollUntil(() => { checks++; return false; }, 25, "poll"), /poll exceeded 25ms/);
+  const settledChecks = checks;
+  await withDeadline(new Promise((resolveDelay) => setTimeout(resolveDelay, 60)), 500, "poll cleanup check");
+  assert.equal(checks, settledChecks);
+});
 
 after(async () => {
   for (const child of children) {
@@ -136,6 +158,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
   let client: Awaited<ReturnType<typeof connect>> | undefined;
   let daemon: ChildProcess | undefined;
   let daemonStderr = "";
+  let failure: unknown;
   try {
     const registration = spawnSync(daemonBin, ["--data-dir", data, "client", "add", "--label", "client-test", "--scope", "full"], { encoding: "utf8", timeout: 15_000 });
     assert.equal(registration.status, 0, registration.stderr);
@@ -148,15 +171,11 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     daemon.stderr?.on("data", (chunk: string) => { daemonStderr += chunk; });
     const daemonExit = once(daemon, "exit");
     children.push(daemon);
-    await withDeadline(new Promise<void>((resolveSocket, reject) => {
-      const deadline = setTimeout(() => reject(new Error("daemon socket did not become ready")), 10_000);
-      const check = () => {
-        if (existsSync(join(data, "shardraild.sock"))) { clearTimeout(deadline); resolveSocket(); }
-        else if (daemon?.exitCode !== null) { clearTimeout(deadline); reject(new Error(`daemon exited before socket was ready: ${daemon?.exitCode}`)); }
-        else setTimeout(check, 25);
-      };
-      check();
-    }), 15_000, "daemon socket startup");
+    await withDeadline(pollUntil(() => {
+      if (existsSync(join(data, "shardraild.sock"))) return true;
+      if (daemon?.exitCode !== null) throw new Error(`daemon exited before socket was ready: ${daemon?.exitCode}`);
+      return false;
+    }, 10_000, "daemon socket did not become ready"), 15_000, "daemon socket startup");
 
     const options = { socketPath: join(data, "shardraild.sock"), clientId, privateKey, hostPublicKey: values.host_public_key! };
     await withDeadline(assert.rejects(connect({ ...options, hostPublicKey: "00".repeat(32) }), /does not match the pinned key/), 15_000, "wrong host key rejection");
@@ -223,15 +242,10 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     for (let i = 0; i < 40; i++) {
       client.request({ command_id: randomUUID(), kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
     }
-    await withDeadline(new Promise<void>((resolveCreated, reject) => {
-      const deadline = setTimeout(() => reject(new Error(`created ${created}/40 sessions`)), 10_000);
-      let checkTimer: NodeJS.Timeout;
-      const check = () => {
-        if (created === 40) { clearTimeout(deadline); clearTimeout(checkTimer); resolveCreated(); }
-        else checkTimer = setTimeout(check, 10);
-      };
-      check();
-    }), 15_000, "40 session creation events");
+    await withDeadline(pollUntil(() => {
+      if (created === 40) return true;
+      return false;
+    }, 10_000, () => `created ${created}/40 sessions`), 15_000, "40 session creation events");
     offCreated();
     client.close();
     client = await withDeadline(connect({ ...options, cursor: 0, journalEpoch }), 15_000, "full journal replay connect");
@@ -288,13 +302,24 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     assert.equal(disconnectCount, 1);
     client.close();
   } catch (error) {
+    failure = error;
     throw new Error(`${error instanceof Error ? error.message : String(error)}\ndaemon stderr:\n${daemonStderr || "(empty)"}`, { cause: error });
   } finally {
     client?.close();
-    if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
-      try { process.kill(-daemon.pid!, "SIGKILL"); } catch { daemon.kill("SIGKILL"); }
-      await withDeadline(once(daemon, "exit"), 5_000, "daemon cleanup exit");
+    let cleanupError: unknown;
+    try {
+      if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
+        try { process.kill(-daemon.pid!, "SIGKILL"); } catch { daemon.kill("SIGKILL"); }
+        await withDeadline(once(daemon, "exit"), 5_000, "daemon cleanup exit");
+      }
+    } catch (error) {
+      cleanupError = error;
     }
-    await withDeadline(rm(data, { recursive: true, force: true }), 5_000, "client daemon temp cleanup");
+    try {
+      await withDeadline(rm(data, { recursive: true, force: true }), 5_000, "client daemon temp cleanup");
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (cleanupError) throw new Error(`${failure instanceof Error ? failure.message : failure === undefined ? "daemon test cleanup failed" : String(failure)}\ncleanup error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\ndaemon stderr:\n${daemonStderr || "(empty)"}`, { cause: cleanupError });
   }
 });
