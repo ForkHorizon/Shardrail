@@ -6,7 +6,7 @@ An approval decision is accepted only when it matches the pending request still 
 
 A second decision for the same approval is rejected, including a race between two clients. The provider is answered at most once. A decision for another session, another turn, another provider request id, another epoch, or an approval that is already expired, withdrawn, or abandoned is rejected. Restart withdraws pending approvals with reason `abandoned` before any client can answer. The provider child from the previous process is gone.
 
-`acceptForSession` is rejected for every scope. A limited client may choose an option whose class is `once`. A client record with `allow_approvals: false` cannot decide. Missing `allow_approvals` on an older client file still means the client can decide. Timeout expires the approval and sends a decline or cancel, never an allow. The request, the decision (client id, label, scope, option, hash), and every rejection are journaled. The daemon log names the same ids and the hash, and it does not include the command text.
+`acceptForSession` is rejected for every scope. A limited client may choose an option whose class is `once`. A client record with `allow_approvals: false` cannot decide. Missing `allow_approvals` on an older client file still means the client can decide. Timeout expires the approval and sends a decline or cancel, never an allow. The request, the decision (client id, label, scope, option, hash), and every rejection are journaled. The daemon log names the same ids and the rejection reason, and it does not include the command text. The log redacts the 64-hex content hash; the journal keeps it.
 
 ## Checklist
 
