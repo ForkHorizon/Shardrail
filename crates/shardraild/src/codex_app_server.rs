@@ -26,7 +26,7 @@ use std::io::{self, ErrorKind};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex, Once};
+use std::sync::{Arc, Mutex as StdMutex, Once, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -72,9 +72,13 @@ const FILE_APPROVAL: &str = "item/fileChange/requestApproval";
 const MAX_HELD_EVENTS: usize = 64;
 /// The only approval policy the daemon requests and accepts in an echo.
 pub(crate) const APPROVAL_POLICY: &str = "untrusted";
+const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const CONFIG_END_TIMEOUT: Duration = Duration::from_millis(1200);
+const SESSION_END_WAIT: Duration = Duration::from_millis(2000);
 
 static GROUPS: StdMutex<Vec<u32>> = StdMutex::new(Vec::new());
 static SHUTDOWN_HOOK: Once = Once::new();
+static SESSION_END: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
 
 #[derive(Clone)]
 pub(crate) struct CodexConfig {
@@ -351,10 +355,31 @@ pub(crate) fn install_shutdown_kill() {
                     }
                 } => {}
             }
-            kill_tracked_groups();
+            shutdown_sessions().await;
             std::process::exit(0);
         });
     });
+}
+
+fn session_end_sender() -> &'static tokio::sync::watch::Sender<bool> {
+    SESSION_END.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
+
+fn groups_tracked() -> bool {
+    GROUPS
+        .lock()
+        .map(|groups| !groups.is_empty())
+        .unwrap_or(false)
+}
+
+/// Ask each live session to snapshot config, then kill any child still running.
+pub(crate) async fn shutdown_sessions() {
+    let _ = session_end_sender().send(true);
+    let deadline = tokio::time::Instant::now() + SESSION_END_WAIT;
+    while tokio::time::Instant::now() < deadline && groups_tracked() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    shutdown_children();
 }
 
 pub(crate) fn shutdown_children() {
@@ -410,6 +435,11 @@ enum PendingRpc {
     AppsList,
     ConfigRead,
     ThreadStart,
+    ConfigSnapshot {
+        command_id: Uuid,
+        prompt: String,
+        done: oneshot::Sender<Result<i64, String>>,
+    },
     TurnStart {
         done: oneshot::Sender<Result<i64, String>>,
         event_id: i64,
@@ -852,8 +882,14 @@ async fn run_codex_session(
         admission_verified: Some(verified_tx),
         admission_commit: Some(commit_rx),
         held_events: StdMutex::new(Some(Vec::new())),
+        config_baseline: None,
+        config_failed: false,
+        start_snapshot_journaled: false,
+        snapshot_deadline: None,
         #[cfg(test)]
         fail_command_lookup: false,
+        #[cfg(test)]
+        skip_config_snapshot: false,
     };
     crate::daemon_log::log(
         "INFO",
@@ -862,9 +898,21 @@ async fn run_codex_session(
     );
     session.send_request("initialize", initialize_params(), PendingRpc::Initialize);
     let mut lines = BufReader::new(stdout).lines();
+    let mut end_rx = session_end_sender().subscribe();
+    let mut child_alive = true;
     loop {
+        if *end_rx.borrow() {
+            break;
+        }
+        let snapshot_deadline = session.snapshot_deadline;
+        let snapshot_fallback = tokio::time::Instant::now() + Duration::from_secs(3600);
         tokio::select! {
             biased;
+            changed = end_rx.changed() => {
+                if changed.is_err() || *end_rx.borrow() {
+                    break;
+                }
+            }
             line = lines.next_line() => {
                 match line {
                     Ok(Some(line)) => {
@@ -875,6 +923,7 @@ async fn run_codex_session(
                             Ok(frame) => frame,
                             Err(_) => {
                                 session.fail_transport(&mut ready, "codex app-server sent invalid JSON").await;
+                                child_alive = false;
                                 break;
                             }
                         };
@@ -883,10 +932,12 @@ async fn run_codex_session(
                         }
                     }
                     Ok(None) => {
+                        child_alive = false;
                         session.fail_transport(&mut ready, "codex app-server disconnected").await;
                         break;
                     }
                     Err(_) => {
+                        child_alive = false;
                         session.fail_transport(&mut ready, "codex app-server disconnected").await;
                         break;
                     }
@@ -901,9 +952,21 @@ async fn run_codex_session(
             }
             status = child.wait() => {
                 let _ = status;
+                child_alive = false;
                 session.fail_transport(&mut ready, "codex app-server exited").await;
                 break;
             }
+            _ = tokio::time::sleep_until(snapshot_deadline.unwrap_or(snapshot_fallback)), if snapshot_deadline.is_some() => {
+                session.fail_config_timeout(&mut ready).await;
+                break;
+            }
+        }
+    }
+    if session.start_snapshot_journaled {
+        if child_alive {
+            session.record_end_snapshot(&mut lines).await;
+        } else {
+            session.note_end_unavailable("child not alive").await;
         }
     }
     session.release_approvals().await;
@@ -1014,8 +1077,14 @@ struct CodexRun {
     /// Provider events seen before `session_created` is committed. The session does
     /// not exist in the journal yet, so they are held and appended after admission.
     held_events: StdMutex<Option<Vec<(String, Value)>>>,
+    config_baseline: Option<crate::config_snapshot::Snapshot>,
+    config_failed: bool,
+    start_snapshot_journaled: bool,
+    snapshot_deadline: Option<tokio::time::Instant>,
     #[cfg(test)]
     fail_command_lookup: bool,
+    #[cfg(test)]
+    skip_config_snapshot: bool,
 }
 
 impl CodexRun {
@@ -1050,6 +1119,57 @@ impl CodexRun {
     }
 
     async fn start_turn(
+        &mut self,
+        command_id: Uuid,
+        prompt: String,
+        done: oneshot::Sender<Result<i64, String>>,
+    ) {
+        if !self.turns_allowed {
+            let _ = done.send(Err("approvals are not routed to the user".into()));
+            return;
+        }
+        if self.thread_id.is_none() {
+            let _ = done.send(Err("codex thread is not ready".into()));
+            return;
+        }
+        if self.turn_state().await != Some(TurnState::Idle) || !self.process_marked {
+            let _ = done.send(Err("a turn is already running".into()));
+            return;
+        }
+        #[cfg(test)]
+        if self.skip_config_snapshot {
+            self.begin_turn(command_id, prompt, done).await;
+            return;
+        }
+        if self.config_baseline.is_none() {
+            let _ = done.send(Err("config snapshot is missing".into()));
+            return;
+        }
+        if self.snapshot_deadline.is_some()
+            || self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, PendingRpc::ConfigSnapshot { .. }))
+        {
+            let _ = done.send(Err("config snapshot already in progress".into()));
+            return;
+        }
+        let rpc_id = self.next_id;
+        self.send_request(
+            "config/read",
+            json!({"cwd": self.workdir}),
+            PendingRpc::ConfigSnapshot {
+                command_id,
+                prompt,
+                done,
+            },
+        );
+        if self.pending.contains_key(&rpc_id.to_string()) {
+            self.snapshot_deadline = Some(tokio::time::Instant::now() + CONFIG_READ_TIMEOUT);
+        }
+    }
+
+    async fn begin_turn(
         &mut self,
         command_id: Uuid,
         prompt: String,
@@ -1197,7 +1317,9 @@ impl CodexRun {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("codex request failed");
-            self.fail_pending(pending, ready, message).await;
+            if self.fail_pending(pending, ready, message).await {
+                return true;
+            }
             return matches!(
                 self.codex_status_now().await,
                 CodexStatus::Failed(_) | CodexStatus::RoutingRejected(_)
@@ -1270,7 +1392,16 @@ impl CodexRun {
                         return true;
                     }
                 };
+                let snapshot = match crate::config_snapshot::snapshot_config(&result) {
+                    Ok(snapshot) => snapshot,
+                    Err(reason) => {
+                        drop(result);
+                        self.reject_extensions(ready, reason).await;
+                        return true;
+                    }
+                };
                 drop(result);
+                self.config_baseline = Some(snapshot);
                 if let Err(error) = self.wait_for_admission().await {
                     self.fail_transport(ready, &error).await;
                     return true;
@@ -1332,7 +1463,22 @@ impl CodexRun {
                         return true;
                     }
                     self.process_marked = true;
-                    let checks = crate::session_checks::codex_ready_checks(self.sandbox.label());
+                    let Some(hash) = self
+                        .config_baseline
+                        .as_ref()
+                        .map(|snapshot| snapshot.hash.clone())
+                    else {
+                        self.fail_transport(ready, "config snapshot is missing")
+                            .await;
+                        return true;
+                    };
+                    let mut checks =
+                        crate::session_checks::codex_ready_checks(self.sandbox.label());
+                    checks.retain(|check| check.item_id != "config");
+                    checks.push(crate::session_checks::config_verified(
+                        "session-start",
+                        &hash,
+                    ));
                     if let Err(error) = crate::session_checks::journal_checks(
                         &self.daemon,
                         self.session_id,
@@ -1343,6 +1489,16 @@ impl CodexRun {
                         self.fail_transport(ready, &error).await;
                         return true;
                     }
+                    self.journal_config_event(
+                        "session-start",
+                        Some(&hash),
+                        Some(true),
+                        &[],
+                        true,
+                        None,
+                    )
+                    .await;
+                    self.start_snapshot_journaled = true;
                     self.turns_allowed = true;
                     let status = CodexStatus::Ready;
                     set_status(&self.daemon, self.session_id, status.clone()).await;
@@ -1356,6 +1512,46 @@ impl CodexRun {
                     true
                 }
             },
+            PendingRpc::ConfigSnapshot {
+                command_id,
+                prompt,
+                done,
+            } => {
+                self.snapshot_deadline = None;
+                let parsed = crate::config_snapshot::snapshot_config(&result);
+                drop(result);
+                let Some(baseline) = self.config_baseline.clone() else {
+                    let reason = "config snapshot is missing";
+                    self.note_config_failure("pre-turn", reason).await;
+                    let _ = done.send(Err(reason.into()));
+                    self.stop_for_config(ready, reason).await;
+                    return true;
+                };
+                match parsed {
+                    Ok(snapshot) => {
+                        let changed = crate::config_snapshot::changed_groups(&baseline, &snapshot);
+                        if changed.is_empty() {
+                            self.note_config_match("pre-turn", &snapshot.hash).await;
+                            self.begin_turn(command_id, prompt, done).await;
+                            false
+                        } else {
+                            let reason = format!("config drifted: {}", changed.join(", "));
+                            self.note_config_drift("pre-turn", &snapshot.hash, &changed, &reason)
+                                .await;
+                            let _ = done.send(Err(reason.clone()));
+                            self.stop_for_config(ready, &reason).await;
+                            true
+                        }
+                    }
+                    Err(_) => {
+                        let reason = "config/read response is invalid";
+                        self.note_config_failure("pre-turn", reason).await;
+                        let _ = done.send(Err(reason.into()));
+                        self.stop_for_config(ready, reason).await;
+                        true
+                    }
+                }
+            }
             PendingRpc::TurnStart { done, event_id } => {
                 if let Some(reviewer) = result.get("approvalsReviewer")
                     && reviewer.as_str() != Some("user")
@@ -1465,26 +1661,49 @@ impl CodexRun {
         pending: PendingRpc,
         ready: &mut Option<oneshot::Sender<CodexStatus>>,
         message: &str,
-    ) {
+    ) -> bool {
         match pending {
             PendingRpc::Initialize | PendingRpc::ThreadStart => {
                 self.fail_transport(ready, message).await;
+                false
             }
-            PendingRpc::SkillsList => self.reject_extensions(ready, "skills/list failed").await,
-            PendingRpc::HooksList => self.reject_extensions(ready, "hooks/list failed").await,
+            PendingRpc::SkillsList => {
+                self.reject_extensions(ready, "skills/list failed").await;
+                false
+            }
+            PendingRpc::HooksList => {
+                self.reject_extensions(ready, "hooks/list failed").await;
+                false
+            }
             PendingRpc::PluginsInstalled => {
                 self.reject_extensions(ready, "plugin/installed failed")
                     .await;
+                false
             }
-            PendingRpc::AppsList => self.reject_extensions(ready, "app/list failed").await,
-            PendingRpc::ConfigRead => self.reject_extensions(ready, "config/read failed").await,
+            PendingRpc::AppsList => {
+                self.reject_extensions(ready, "app/list failed").await;
+                false
+            }
+            PendingRpc::ConfigRead => {
+                self.reject_extensions(ready, "config/read failed").await;
+                false
+            }
+            PendingRpc::ConfigSnapshot { done, .. } => {
+                let reason = "config/read failed";
+                self.note_config_failure("pre-turn", reason).await;
+                let _ = done.send(Err(reason.into()));
+                self.stop_for_config(ready, reason).await;
+                true
+            }
             PendingRpc::TurnStart { done, .. } => {
                 self.finish_turn(TurnOutcome::Interrupted, "turn_start_failed")
                     .await;
                 let _ = done.send(Err(message.to_owned()));
+                false
             }
             PendingRpc::Interrupt { done, event_id } => {
                 let _ = done.send(Ok(event_id));
+                false
             }
         }
     }
@@ -2063,6 +2282,213 @@ impl CodexRun {
         }
     }
 
+    async fn stop_for_config(
+        &mut self,
+        ready: &mut Option<oneshot::Sender<CodexStatus>>,
+        reason: &str,
+    ) {
+        self.turns_allowed = false;
+        self.config_failed = true;
+        self.snapshot_deadline = None;
+        self.fail_transport(ready, reason).await;
+    }
+
+    async fn fail_config_timeout(&mut self, ready: &mut Option<oneshot::Sender<CodexStatus>>) {
+        self.snapshot_deadline = None;
+        let keys = self
+            .pending
+            .iter()
+            .filter_map(|(key, pending)| {
+                matches!(pending, PendingRpc::ConfigSnapshot { .. }).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        let reason = "config/read timed out";
+        for key in keys {
+            if let Some(PendingRpc::ConfigSnapshot { done, .. }) = self.pending.remove(&key) {
+                self.note_config_failure("pre-turn", reason).await;
+                let _ = done.send(Err(reason.into()));
+            }
+        }
+        self.stop_for_config(ready, reason).await;
+    }
+
+    async fn note_config_match(&mut self, point: &str, hash: &str) {
+        if !self.config_failed {
+            let _ = crate::session_checks::journal_checks(
+                &self.daemon,
+                self.session_id,
+                &[crate::session_checks::config_verified(point, hash)],
+            )
+            .await;
+        }
+        self.journal_config_event(point, Some(hash), Some(true), &[], true, None)
+            .await;
+    }
+
+    async fn note_config_drift(&mut self, point: &str, hash: &str, changed: &[&str], reason: &str) {
+        self.config_failed = true;
+        let _ = crate::session_checks::journal_checks(
+            &self.daemon,
+            self.session_id,
+            &[crate::session_checks::failed_check(
+                "config",
+                &format!("config snapshot {point} sha256:{hash}"),
+                reason,
+            )],
+        )
+        .await;
+        self.journal_config_event(point, Some(hash), Some(false), changed, true, Some(reason))
+            .await;
+        crate::daemon_log::log(
+            "WARN",
+            "codex",
+            &format!(
+                "config snapshot {point} drifted {} session {}",
+                changed.join(","),
+                self.session_id
+            ),
+        );
+    }
+
+    async fn note_config_failure(&mut self, point: &str, reason: &str) {
+        self.config_failed = true;
+        let _ = crate::session_checks::journal_checks(
+            &self.daemon,
+            self.session_id,
+            &[crate::session_checks::failed_check(
+                "config",
+                &format!("config snapshot {point}"),
+                reason,
+            )],
+        )
+        .await;
+        self.journal_config_event(point, None, Some(false), &[], true, Some(reason))
+            .await;
+    }
+
+    async fn note_end_unavailable(&self, reason: &str) {
+        self.journal_config_event("session-end", None, None, &[], false, Some(reason))
+            .await;
+    }
+
+    async fn journal_config_event(
+        &self,
+        point: &str,
+        hash: Option<&str>,
+        matched: Option<bool>,
+        changed: &[&str],
+        recorded: bool,
+        reason: Option<&str>,
+    ) {
+        // The journal redacts a bare 64-hex string. The sha256: label matches
+        // the checklist source, and that filter keeps hex written after "sha".
+        let stored_hash = hash.map(|value| format!("sha256:{value}"));
+        let mut payload = json!({
+            "point": point,
+            "hash": stored_hash,
+            "matched": matched,
+            "changed": changed,
+            "recorded": recorded,
+        });
+        if let Some(reason) = reason {
+            payload["reason"] = Value::String(reason.to_owned());
+        }
+        let _ = self.append_notice("config_snapshot", payload).await;
+        let prefix = hash.unwrap_or("").chars().take(12).collect::<String>();
+        let level = if matched == Some(true) {
+            "INFO"
+        } else {
+            "WARN"
+        };
+        crate::daemon_log::log(
+            level,
+            "codex",
+            &format!(
+                "config snapshot {point} sha256:{prefix} session {}",
+                self.session_id
+            ),
+        );
+    }
+
+    async fn record_end_snapshot<R>(&mut self, lines: &mut tokio::io::Lines<R>)
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "config/read",
+            "params": {"cwd": self.workdir}
+        })
+        .to_string();
+        if self.writer.send(Outbound { line, done: None }).is_err() {
+            self.note_end_unavailable("child not alive").await;
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + CONFIG_END_TIMEOUT;
+        let expected = id.to_string();
+        loop {
+            tokio::select! {
+                biased;
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                                continue;
+                            };
+                            let Some(key) = frame.get("id").and_then(id_key) else {
+                                continue;
+                            };
+                            if key != expected {
+                                continue;
+                            }
+                            if frame.get("error").is_some() {
+                                self.note_config_failure("session-end", "config/read failed").await;
+                                return;
+                            }
+                            let result = frame.get("result").cloned().unwrap_or(Value::Null);
+                            let parsed = crate::config_snapshot::snapshot_config(&result);
+                            drop(result);
+                            match parsed {
+                                Ok(snapshot) => {
+                                    let Some(baseline) = self.config_baseline.clone() else {
+                                        self.note_config_failure("session-end", "config snapshot is missing").await;
+                                        return;
+                                    };
+                                    let changed = crate::config_snapshot::changed_groups(&baseline, &snapshot);
+                                    if changed.is_empty() {
+                                        self.note_config_match("session-end", &snapshot.hash).await;
+                                    } else {
+                                        let reason = format!("config drifted: {}", changed.join(", "));
+                                        self.note_config_drift("session-end", &snapshot.hash, &changed, &reason).await;
+                                    }
+                                    return;
+                                }
+                                Err(_) => {
+                                    self.note_config_failure("session-end", "config/read response is invalid").await;
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(None) | Err(_) => {
+                            self.note_end_unavailable("child not alive").await;
+                            return;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.note_end_unavailable("config/read timed out").await;
+                    return;
+                }
+            }
+        }
+    }
+
     async fn fail_transport(
         &mut self,
         ready: &mut Option<oneshot::Sender<CodexStatus>>,
@@ -2083,7 +2509,9 @@ impl CodexRun {
         let pending = std::mem::take(&mut self.pending);
         for (_id, pending) in pending {
             match pending {
-                PendingRpc::TurnStart { done, .. } | PendingRpc::Interrupt { done, .. } => {
+                PendingRpc::TurnStart { done, .. }
+                | PendingRpc::Interrupt { done, .. }
+                | PendingRpc::ConfigSnapshot { done, .. } => {
                     let _ = done.send(Err(message.to_owned()));
                 }
                 PendingRpc::Initialize
@@ -3473,7 +3901,12 @@ mod tests {
             admission_verified: None,
             admission_commit: None,
             held_events: StdMutex::new(None),
+            config_baseline: None,
+            config_failed: false,
+            start_snapshot_journaled: false,
+            snapshot_deadline: None,
             fail_command_lookup: true,
+            skip_config_snapshot: true,
         };
         let (done_tx, done_rx) = oneshot::channel();
         run.start_turn(Uuid::now_v7(), "first".into(), done_tx)

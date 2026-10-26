@@ -22,16 +22,35 @@ SECRET = "Qm9tV2l6a0p4Y2xRbFh2N1N4bE5vV2V5WjRrU2J1R3A"
 DECOY_SECRET = "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b"
 
 
+SECRET_KEYS = {
+    "env",
+    "headers",
+    "bearer_token",
+    "api_key",
+    "token",
+    "authorization",
+    "auth",
+}
+
+
 def scrub(node):
     if isinstance(node, dict):
-        for key in ("env", "headers"):
-            if isinstance(node.get(key), dict):
+        for key in list(node):
+            lowered = key.lower()
+            if lowered in ("env", "headers") and isinstance(node[key], dict):
                 node[key] = {name: "[redacted]" for name in node[key]}
-        for value in node.values():
-            scrub(value)
+            elif lowered in SECRET_KEYS:
+                node[key] = "[redacted]"
+            else:
+                scrub(node[key])
+                if isinstance(node[key], str) and DECOY_SECRET in node[key]:
+                    node[key] = node[key].replace(DECOY_SECRET, "[redacted]")
     elif isinstance(node, list):
-        for item in node:
-            scrub(item)
+        for index, item in enumerate(node):
+            if isinstance(item, str) and DECOY_SECRET in item:
+                node[index] = item.replace(DECOY_SECRET, "[redacted]")
+            else:
+                scrub(item)
 
 
 def log(message):
@@ -207,25 +226,78 @@ def empty_apps():
     return {"data": [], "nextCursor": None}
 
 
+def mcp_server(enabled, command):
+    # env, headers, and token-like fields carry the decoy on purpose.
+    return {
+        "enabled": enabled,
+        "command": command,
+        "env": {"TOKEN": DECOY_SECRET},
+        "headers": {"Authorization": DECOY_SECRET},
+        "bearer_token": DECOY_SECRET,
+        "api_key": DECOY_SECRET,
+    }
+
+
 def config_servers(child):
     # Wire shape measured on codex-cli 0.160.0: result.config.mcp_servers is an
-    # object keyed by server name. env and headers carry the decoy on purpose.
+    # object keyed by server name. The session child returns the effective
+    # approval config, including per-run overrides the daemon asked for.
+    enabled = not child
     servers = {
-        "node_repl": {"enabled": True, "command": "node", "env": {"TOKEN": DECOY_SECRET}},
-        "odd.server": {"enabled": True, "command": "odd", "env": {"TOKEN": DECOY_SECRET}},
-        "soma": {
-            "enabled": True,
-            "command": "soma",
-            "env": {"TOKEN": DECOY_SECRET},
-            "headers": {"Authorization": DECOY_SECRET},
-        },
+        "node_repl": mcp_server(enabled, "node"),
+        "odd.server": mcp_server(enabled, "odd"),
+        "soma": mcp_server(enabled, "soma"),
     }
-    if child:
-        for server in servers.values():
-            server["enabled"] = False
-        if MODE == "mcp-enabled":
-            servers["soma"]["enabled"] = True
-    return {"config": {"mcp_servers": servers, "model": "fake"}, "origins": {}}
+    if child and MODE == "mcp-enabled":
+        servers["soma"]["enabled"] = True
+    config = {"mcp_servers": servers, "model": "fake"}
+    if not child:
+        return {"config": config, "origins": {}}
+    config.update(
+        {
+            "approval_policy": "untrusted",
+            "approvals_reviewer": "user",
+            "sandbox_mode": "workspace-write",
+            "sandbox_workspace_write": {
+                "network_access": False,
+                "writable_roots": ["/tmp/a", "/tmp/b"],
+            },
+            "model_provider": "fake",
+            "web_search": "disabled",
+            "features": {"plugins": False, "hooks": False, "apps": False, "js_repl": False},
+            "plugins": {"browser@openai-bundled": {"enabled": False, "bearer_token": DECOY_SECRET}},
+            "apps": {"demo": {"enabled": False, "api_key": DECOY_SECRET}},
+            "connectors": {"gmail": {"enabled": False}},
+            "hooks": {"sessionStart": {"enabled": False, "command": "node /tmp/hook.js"}},
+            "skills": {
+                "bundled": {"enabled": False},
+                "include_instructions": False,
+                "config": [{"name": "alpha", "enabled": False, "path": DECOY_SECRET}],
+            },
+        }
+    )
+    return {"config": config, "origins": {}}
+
+
+def config_for_read(child, read_index):
+    payload = config_servers(child)
+    if not child or read_index < 2:
+        return payload
+    config = payload["config"]
+    if MODE == "config-drift-policy":
+        config["approval_policy"] = "never"
+    elif MODE == "config-drift-sandbox":
+        config["sandbox_mode"] = "danger-full-access"
+    elif MODE == "config-drift-reviewer":
+        config["approvals_reviewer"] = "auto_review"
+    elif MODE == "config-drift-model":
+        config["model"] = "other-model"
+    elif MODE == "config-drift-extension":
+        config["plugins"]["browser@openai-bundled"]["enabled"] = True
+    elif MODE == "config-drift-mcp":
+        config["mcp_servers"]["soma"]["enabled"] = True
+        config["mcp_servers"]["extra"] = mcp_server(True, "extra")
+    return payload
 
 
 def command_hook():
@@ -335,6 +407,7 @@ def main():
         with open(PID_OUT, "w", encoding="utf-8") as handle:
             handle.write(str(os.getpid()))
     turns = 0
+    config_reads = 0
     while True:
         message = read_message()
         if message is None:
@@ -366,7 +439,10 @@ def main():
             )
             continue
         if method == "config/read":
-            if MODE == "config-read-error" and session_child():
+            child = session_child()
+            if child:
+                config_reads += 1
+            if MODE == "config-read-error" and child:
                 send(
                     {
                         "jsonrpc": "2.0",
@@ -374,8 +450,23 @@ def main():
                         "error": {"code": -32000, "message": "config/read failed"},
                     }
                 )
+            elif child and config_reads >= 2 and MODE == "config-read-turn-error":
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "error": {"code": -32000, "message": DECOY_SECRET},
+                    }
+                )
+            elif child and config_reads >= 2 and MODE == "config-read-turn-timeout":
+                time.sleep(30)
+            elif child and config_reads >= 2 and MODE == "config-read-turn-bad":
+                reply(
+                    message["id"],
+                    {"config": {"mcp_servers": {"soma": {"enabled": "yes", "env": {"TOKEN": DECOY_SECRET}}}}, "origins": {}},
+                )
             else:
-                reply(message["id"], config_servers(session_child()))
+                reply(message["id"], config_for_read(child, config_reads))
             continue
         if method in ("skills/list", "hooks/list", "plugin/installed", "app/list"):
             result = extension_result(method, message)
@@ -422,6 +513,9 @@ def main():
             if MODE == "slow-turn":
                 time.sleep(2)
             reply(message["id"], turn_result(turn_id))
+            if MODE == "turn-complete":
+                complete(turn_id, "completed")
+                continue
             if MODE == "mcp-during-turn":
                 notify(
                     "mcpServer/startupStatus/updated",

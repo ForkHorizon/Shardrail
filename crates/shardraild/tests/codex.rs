@@ -423,14 +423,29 @@ fn codex_journals_verified_checks_and_keeps_the_rest_not_verified() {
     )
     .unwrap();
     let events = journal_events(dirs.data.path());
-    for item in ["sandbox", "bypass", "routing", "widening", "mcp"] {
+    for item in ["sandbox", "bypass", "routing", "config", "widening", "mcp"] {
         let check = latest_check(&events, session_id, item);
         assert_eq!(check["status"], "verified", "{item} {check}");
         assert!(!check["source"].as_str().unwrap().is_empty());
         assert!(check["checked_at_ms"].as_i64().unwrap() > 0);
     }
+    let config = latest_check(&events, session_id, "config");
+    let source = config["source"].as_str().unwrap();
+    assert!(source.contains("session-start"), "{config}");
+    let hash = source.split("sha256:").nth(1).unwrap_or("");
+    assert_eq!(hash.len(), 64, "{config}");
+    assert!(
+        config["detail"].as_str().unwrap().contains(hash),
+        "{config}"
+    );
+    let start = events
+        .iter()
+        .find(|event| event.kind == "config_snapshot" && event.payload["point"] == "session-start")
+        .expect("session-start snapshot");
+    assert_eq!(start.payload["hash"], format!("sha256:{hash}"));
+    assert_eq!(start.payload["matched"], true);
+    assert_eq!(start.payload["recorded"], true);
     for (item, needle) in [
-        ("config", "hash"),
         ("containment", "process group"),
         ("credentials", "SSH_AUTH_SOCK"),
         ("writes", "workspace-write"),
@@ -451,6 +466,75 @@ fn codex_journals_verified_checks_and_keeps_the_rest_not_verified() {
             .unwrap()
             .contains("zero MCP")
     );
+    assert_config_secrets_absent(&dirs);
+}
+
+#[test]
+fn codex_config_snapshots_match_across_start_turn_and_end() {
+    let dirs = codex_dirs();
+    let daemon = start_codex(&dirs, "turn-complete", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = Uuid::parse_str(&journal_session_id(dirs.data.path())).unwrap();
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "hello"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let events = journal_events(dirs.data.path());
+    let start_hash = snapshot_hash(&events, "session-start");
+    let pre_turn = snapshot_hash(&events, "pre-turn");
+    assert_eq!(pre_turn, start_hash);
+    assert_eq!(
+        latest_check(&events, session_id, "config")["status"],
+        "verified"
+    );
+    drop(daemon);
+    let events = journal_events(dirs.data.path());
+    let end_hash = snapshot_hash(&events, "session-end");
+    assert_eq!(end_hash, start_hash);
+    let end = config_snapshot(&events, "session-end");
+    assert_eq!(end["matched"], true);
+    assert_eq!(end["recorded"], true);
+    assert_eq!(
+        latest_check(&events, session_id, "config")["status"],
+        "verified"
+    );
+    assert!(
+        latest_check(&events, session_id, "config")["source"]
+            .as_str()
+            .unwrap()
+            .contains("session-end"),
+    );
+    assert_config_secrets_absent(&dirs);
+}
+
+#[test]
+fn codex_config_drift_fails_closed_before_turn_start() {
+    for (mode, group, leaked) in [
+        ("config-drift-policy", "approval_policy", "never"),
+        ("config-drift-sandbox", "sandbox", "danger-full-access"),
+        ("config-drift-reviewer", "approvals_reviewer", "auto_review"),
+        ("config-drift-model", "model", "other-model"),
+        (
+            "config-drift-extension",
+            "extensions",
+            "browser@openai-bundled",
+        ),
+        ("config-drift-mcp", "mcp_servers", "extra"),
+    ] {
+        assert_config_turn_stopped(mode, group, leaked);
+    }
+}
+
+#[test]
+fn codex_config_read_failure_before_turn_fails_closed() {
+    assert_config_read_stopped("config-read-turn-error", "config/read failed");
+    assert_config_read_stopped("config-read-turn-bad", "config/read response is invalid");
+    assert_config_read_stopped("config-read-turn-timeout", "config/read timed out");
 }
 
 #[test]
@@ -1256,6 +1340,19 @@ fn extension_indexes(trace: &[Value], method: &str) -> Vec<usize> {
         .collect()
 }
 
+/// The rejection is journaled before `turn/interrupt` is written. Wait until the
+/// fake logs that write so a busy machine does not read the trace too early.
+fn wait_for_trace_method(path: &Path, method: &str) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let trace = trace_messages(path);
+        if !extension_indexes(&trace, method).is_empty() || Instant::now() > deadline {
+            return trace;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn codex_recorded_extensions_are_disabled_before_thread_start() {
     let dirs = codex_dirs();
@@ -1546,6 +1643,10 @@ fn codex_parent_stdin_eof_stops_the_daemon_and_the_child() {
         daemon.id()
     );
     kill.0.clear();
+    let events = journal_events(dirs.data.path());
+    let end = config_snapshot(&events, "session-end");
+    assert_eq!(end["recorded"], false, "{end}");
+    assert_eq!(end["reason"], "config/read timed out");
 }
 
 fn assert_mcp_activity_stops(dirs: &CodexDirs, mode: &str, during_turn: bool) {
@@ -1581,7 +1682,7 @@ fn assert_mcp_activity_stops(dirs: &CodexDirs, mode: &str, during_turn: bool) {
         "mcp activity was journaled as a notice"
     );
     if during_turn {
-        let trace = trace_messages(&dirs.trace);
+        let trace = wait_for_trace_method(&dirs.trace, "turn/interrupt");
         assert!(
             extension_indexes(&trace, "turn/interrupt").len() == 1,
             "running turn was not interrupted: {trace:?}"
@@ -1654,7 +1755,7 @@ fn assert_mcp_item_stops(mode: &str) {
         }),
         "MCP tool item was journaled"
     );
-    let trace = trace_messages(&dirs.trace);
+    let trace = wait_for_trace_method(&dirs.trace, "turn/interrupt");
     assert_eq!(extension_indexes(&trace, "turn/start").len(), 1);
     assert_eq!(
         extension_indexes(&trace, "turn/interrupt").len(),
@@ -1777,6 +1878,167 @@ fn wait_until_pid_gone(text: &str) {
         thread::sleep(Duration::from_millis(20));
     }
     panic!("codex child {pid} was still running");
+}
+
+fn config_snapshot<'a>(events: &'a [shardrail_protocol::DurableEvent], point: &str) -> &'a Value {
+    &events
+        .iter()
+        .find(|event| event.kind == "config_snapshot" && event.payload["point"] == point)
+        .unwrap_or_else(|| panic!("missing config snapshot {point}"))
+        .payload
+}
+
+fn snapshot_hash(events: &[shardrail_protocol::DurableEvent], point: &str) -> String {
+    let payload = config_snapshot(events, point);
+    assert_eq!(payload["matched"], true, "{point} {payload}");
+    assert_eq!(payload["recorded"], true, "{point} {payload}");
+    let hash = payload["hash"]
+        .as_str()
+        .unwrap_or("")
+        .strip_prefix("sha256:")
+        .unwrap_or("");
+    assert_eq!(hash.len(), 64, "{point} {payload}");
+    hash.to_owned()
+}
+
+fn assert_config_secrets_absent(dirs: &CodexDirs) {
+    let decoy = "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b";
+    assert_no_decoy(dirs, decoy);
+    let journal = std::fs::read(dirs.data.path().join("journal.sqlite3")).unwrap_or_default();
+    let log = std::fs::read(dirs.data.path().join("daemon.stderr")).unwrap_or_default();
+    for (name, bytes) in [("journal", journal), ("log", log)] {
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains("bearer_token"),
+            "{name} stored a token field"
+        );
+        assert!(!text.contains("api_key"), "{name} stored an api key field");
+        assert!(!text.contains("Authorization"), "{name} stored a header");
+        assert!(
+            !text.contains("/tmp/hook.js"),
+            "{name} stored a hook command"
+        );
+    }
+}
+
+fn assert_config_turn_stopped(mode: &str, group: &str, leaked: &str) {
+    let dirs = codex_dirs();
+    let daemon = start_codex(&dirs, mode, 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(
+        command_reply(&mut reader)["kind"],
+        "command_accepted",
+        "{mode}"
+    );
+    let session_id = journal_session_id(dirs.data.path());
+    assert_eq!(
+        latest_check(
+            &journal_events(dirs.data.path()),
+            Uuid::parse_str(&session_id).unwrap(),
+            "config"
+        )["status"],
+        "verified",
+        "{mode}"
+    );
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "must not start"}),
+    );
+    let rejected = command_reply(&mut reader);
+    assert_eq!(rejected["kind"], "command_rejected", "{mode} {rejected}");
+    let error = rejected["error"].as_str().unwrap_or("");
+    assert!(error.contains(group), "{mode} {error}");
+    assert!(!error.contains(leaked), "{mode} {error}");
+    let events = journal_events(dirs.data.path());
+    let session = Uuid::parse_str(&session_id).unwrap();
+    let check = latest_check(&events, session, "config");
+    assert_eq!(check["status"], "failed", "{mode} {check}");
+    let detail = check["detail"].as_str().unwrap_or("");
+    assert!(detail.contains(group), "{mode} {detail}");
+    assert!(!detail.contains(leaked), "{mode} {detail}");
+    let pre_turn = config_snapshot(&events, "pre-turn");
+    assert_eq!(pre_turn["matched"], false, "{mode} {pre_turn}");
+    assert_eq!(pre_turn["changed"], json!([group]), "{mode} {pre_turn}");
+    assert!(
+        !pre_turn.to_string().contains(leaked),
+        "{mode} snapshot stored a value: {pre_turn}"
+    );
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "later"}),
+    );
+    assert_eq!(
+        command_reply(&mut reader)["kind"],
+        "command_rejected",
+        "{mode}"
+    );
+    let child_pid = read_pid_file(&pid_path(&dirs));
+    wait_until_pid_gone(&child_pid);
+    assert!(
+        extension_indexes(&trace_messages(&dirs.trace), "turn/start").is_empty(),
+        "{mode} sent turn/start"
+    );
+    drop(daemon);
+    assert_config_secrets_absent(&dirs);
+}
+
+fn assert_config_read_stopped(mode: &str, needle: &str) {
+    let dirs = codex_dirs();
+    let daemon = start_codex(&dirs, mode, 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(
+        command_reply(&mut reader)["kind"],
+        "command_accepted",
+        "{mode}"
+    );
+    let session_id = journal_session_id(dirs.data.path());
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "must not start"}),
+    );
+    let rejected = command_reply(&mut reader);
+    assert_eq!(rejected["kind"], "command_rejected", "{mode} {rejected}");
+    let error = rejected["error"].as_str().unwrap_or("");
+    assert!(error.contains(needle), "{mode} {error}");
+    assert!(
+        !error.contains("mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b"),
+        "{mode} {error}"
+    );
+    let events = journal_events(dirs.data.path());
+    let check = latest_check(&events, Uuid::parse_str(&session_id).unwrap(), "config");
+    assert_eq!(check["status"], "failed", "{mode} {check}");
+    assert!(
+        check["detail"].as_str().unwrap_or("").contains(needle),
+        "{mode} {check}"
+    );
+    let pre_turn = config_snapshot(&events, "pre-turn");
+    assert_eq!(pre_turn["matched"], false, "{mode} {pre_turn}");
+    assert!(pre_turn["hash"].is_null(), "{mode} {pre_turn}");
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "later"}),
+    );
+    assert_eq!(
+        command_reply(&mut reader)["kind"],
+        "command_rejected",
+        "{mode}"
+    );
+    let child_pid = read_pid_file(&pid_path(&dirs));
+    wait_until_pid_gone(&child_pid);
+    assert!(
+        extension_indexes(&trace_messages(&dirs.trace), "turn/start").is_empty(),
+        "{mode} sent turn/start"
+    );
+    drop(daemon);
+    assert_config_secrets_absent(&dirs);
 }
 
 fn assert_no_decoy(dirs: &CodexDirs, decoy: &str) {
