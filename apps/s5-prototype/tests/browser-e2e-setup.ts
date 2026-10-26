@@ -4,25 +4,48 @@ import { readFile } from 'node:fs/promises';
 export default async function globalSetup() {
   const stateFile = process.env.SHARDRAIL_E2E_STATE;
   if (!stateFile) throw new Error('SHARDRAIL_E2E_STATE is required');
-  const server = spawn(process.execPath, ['tests/browser-e2e-server.mjs'], { stdio: 'inherit', env: process.env });
+  const server = spawn(process.execPath, ['tests/browser-e2e-server.mjs'], { stdio: 'inherit', env: process.env, detached: true });
   const stop = async () => {
-    server.kill('SIGTERM');
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => { server.kill('SIGKILL'); resolve(); }, 3000);
+    if (server.pid === undefined) return;
+    try { process.kill(-server.pid!, 'SIGTERM'); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        try { process.kill(-server.pid!, 'SIGKILL'); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+            reject(error);
+            return;
+          }
+        }
+        if (server.exitCode !== null || server.signalCode !== null) resolve();
+      }, 3000);
       server.once('exit', () => { clearTimeout(timer); resolve(); });
     });
+    try { process.kill(-server.pid!, 'SIGKILL'); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
   };
-  const deadline = Date.now() + 15_000;
+  try {
+    await waitForState(stateFile, server);
+    return stop;
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
+
+export async function waitForState(stateFile: string, server: { exitCode: number | null; signalCode?: NodeJS.Signals | null }, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (server.exitCode !== null) throw new Error(`e2e daemon setup exited with ${server.exitCode}`);
+    if (server.exitCode !== null || server.signalCode) throw new Error(`e2e daemon setup exited with ${server.exitCode ?? server.signalCode}`);
     try {
-      JSON.parse(await readFile(stateFile, 'utf8'));
-      return stop;
+      return JSON.parse(await readFile(stateFile, 'utf8'));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  await stop();
   throw new Error('timed out waiting for the test daemon');
 }
