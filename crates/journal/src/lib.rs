@@ -555,6 +555,8 @@ impl Journal {
                             Box::new(error),
                         )
                     })?,
+                content_hash: String::new(),
+                client_label: String::new(),
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -725,7 +727,7 @@ impl Journal {
         };
         for id in &ids {
             tx.execute(
-                "UPDATE approvals SET state='withdrawn' WHERE approval_id=?1 AND state='pending'",
+                "UPDATE approvals SET state='withdrawn', terminal_reason='abandoned' WHERE approval_id=?1 AND state='pending'",
                 [id],
             )?;
             let approval_id = Uuid::parse_str(id).expect("stored approval UUID");
@@ -735,21 +737,35 @@ impl Journal {
                     approval_id,
                     session_id,
                     "approval_withdrawn",
-                    "{\"reason\":\"daemon_restart\"}",
+                    "{\"reason\":\"abandoned\"}",
                 )?;
                 insert_session_event(
                     &tx,
                     session_id,
                     "approval_withdrawn",
                     now_ms,
-                    serde_json::json!({"approval_id":approval_id,"reason":"daemon_restart"}),
+                    serde_json::json!({"approval_id":approval_id,"reason":"abandoned"}),
+                )?;
+                insert_approval_event(
+                    &tx,
+                    approval_id,
+                    session_id,
+                    "approval_rejected",
+                    "{\"reason\":\"abandoned\"}",
+                )?;
+                insert_session_event(
+                    &tx,
+                    session_id,
+                    "approval_rejected",
+                    now_ms,
+                    serde_json::json!({"approval_id":approval_id,"reason":"abandoned","client_label":"daemon"}),
                 )?;
             } else {
                 insert_unlinked_approval_event(
                     &tx,
                     approval_id,
                     "approval_withdrawn",
-                    "{\"reason\":\"daemon_restart\"}",
+                    "{\"reason\":\"abandoned\"}",
                 )?;
             }
         }
@@ -877,6 +893,53 @@ impl Journal {
         Ok(())
     }
 
+    /// Stored session, state, and terminal reason, when this approval was recorded.
+    pub fn approval_disposition(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(Uuid, String, Option<String>)>, JournalError> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT session_id, state, terminal_reason FROM approvals WHERE approval_id=?1",
+                [id.to_string()],
+                |row| {
+                    let session_id =
+                        Uuid::parse_str(&row.get::<_, String>(0)?).expect("stored session UUID");
+                    Ok((session_id, row.get(1)?, row.get(2)?))
+                },
+            )
+            .optional()?)
+    }
+
+    /// Records a rejected decision without answering the provider or changing a pending approval.
+    pub fn record_approval_rejection(
+        &mut self,
+        approval_id: Uuid,
+        session_id: Uuid,
+        now_ms: i64,
+        payload: &serde_json::Value,
+    ) -> Result<(), JournalError> {
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let data = payload.to_string();
+        if !session_id.is_nil() {
+            insert_approval_event(&tx, approval_id, session_id, "approval_rejected", &data)?;
+            insert_session_event(
+                &tx,
+                session_id,
+                "approval_rejected",
+                now_ms,
+                payload.clone(),
+            )?;
+        } else {
+            insert_unlinked_approval_event(&tx, approval_id, "approval_rejected", &data)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn approval_state(&self, id: Uuid) -> Result<Option<String>, JournalError> {
         Ok(self
             .0
@@ -924,10 +987,17 @@ impl Journal {
                     None,
                 )
             };
-            tx.execute(
-                "UPDATE approvals SET state=?3 WHERE approval_id=?1 AND session_id=?2",
-                params![id, session_id.to_string(), next_state],
-            )?;
+            if let Some(reason) = terminal_reason {
+                tx.execute(
+                    "UPDATE approvals SET state=?3, terminal_reason=?4 WHERE approval_id=?1 AND session_id=?2",
+                    params![id, session_id.to_string(), next_state, reason],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE approvals SET state=?3 WHERE approval_id=?1 AND session_id=?2",
+                    params![id, session_id.to_string(), next_state],
+                )?;
+            }
             let data = serde_json::json!({"approval_id":approval_id,"reason":terminal_reason});
             insert_approval_event(&tx, approval_id, session_id, kind, &data.to_string())?;
             insert_session_event(&tx, session_id, kind, now_ms, data)?;
@@ -1000,6 +1070,11 @@ fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
                         .filter(|character| character.is_ascii_alphanumeric())
                         .flat_map(char::to_lowercase)
                         .collect::<String>();
+                    // The approval binding digest is audit data. Entropy redaction
+                    // would hide it from the client that has to echo it back.
+                    if normalized_key == "contenthash" && is_sha256_digest(value) {
+                        continue;
+                    }
                     if matches!(
                         normalized_key.as_str(),
                         "authorization"
@@ -1032,6 +1107,13 @@ fn redact_value(mut value: serde_json::Value) -> (serde_json::Value, bool) {
     let mut changed = false;
     redact(&mut value, &mut changed);
     (value, changed)
+}
+
+fn is_sha256_digest(value: &serde_json::Value) -> bool {
+    let Some(text) = value.as_str() else {
+        return false;
+    };
+    text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn redact_entropy_runs(text: &str) -> (String, bool) {
@@ -1356,6 +1438,8 @@ mod tests {
             responded_at_ms: 1,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         let mut journal = Journal::open(&path).unwrap();
         let approval = pending_approval(id);
@@ -1410,6 +1494,8 @@ mod tests {
             responded_at_ms: 1,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         journal
             .begin_approval_response(&response, session_id)
@@ -1439,6 +1525,8 @@ mod tests {
             responded_at_ms: 10,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         journal
             .begin_approval_response(&response, session_id)
@@ -1474,6 +1562,8 @@ mod tests {
             responded_at_ms: 10,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         journal
             .begin_expired_approval_response(&response, session_id)
@@ -1500,10 +1590,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("journal.db");
         let id = Uuid::now_v7();
+        let approval = pending_approval(id);
+        let session_id = approval.session_id;
         let mut journal = Journal::open(&path).unwrap();
-        journal
-            .create_pending_approval(&pending_approval(id))
-            .unwrap();
+        journal.create_pending_approval(&approval).unwrap();
         drop(journal);
         let mut recovered = Journal::open(&path).unwrap();
         assert_eq!(recovered.recover_pending_approvals(3).unwrap(), 1);
@@ -1511,6 +1601,27 @@ mod tests {
             recovered.approval_state(id).unwrap().as_deref(),
             Some("withdrawn")
         );
+        let (stored_session, state, reason) = recovered.approval_disposition(id).unwrap().unwrap();
+        assert_eq!(stored_session, session_id);
+        assert_eq!(state, "withdrawn");
+        assert_eq!(reason.as_deref(), Some("abandoned"));
+    }
+
+    #[test]
+    fn turn_end_withdrawal_keeps_the_stale_turn_reason() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let id = Uuid::now_v7();
+        let approval = pending_approval(id);
+        let session_id = approval.session_id;
+        journal.create_pending_approval(&approval).unwrap();
+        journal
+            .withdraw_pending_approvals(session_id, "turn_end", 12)
+            .unwrap();
+        let (stored_session, state, reason) = journal.approval_disposition(id).unwrap().unwrap();
+        assert_eq!(stored_session, session_id);
+        assert_eq!(state, "withdrawn");
+        assert_eq!(reason.as_deref(), Some("turn_end"));
     }
 
     #[cfg(feature = "test-utils")]
@@ -1642,6 +1753,34 @@ mod tests {
     }
 
     #[test]
+    fn approval_content_hash_survives_redaction() {
+        let dir = tempdir().unwrap();
+        let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
+        let session_id = Uuid::now_v7();
+        let digest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let event = DurableEvent {
+            event_id: 0,
+            journal_epoch: journal.journal_epoch().unwrap(),
+            host_id: journal.host_id().unwrap(),
+            session_id,
+            schema_version: 1,
+            kind: "approval_requested".into(),
+            occurred_at_ms: 10,
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload: serde_json::json!({
+                "binding": {"content_hash": digest},
+                "note": digest
+            }),
+        };
+        journal.append_event(&event).unwrap();
+        let stored = journal.events_for_session(session_id).unwrap().remove(0);
+        assert_eq!(stored.payload["binding"]["content_hash"], digest);
+        assert_eq!(stored.payload["note"], "[REDACTED]");
+    }
+
+    #[test]
     fn secret_shaped_event_metadata_is_redacted_before_persistence() {
         let dir = tempdir().unwrap();
         let mut journal = Journal::open(dir.path().join("journal.db")).unwrap();
@@ -1759,6 +1898,8 @@ mod tests {
             responded_at_ms: 12,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         journal
             .begin_approval_response(&response, approval.session_id)
@@ -1805,6 +1946,8 @@ mod tests {
             responded_at_ms: 12,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         journal
             .begin_approval_response(&response, session_id)

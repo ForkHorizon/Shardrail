@@ -15,7 +15,7 @@ import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type Pa
 import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
 import { connectBrowser, openBrowserKeyStore } from '@shardrail/client/browser';
 import { createBrowserSession, createFlightOnControl, createFlightOnSessionCreated, isKeyChangedError, noteCreateSent, sessionWorkdirs, type BrowserSession, type ConnectionPhase, type CreateFlight, type CreateFlightResult } from './browser-session';
-import { approvalIdFromPayload, clearPromptOnAccept, controlFailureTarget, reduceApprovalFlight, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
+import { approvalIdFromPayload, clearPromptOnAccept, controlFailureTarget, reduceApprovalFlight, type ApprovalBindingEcho, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
 import { MainScreen } from './MainScreen';
 import './style.css';
 
@@ -474,8 +474,8 @@ function App() {
     </section></main>;
   }
   if (browserMain && pairing.kind === 'paired') {
-    const resolveApproval = (approvalId: string, optionId: string) => {
-      const result = browserSession.current?.resolveApproval(approvalId, optionId) ?? 'blocked';
+    const resolveApproval = (approvalId: string, optionId: string, binding: ApprovalBindingEcho) => {
+      const result = browserSession.current?.resolveApproval(approvalId, optionId, binding) ?? 'blocked';
       publishApprovalFlight(result === 'sent' ? { type: 'sent', approvalId } : { type: 'blocked' });
     };
     const sendCommand = (kind: 'turn.start' | 'turn.interrupt', payload: Record<string, unknown>, blocked: string) => {

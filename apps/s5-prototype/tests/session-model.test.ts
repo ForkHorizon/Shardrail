@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { NIL_SESSION_ID, activityTimestamp, agentText, approvalsForSession, checklistSummary, clearPromptOnAccept, controlFailureTarget, eventsForSession, ingestJournalEvents, newSessionButton, plainEventText, promptClearApplies, reduceApprovalFlight, revealHiddenCharacters, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
+import { NIL_SESSION_ID, activityTimestamp, agentText, approvalsForSession, checklistSummary, clearPromptOnAccept, controlFailureTarget, eventsForSession, hostBanner, ingestJournalEvents, newSessionButton, plainEventText, promptClearApplies, reduceApprovalFlight, revealHiddenCharacters, sessionChecks, sessionSummaries, transcriptItems, VERIFICATION_CHECKS, type JournalEvent } from '../src/session-model';
 import { applyDaemonEvent, eventCount, observeJournalEpoch, reset, sessionJournalEvents, subscribe } from '../src/store';
 
 const event = (cursor: number, sessionId: string, kind: string, payload: unknown, occurredAtMs = cursor * 1000): JournalEvent => ({ cursor, sessionId, kind, payload, occurredAtMs });
@@ -126,6 +126,84 @@ test('the verification checklist stays not verified and does not claim a single 
   assert.equal(summary.failed, 0);
   assert.equal(summary.checks.some((item) => item.status === 'verified' || /protected/i.test(item.status)), false);
   assert.equal(summary.checks[0]?.lastChecked, null);
+  assert.equal(summary.checks.every((item) => item.source === 'no daemon evidence'), true);
+  assert.equal(hostBanner(summary.checks, false), 'approvals not protected. No session is selected.');
+  assert.match(hostBanner(summary.checks, true), /approvals not protected/);
+});
+
+const checkEvent = (cursor: number, itemId: string, status: string, source: string, detail: string, checkedAt = 1_700_000_000_000) => event(cursor, 'session-a', 'session_check_result', {
+  item_id: itemId, status, source, detail, checked_at_ms: checkedAt,
+}, checkedAt);
+
+test('checklist rows follow the latest daemon evidence and a missing row stays not verified', () => {
+  const events = [
+    checkEvent(1, 'sandbox', 'verified', 'thread/start sandbox echo', 'workspace-write'),
+    checkEvent(2, 'sandbox', 'failed', 'thread/start echo', 'sandbox echo was not workspace-write', 1_700_000_000_100),
+    checkEvent(3, 'bypass', 'verified', 'thread/start approvalPolicy echo', 'untrusted'),
+    checkEvent(4, 'routing', 'verified', 'thread/start approvalsReviewer echo', 'user'),
+    checkEvent(5, 'config', 'verified', 'codex_extensions_verified', 'per-run overrides'),
+    checkEvent(6, 'widening', 'verified', 'thread/settings/updated refusal', 'none accepted'),
+    checkEvent(7, 'mcp', 'verified', 'codex_extensions_verified mcp_servers 0', 'zero MCP servers'),
+    checkEvent(8, 'containment', 'not_verified', 'not checked', 'The child is started in its own process group. A macOS sandbox helper is not checked.'),
+    checkEvent(9, 'credentials', 'not_verified', 'not checked', 'SSH_AUTH_SOCK is removed. Socket reachability is not checked.'),
+    checkEvent(10, 'writes', 'not_verified', 'not checked', 'Writes outside workspace-write are not checked.'),
+    checkEvent(11, 'identity', 'not_verified', 'not checked', 'The Shardrail socket reachability is not checked.'),
+    checkEvent(12, 'boundary', 'not_verified', 'not checked', 'The journal is not scanned for a boundary-breaking allow.'),
+    checkEvent(13, 'gaps', 'not_verified', 'static provider gap', 'A built-in read-only command can skip the approval card.'),
+  ];
+  const checks = sessionChecks(events, 'session-a');
+  assert.equal(checks.find((item) => item.id === 'sandbox')?.status, 'failed');
+  assert.equal(checks.find((item) => item.id === 'sandbox')?.source, 'thread/start echo');
+  assert.equal(checks.find((item) => item.id === 'sandbox')?.lastChecked, '2023-11-14T22:13:20.100Z');
+  assert.equal(checks.find((item) => item.id === 'mcp')?.label, 'MCP servers disabled');
+  assert.equal(checks.find((item) => item.id === 'mcp')?.status, 'verified');
+  for (const id of ['containment', 'credentials', 'writes', 'identity', 'boundary', 'gaps']) {
+    const item = checks.find((check) => check.id === id);
+    assert.equal(item?.status, 'not verified', id);
+    assert.match(item?.detail ?? '', /not checked|journal|read-only|socket|workspace-write|process group|SSH_AUTH_SOCK/);
+  }
+  assert.equal(checks.some((item) => /protected/i.test(item.status)), false);
+  const failedBanner = hostBanner(checks, true);
+  assert.match(failedBanner, /^approvals not protected\./);
+  assert.doesNotMatch(failedBanner, /\d+ of \d+/);
+  assert.match(failedBanner, /sandbox failed/);
+  assert.match(failedBanner, /containment, credentials, writes, identity, boundary, gaps not verified/);
+  const ready = sessionChecks([
+    ...events.filter((item) => (item.payload as { item_id?: string }).item_id !== 'sandbox'),
+    checkEvent(14, 'sandbox', 'verified', 'thread/start sandbox echo', 'workspace-write', 1_700_000_000_200),
+  ], 'session-a');
+  const banner = hostBanner(ready, true);
+  assert.match(banner, /^approvals not protected\./);
+  assert.doesNotMatch(banner, /\d+ of \d+/);
+  assert.match(banner, /containment, credentials, writes, identity, boundary, gaps not verified/);
+  const allVerified = hostBanner(ready.map((item) => ({ ...item, status: 'verified' as const })), true);
+  assert.match(allVerified, /^approvals not protected\./);
+  assert.match(allVerified, /Host protection is not established/);
+  assert.doesNotMatch(allVerified, /\d+ of \d+/);
+  const other = sessionChecks(events, 'session-b');
+  assert.equal(other.every((item) => item.status === 'not verified' && item.source === 'no daemon evidence'), true);
+  assert.match(hostBanner(other, true), /^approvals not protected\. Sandbox, approval routing/);
+});
+
+test('an approval card keeps the echoed binding and ignores a redacted hash', () => {
+  const hash = 'ab'.repeat(32);
+  const cards = approvalsForSession([
+    event(1, 'session-a', 'approval_requested', {
+      approval_id: 'approval-1',
+      approval_kind: 'execute',
+      options: [{ option_id: 'allow_once', decision: 'allow', class: 'once' }, { option_id: 'reject_once', decision: 'deny', class: 'once' }],
+      binding: { session_id: 'session-a', turn_id: 'turn-1', provider_request_id: 'permission-1', content_hash: hash },
+    }),
+  ], 'session-a');
+  assert.deepEqual(cards[0]?.binding, { sessionId: 'session-a', turnId: 'turn-1', providerRequestId: 'permission-1', contentHash: hash });
+  const redacted = approvalsForSession([
+    event(1, 'session-a', 'approval_requested', {
+      approval_id: 'approval-2',
+      options: [],
+      binding: { session_id: 'session-a', turn_id: 'turn-1', provider_request_id: '11', content_hash: '[REDACTED]' },
+    }),
+  ], 'session-a');
+  assert.equal(redacted[0]?.binding, null);
 });
 
 test('a confirmed approval leaves the in-flight set and a later disconnect does not alert', () => {

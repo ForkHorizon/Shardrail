@@ -15,7 +15,9 @@ use crate::{
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use serde_json::{Value, json};
-use shardrail_protocol::{ApprovalDecision, ApprovalState, ClientScope, DurableEvent, OptionClass};
+use shardrail_protocol::{
+    ApprovalBinding, ApprovalDecision, ApprovalState, ClientScope, DurableEvent, OptionClass,
+};
 use shardrail_session_core::{Approval, TurnOutcome, TurnState};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -1330,6 +1332,17 @@ impl CodexRun {
                         return true;
                     }
                     self.process_marked = true;
+                    let checks = crate::session_checks::codex_ready_checks(self.sandbox.label());
+                    if let Err(error) = crate::session_checks::journal_checks(
+                        &self.daemon,
+                        self.session_id,
+                        &checks,
+                    )
+                    .await
+                    {
+                        self.fail_transport(ready, &error).await;
+                        return true;
+                    }
                     self.turns_allowed = true;
                     let status = CodexStatus::Ready;
                     set_status(&self.daemon, self.session_id, status.clone()).await;
@@ -1348,6 +1361,16 @@ impl CodexRun {
                     && reviewer.as_str() != Some("user")
                 {
                     self.turns_allowed = false;
+                    let _ = crate::session_checks::journal_checks(
+                        &self.daemon,
+                        self.session_id,
+                        &[crate::session_checks::failed_check(
+                            "routing",
+                            "turn/start approvalsReviewer echo",
+                            "turn/start approvalsReviewer was not user",
+                        )],
+                    )
+                    .await;
                     set_status(
                         &self.daemon,
                         self.session_id,
@@ -1372,6 +1395,17 @@ impl CodexRun {
                         .pointer("/turn/id")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
+                    self.note_turn().await;
+                    let _ = crate::session_checks::journal_checks(
+                        &self.daemon,
+                        self.session_id,
+                        &[crate::session_checks::failed_check(
+                            "bypass",
+                            "turn/start approvalPolicy echo",
+                            "turn/start approvalPolicy is weaker than untrusted",
+                        )],
+                    )
+                    .await;
                     self.fail_closed_turn(
                         "turn/start approvalPolicy is weaker than untrusted",
                         &result,
@@ -1394,6 +1428,7 @@ impl CodexRun {
                     .pointer("/turn/id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                self.note_turn().await;
                 if self.interrupt_when_turn_known
                     && let (Some(thread_id), Some(turn_id)) =
                         (self.thread_id.clone(), self.turn_id.clone())
@@ -1461,6 +1496,9 @@ impl CodexRun {
         result: &Value,
     ) {
         self.turns_allowed = false;
+        let item = crate::session_checks::routing_failure_item(reason);
+        let checks = crate::session_checks::codex_echo_failure(item, reason);
+        let _ = crate::session_checks::journal_checks(&self.daemon, self.session_id, &checks).await;
         let _ = self
             .append_notice(
                 "approval_routing_rejected",
@@ -1550,7 +1588,7 @@ impl CodexRun {
     }
 
     async fn approval_request(&mut self, method: &str, rpc_id: Value, params: Value) {
-        if !self.turn_open {
+        if !self.turn_open || self.turn_id.is_none() {
             let line = json!({
                 "jsonrpc": "2.0",
                 "id": rpc_id,
@@ -1558,8 +1596,16 @@ impl CodexRun {
             })
             .to_string();
             let _ = self.writer.send(Outbound { line, done: None });
+            if self.turn_id.is_none() {
+                crate::daemon_log::log(
+                    "WARN",
+                    "approval",
+                    "approval refused because the turn id is missing",
+                );
+            }
             return;
         }
+        let turn_id = self.turn_id.clone().unwrap_or_default();
         let item_id = params
             .get("itemId")
             .and_then(Value::as_str)
@@ -1658,6 +1704,49 @@ impl CodexRun {
                 object.insert("agent_description".into(), json!({"description": reason}));
             }
         }
+        let content = codex_approval_content(
+            method,
+            &params,
+            payload.get("changes"),
+            grant_root.as_deref(),
+        );
+        let content_hash = crate::approval_binding::content_hash(&content);
+        let journal_epoch = match self.daemon.journal.lock().await.journal_epoch() {
+            Ok(epoch) => epoch,
+            Err(_) => {
+                let line = json!({
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "result": {"decision": "decline"}
+                })
+                .to_string();
+                let _ = self.writer.send(Outbound { line, done: None });
+                return;
+            }
+        };
+        let binding = ApprovalBinding {
+            approval_id,
+            session_id: self.session_id,
+            turn_id: turn_id.clone(),
+            provider_request_id: crate::approval_binding::provider_request_id(&rpc_id),
+            content_hash: content_hash.clone(),
+            journal_epoch,
+        };
+        approval.content_hash = content_hash.clone();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "binding".into(),
+                serde_json::to_value(&binding).unwrap_or(Value::Null),
+            );
+        }
+        crate::daemon_log::log(
+            "INFO",
+            "approval",
+            &format!(
+                "approval requested approval_id={approval_id} session_id={} turn_id={turn_id} content_hash={content_hash}",
+                self.session_id
+            ),
+        );
         if self
             .append_notice("approval_requested", payload)
             .await
@@ -1692,6 +1781,7 @@ impl CodexRun {
             DaemonApproval {
                 session_id: self.session_id,
                 approval,
+                binding,
                 options,
                 provider: Some(self.approval_tx.clone()),
                 timeout_task: Some(timeout_task.abort_handle()),
@@ -1743,6 +1833,20 @@ impl CodexRun {
             return true;
         }
         match method {
+            "thread/settings/updated" => {
+                let _ = crate::session_checks::journal_checks(
+                    &self.daemon,
+                    self.session_id,
+                    &[crate::session_checks::failed_check(
+                        "widening",
+                        "thread/settings/updated",
+                        "a thread/settings/updated notification was refused and the session stopped",
+                    )],
+                )
+                .await;
+                self.fail_closed_turn("thread settings update refused", &params)
+                    .await;
+            }
             "item/agentMessage/delta" => {
                 let _ = self
                     .append_notice(
@@ -1843,6 +1947,17 @@ impl CodexRun {
     async fn stop_mcp(&mut self, ready: &mut Option<oneshot::Sender<CodexStatus>>, method: &str) {
         let reason = format!("mcp server activity: {method}");
         self.turns_allowed = false;
+        let check_session = if self.process_marked || self.thread_id.is_some() {
+            self.session_id
+        } else {
+            Uuid::nil()
+        };
+        let _ = crate::session_checks::journal_checks(
+            &self.daemon,
+            check_session,
+            &[crate::session_checks::failed_check("mcp", method, &reason)],
+        )
+        .await;
         if self.process_marked || self.thread_id.is_some() {
             let _ = self
                 .journal_extension_event("codex_extensions_rejected", json!({"reason": reason}))
@@ -1914,8 +2029,23 @@ impl CodexRun {
             })
             .await;
         self.turn_open = false;
+        self.daemon
+            .session_turns
+            .lock()
+            .await
+            .remove(&self.session_id);
         self.turn_id = None;
         bump(&self.daemon);
+    }
+
+    async fn note_turn(&self) {
+        if let Some(turn_id) = &self.turn_id {
+            self.daemon
+                .session_turns
+                .lock()
+                .await
+                .insert(self.session_id, turn_id.clone());
+        }
     }
 
     fn decline_open_routes(&self) {
@@ -2038,6 +2168,7 @@ impl CodexRun {
         else {
             return;
         };
+        entry.approval.client_label = "codex-interrupt".into();
         let mut coordinator = coordinator.lock().await;
         let result = coordinator.respond_approval(
             &mut entry.approval,
@@ -2137,6 +2268,21 @@ impl CodexRun {
         reason: &str,
     ) {
         self.turns_allowed = false;
+        // The session row is not committed yet. A nil session id keeps this
+        // failure out of the session list.
+        let mut checks = vec![crate::session_checks::failed_check(
+            "config",
+            "codex extension verification",
+            reason,
+        )];
+        if reason.to_ascii_lowercase().contains("mcp") {
+            checks.push(crate::session_checks::failed_check(
+                "mcp",
+                "codex extension verification",
+                reason,
+            ));
+        }
+        let _ = crate::session_checks::journal_checks(&self.daemon, Uuid::nil(), &checks).await;
         reject_extensions_now(&self.daemon, self.session_id, ready, reason).await;
     }
 
@@ -2794,6 +2940,65 @@ fn id_key(value: &Value) -> Option<String> {
     }
 }
 
+fn codex_approval_content(
+    method: &str,
+    params: &Value,
+    changes: Option<&Value>,
+    grant_root: Option<&str>,
+) -> crate::approval_binding::ApprovalContent {
+    let command = command_text(params).unwrap_or_default();
+    let mut paths = Vec::new();
+    let mut diff = String::new();
+    if let Some(items) = changes.and_then(Value::as_array) {
+        for item in items {
+            if let Some(path) = item.get("path").and_then(Value::as_str) {
+                paths.push(path.to_owned());
+            }
+            if let Some(text) = item.get("diff").and_then(Value::as_str) {
+                if !diff.is_empty() {
+                    diff.push('\n');
+                }
+                diff.push_str(text);
+            }
+        }
+    }
+    if let Some(root) = grant_root.filter(|text| !text.is_empty()) {
+        paths.push(root.to_owned());
+    }
+    let raw_input = match params.get("commandActions") {
+        Some(value) if !value.is_null() => crate::approval_binding::canonical_json(value),
+        _ => String::new(),
+    };
+    let network = match params.get("networkApprovalContext") {
+        Some(value) if !value.is_null() => crate::approval_binding::canonical_json(value),
+        _ => String::new(),
+    };
+    crate::approval_binding::ApprovalContent {
+        kind: if method == FILE_APPROVAL {
+            "file_change"
+        } else {
+            "command_execution"
+        }
+        .to_owned(),
+        command,
+        argv: Vec::new(),
+        cwd: params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        paths,
+        diff,
+        raw_input,
+        reason: params
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        network,
+    }
+}
+
 fn command_text(params: &Value) -> Option<String> {
     nonempty(params.get("command")).or_else(|| {
         params
@@ -2809,12 +3014,23 @@ fn command_text(params: &Value) -> Option<String> {
 
 fn network_label(value: Option<&Value>) -> Option<String> {
     let object = value?.as_object()?;
-    let host = object.get("host").and_then(Value::as_str)?;
+    let host = object
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())?;
     let protocol = object.get("protocol").and_then(Value::as_str).unwrap_or("");
+    let port = object
+        .get("port")
+        .and_then(Value::as_u64)
+        .filter(|port| *port <= u64::from(u16::MAX));
+    let host_port = match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
     let label = if protocol.is_empty() {
-        host.to_owned()
+        host_port
     } else {
-        format!("{protocol} {host}")
+        format!("{protocol} {host_port}")
     };
     Some(label)
 }
@@ -2880,6 +3096,67 @@ fn spawn_ack(daemon: Arc<Daemon>, session_id: Uuid, approval_id: Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_content_binds_raw_command_text_and_network_endpoint() {
+        let params = json!({
+            "command": "echo \"a b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"type": "unknown", "command": "echo \"a b\""}],
+            "networkApprovalContext": {"protocol": "https", "host": "example.com", "port": 443}
+        });
+        let content = codex_approval_content(COMMAND_APPROVAL, &params, None, None);
+        assert_eq!(content.command, "echo \"a b\"");
+        assert!(content.argv.is_empty());
+        assert!(content.network.contains("\"port\":443"));
+        assert_eq!(
+            network_label(params.get("networkApprovalContext")).as_deref(),
+            Some("https example.com:443")
+        );
+        let spaced = json!({
+            "command": "echo \"a  b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"type": "unknown", "command": "echo \"a b\""}],
+            "networkApprovalContext": {"host": "example.com", "port": 443, "protocol": "https"}
+        });
+        let spaced_content = codex_approval_content(COMMAND_APPROVAL, &spaced, None, None);
+        assert_ne!(
+            crate::approval_binding::content_hash(&content),
+            crate::approval_binding::content_hash(&spaced_content)
+        );
+        let other_port = json!({
+            "command": "echo \"a b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"command": "echo \"a b\"", "type": "unknown"}],
+            "networkApprovalContext": {"host": "example.com", "protocol": "https", "port": 80}
+        });
+        let other_content = codex_approval_content(COMMAND_APPROVAL, &other_port, None, None);
+        assert_eq!(content.raw_input, other_content.raw_input);
+        assert_ne!(
+            crate::approval_binding::content_hash(&content),
+            crate::approval_binding::content_hash(&other_content)
+        );
+        assert_eq!(
+            network_label(other_port.get("networkApprovalContext")).as_deref(),
+            Some("https example.com:80")
+        );
+        assert_eq!(content.network, spaced_content.network);
+        let same_endpoint = json!({
+            "command": "echo \"a b\"",
+            "cwd": "/work",
+            "reason": "because",
+            "commandActions": [{"command": "echo \"a b\"", "type": "unknown"}],
+            "networkApprovalContext": {"host": "example.com", "port": 443, "protocol": "https"}
+        });
+        let same = codex_approval_content(COMMAND_APPROVAL, &same_endpoint, None, None);
+        assert_eq!(
+            crate::approval_binding::content_hash(&content),
+            crate::approval_binding::content_hash(&same)
+        );
+    }
 
     #[test]
     fn safety_overrides_follow_extra_config_and_disable_web_search() {
@@ -3170,6 +3447,7 @@ mod tests {
             session_workdirs: Vec::new(),
             codex_status: tokio::sync::Mutex::new(HashMap::new()),
             turn_commands: tokio::sync::Mutex::new(HashMap::new()),
+            session_turns: tokio::sync::Mutex::new(HashMap::new()),
         });
         let (writer, _writer_rx) = mpsc::unbounded_channel();
         let (approval_tx, _approval_rx) = mpsc::unbounded_channel();

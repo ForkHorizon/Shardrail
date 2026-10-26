@@ -83,6 +83,71 @@ test('a browser with session.create can start a session and send a prompt', asyn
   await page.locator('#session-prompt').fill('Add a function sub');
   await page.getByRole('button', { name: 'Send prompt' }).click();
   await expect(page.getByRole('button', { name: 'Deny' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-check=sandbox]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=bypass]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=routing]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'not verified');
+  await expect(page.locator('[data-check=config]')).toContainText('hash');
+  await expect(page.locator('[data-check=widening]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=mcp]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=mcp]')).toContainText('MCP servers disabled');
+  await expect(page.locator('[data-check=mcp]')).toContainText('zero MCP');
+  for (const id of ['config', 'containment', 'credentials', 'writes', 'identity', 'boundary', 'gaps']) {
+    await expect(page.locator(`[data-check=${id}]`)).toHaveAttribute('data-status', 'not verified');
+    await expect(page.locator(`[data-check=${id}]`)).toContainText(/hash|process group|SSH_AUTH_SOCK|workspace-write|socket|journal|read-only/);
+  }
+  await expect(page.locator('.host-banner')).toContainText('approvals not protected');
+  await expect(page.locator('.host-banner')).toContainText('config, containment, credentials, writes, identity, boundary, gaps not verified');
+  await expect(page.locator('.host-banner')).not.toContainText('session checks verified');
+});
+
+test('a failed sandbox echo shows failed and blocks the next prompt', async ({ page }) => {
+  test.setTimeout(60_000);
+  const failedData = await mkdtemp(`${tmpdir()}/shardrail-new-session-sandbox-`);
+  const failedWork = await mkdtemp(`${tmpdir()}/shardrail-new-session-sandbox-work-`);
+  const failed = spawn(binary, [
+    '--data-dir', failedData,
+    '--no-file-log',
+    '--codex-app-server', fakeCodex,
+    '--session-workdir', failedWork,
+    '--browser-listen', '127.0.0.1:0',
+    '--browser-assets-dir', assets,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, SHARDRAIL_CODEX_FAKE_MODE: 'readonly-network' } });
+  let stderr = '';
+  try {
+    const url = await new Promise<string>((resolveUrl, reject) => {
+      const timer = setTimeout(() => reject(new Error(`daemon did not listen: ${stderr}`)), 10_000);
+      failed.stderr?.setEncoding('utf8');
+      failed.stderr?.on('data', (chunk: string) => {
+        stderr += chunk;
+        const port = stderr.match(/browser WebSocket listening at ws:\/\/127\.0\.0\.1:(\d+)\/ws/)?.[1];
+        if (port) { clearTimeout(timer); resolveUrl(`http://127.0.0.1:${port}/`); }
+      });
+      failed.once('exit', (code) => { clearTimeout(timer); reject(new Error(`daemon exited ${code}: ${stderr}`)); });
+    });
+    await pair(page, true, failedData, url);
+    await page.getByRole('button', { name: 'New session' }).click();
+    const option = page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ });
+    await expect(option).toBeVisible({ timeout: 15_000 });
+    await option.focus();
+    await expect(page.locator('[data-check=sandbox]')).toHaveAttribute('data-status', 'failed');
+    await expect(page.locator('.host-banner')).toContainText('approvals not protected');
+    await expect(page.locator('.host-banner')).toContainText('sandbox failed');
+    await page.locator('#session-prompt').fill('hi');
+    await page.getByRole('button', { name: 'Send prompt' }).click();
+    await expect(page.locator('.prompt').getByRole('alert')).toContainText('codex sandbox is not workspace-write or read-only', { timeout: 15_000 });
+    await expect(page.locator('[data-check=sandbox]')).toHaveAttribute('data-status', 'failed');
+  } finally {
+    if (failed.exitCode === null) {
+      failed.kill('SIGTERM');
+      await new Promise<void>((resolveDone) => {
+        const timer = setTimeout(() => { failed.kill('SIGKILL'); resolveDone(); }, 2000);
+        failed.once('exit', () => { clearTimeout(timer); resolveDone(); });
+      });
+    }
+    await rm(failedData, { recursive: true, force: true });
+    await rm(failedWork, { recursive: true, force: true });
+  }
 });
 
 test('a daemon rejection of New session stays on the create alert', async ({ page }) => {

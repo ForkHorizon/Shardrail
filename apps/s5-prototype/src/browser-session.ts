@@ -1,6 +1,6 @@
 import type { BrowserKeyRecord } from '@shardrail/client/browser';
-import type { CommandRequest, DaemonFrame } from '@shardrail/contracts';
-import type { JournalEvent } from './session-model';
+import type { ApprovalResolutionRequest, CommandRequest, DaemonFrame } from '@shardrail/contracts';
+import type { ApprovalBindingEcho, JournalEvent } from './session-model';
 
 export type ConnectionPhase = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'key-changed';
 
@@ -10,7 +10,7 @@ export interface SessionSocket {
   host: { journal_epoch: string };
   onFrame(listener: (frame: DaemonFrame) => void): () => void;
   onError(listener: (error: Error) => void): () => void;
-  resolveApproval(request: { approval_id: string; option_id: string }): void;
+  resolveApproval(request: ApprovalResolutionRequest): void;
   request(request: CommandRequest): void;
   close(): void;
 }
@@ -33,7 +33,7 @@ export interface BrowserSession {
   reconnect(): void;
   stop(): void;
   setOnline(online: boolean): void;
-  resolveApproval(approvalId: string, optionId: string): 'sent' | 'blocked';
+  resolveApproval(approvalId: string, optionId: string, binding: ApprovalBindingEcho | null): 'sent' | 'blocked';
   request(request: CommandRequest): 'sent' | 'blocked';
 }
 
@@ -262,10 +262,18 @@ export function createBrowserSession(options: BrowserSessionOptions): BrowserSes
       }
       if (phase === 'offline') void open(true);
     },
-    resolveApproval(approvalId, optionId) {
-      if (stopped || phase !== 'connected' || !active || !approvalId || !optionId) return 'blocked';
+    resolveApproval(approvalId, optionId, binding) {
+      if (stopped || phase !== 'connected' || !active || !approvalId || !optionId || !binding) return 'blocked';
+      if (!binding.sessionId || !binding.turnId || !binding.providerRequestId || !/^[0-9a-fA-F]{64}$/.test(binding.contentHash)) return 'blocked';
       try {
-        active.resolveApproval({ approval_id: approvalId, option_id: optionId });
+        active.resolveApproval({
+          approval_id: approvalId,
+          option_id: optionId,
+          content_hash: binding.contentHash,
+          session_id: binding.sessionId,
+          turn_id: binding.turnId,
+          provider_request_id: binding.providerRequestId,
+        });
         return 'sent';
       } catch {
         return 'blocked';

@@ -287,13 +287,22 @@ fn next_event(reader: &mut BufReader<UnixStream>, kind: &str) -> Value {
 fn resolve(
     stream: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
-    approval_id: &Value,
+    approval: &Value,
     option_id: &str,
 ) {
+    let payload = &approval["payload"];
+    let binding = &payload["binding"];
     writeln!(
         stream,
         "{}",
-        json!({"kind":"approval_resolution","request":{"approval_id": approval_id, "option_id": option_id}})
+        json!({"kind":"approval_resolution","request":{
+            "approval_id": payload["approval_id"],
+            "option_id": option_id,
+            "content_hash": binding["content_hash"],
+            "session_id": binding["session_id"],
+            "turn_id": binding["turn_id"],
+            "provider_request_id": binding["provider_request_id"]
+        }})
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -304,7 +313,10 @@ fn resolve(
         );
         let frame = read_json(reader);
         if frame["kind"] == "approval_resolved" || frame["kind"] == "error" {
-            assert_eq!(frame["kind"], "approval_resolved");
+            assert_eq!(
+                frame["kind"], "approval_resolved",
+                "{frame} binding={binding}"
+            );
             return;
         }
     }
@@ -344,6 +356,23 @@ fn journal_events(path: &Path) -> Vec<shardrail_protocol::DurableEvent> {
         .unwrap()
 }
 
+fn latest_check<'a>(
+    events: &'a [shardrail_protocol::DurableEvent],
+    session_id: Uuid,
+    item: &str,
+) -> &'a serde_json::Value {
+    &events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.session_id == session_id
+                && event.kind == "session_check_result"
+                && event.payload["item_id"] == item
+        })
+        .unwrap_or_else(|| panic!("missing session check {item}"))
+        .payload
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -377,6 +406,80 @@ fn transcript_hash(
         hasher.update(field);
     }
     hasher.finalize().into()
+}
+
+#[test]
+fn codex_journals_verified_checks_and_keeps_the_rest_not_verified() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "happy", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = Uuid::parse_str(
+        next_event(&mut reader, "process_started")["session_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let events = journal_events(dirs.data.path());
+    for item in ["sandbox", "bypass", "routing", "widening", "mcp"] {
+        let check = latest_check(&events, session_id, item);
+        assert_eq!(check["status"], "verified", "{item} {check}");
+        assert!(!check["source"].as_str().unwrap().is_empty());
+        assert!(check["checked_at_ms"].as_i64().unwrap() > 0);
+    }
+    for (item, needle) in [
+        ("config", "hash"),
+        ("containment", "process group"),
+        ("credentials", "SSH_AUTH_SOCK"),
+        ("writes", "workspace-write"),
+        ("identity", "socket"),
+        ("boundary", "journal"),
+        ("gaps", "read-only"),
+    ] {
+        let check = latest_check(&events, session_id, item);
+        assert_eq!(check["status"], "not_verified", "{item} {check}");
+        assert!(
+            check["detail"].as_str().unwrap().contains(needle),
+            "{item} {check}"
+        );
+    }
+    assert!(
+        latest_check(&events, session_id, "mcp")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("zero MCP")
+    );
+}
+
+#[test]
+fn codex_settings_update_fails_widening_and_blocks_turns() {
+    let dirs = codex_dirs();
+    let _daemon = start_codex(&dirs, "settings-updated", 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let rejected = next_event(&mut reader, "approval_routing_rejected");
+    assert!(
+        rejected["payload"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("settings")
+    );
+    let session_id = Uuid::parse_str(rejected["session_id"].as_str().unwrap()).unwrap();
+    let events = journal_events(dirs.data.path());
+    assert_eq!(
+        latest_check(&events, session_id, "widening")["status"],
+        "failed"
+    );
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "hi"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_rejected");
 }
 
 #[test]
@@ -480,7 +583,7 @@ fn codex_streams_approvals_redacts_and_interrupts() {
     resolve(
         &mut limited_stream,
         &mut limited_reader,
-        &approval["payload"]["approval_id"],
+        &approval,
         "decline",
     );
     let file_approval = next_event(&mut limited_reader, "approval_requested");
@@ -493,7 +596,7 @@ fn codex_streams_approvals_redacts_and_interrupts() {
     resolve(
         &mut limited_stream,
         &mut limited_reader,
-        &file_approval["payload"]["approval_id"],
+        &file_approval,
         "accept",
     );
     let finished = next_event(&mut limited_reader, "turn_finished");
@@ -563,6 +666,21 @@ fn codex_bad_reviewer_blocks_turns() {
             .contains("routed")
     );
     let session_id = rejected["session_id"].as_str().unwrap().to_owned();
+    let events = journal_events(dirs.data.path());
+    let session = Uuid::parse_str(&session_id).unwrap();
+    assert_eq!(
+        latest_check(&events, session, "routing")["status"],
+        "failed"
+    );
+    let widening = latest_check(&events, session, "widening");
+    assert_eq!(widening["status"], "not_verified", "{widening}");
+    assert!(
+        widening["detail"]
+            .as_str()
+            .unwrap()
+            .contains("settings monitoring"),
+        "{widening}"
+    );
     send_command(
         &mut stream,
         "turn.start",
@@ -826,6 +944,11 @@ fn codex_weaker_policy_echo_blocks_turns() {
             .contains("weaker than untrusted")
     );
     let session_id = rejected["session_id"].as_str().unwrap().to_owned();
+    let events = journal_events(dirs.data.path());
+    assert_eq!(
+        latest_check(&events, Uuid::parse_str(&session_id).unwrap(), "bypass")["status"],
+        "failed"
+    );
     send_command(
         &mut stream,
         "turn.start",
@@ -906,6 +1029,11 @@ fn codex_readonly_network_echo_blocks_turns() {
             .contains("sandbox")
     );
     let session_id = rejected["session_id"].as_str().unwrap().to_owned();
+    let events = journal_events(dirs.data.path());
+    assert_eq!(
+        latest_check(&events, Uuid::parse_str(&session_id).unwrap(), "sandbox")["status"],
+        "failed"
+    );
     send_command(
         &mut stream,
         "turn.start",
@@ -1478,6 +1606,12 @@ fn assert_mcp_activity_stops(dirs: &CodexDirs, mode: &str, during_turn: bool) {
     let child_pid = std::fs::read_to_string(pid_path(dirs)).unwrap_or_default();
     assert!(!child_pid.trim().is_empty(), "codex pid was not recorded");
     wait_until_pid_gone(&child_pid);
+    let events = journal_events(dirs.data.path());
+    assert_eq!(
+        latest_check(&events, Uuid::parse_str(&session_id).unwrap(), "mcp")["status"],
+        "failed",
+        "mcp activity must fail the checklist item"
+    );
     drop(daemon);
     assert_no_decoy(dirs, "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b");
 }
@@ -1661,6 +1795,7 @@ fn assert_no_decoy(dirs: &CodexDirs, decoy: &str) {
 fn assert_extension_rejected(dirs: &CodexDirs, mode: &str, reason: &str) {
     let _daemon = start_codex(dirs, mode, 30);
     expect_extension_rejection(dirs, reason);
+    assert_extension_check(dirs, reason);
 }
 
 fn expect_extension_rejection(dirs: &CodexDirs, reason: &str) {
@@ -1705,6 +1840,29 @@ fn expect_extension_rejection(dirs: &CodexDirs, reason: &str) {
             .iter()
             .all(|event| event.payload["outcome"] != "allowed")
     );
+}
+
+fn assert_extension_check(dirs: &CodexDirs, reason: &str) {
+    let events = journal_events(dirs.data.path());
+    let config = events
+        .iter()
+        .find(|event| event.kind == "session_check_result" && event.payload["item_id"] == "config")
+        .expect("config check");
+    assert_eq!(config.session_id, Uuid::nil());
+    assert_eq!(config.payload["status"], "failed");
+    let mcp_failed = events.iter().any(|event| {
+        event.kind == "session_check_result"
+            && event.payload["item_id"] == "mcp"
+            && event.payload["status"] == "failed"
+    });
+    if reason.to_ascii_lowercase().contains("mcp") {
+        assert!(mcp_failed, "mcp failure was not journaled");
+    } else {
+        assert!(
+            !mcp_failed,
+            "an unrelated extension failure marked mcp failed"
+        );
+    }
 }
 
 fn schema_root() -> PathBuf {

@@ -151,19 +151,19 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     assert.equal(event.event.kind, "session_created");
     assert.equal(typeof event.receipt_wall_clock_ms, "number");
 
-    const approval = new Promise<{ approvalId: string; rejectOptionId: string }>((resolveApproval, reject) => {
+    const approval = new Promise<{ approvalId: string; rejectOptionId: string; binding: { content_hash: string; session_id: string; turn_id: string; provider_request_id: string } }>((resolveApproval, reject) => {
       const deadline = setTimeout(() => { offApproval(); reject(new Error("fake agent did not request approval")); }, 10_000);
       const offApproval = client!.onFrame((frame) => {
         if (frame.kind !== "durable_event" || frame.event.kind !== "approval_requested") return;
-        const payload = frame.event.payload as { approval_id: string; options: { option_id: string; decision: string }[] };
+        const payload = frame.event.payload as { approval_id: string; options: { option_id: string; decision: string }[]; binding: { content_hash: string; session_id: string; turn_id: string; provider_request_id: string } };
         const rejectOption = payload.options.find((option) => option.decision === "deny");
-        if (!rejectOption) { clearTimeout(deadline); offApproval(); reject(new Error("fake agent approval has no deny option")); return; }
+        if (!rejectOption || !payload.binding?.content_hash) { clearTimeout(deadline); offApproval(); reject(new Error("fake agent approval has no deny option")); return; }
         clearTimeout(deadline);
         offApproval();
-        resolveApproval({ approvalId: payload.approval_id, rejectOptionId: rejectOption.option_id });
+        resolveApproval({ approvalId: payload.approval_id, rejectOptionId: rejectOption.option_id, binding: payload.binding });
       });
     });
-    const { approvalId, rejectOptionId } = await approval;
+    const { approvalId, rejectOptionId, binding } = await approval;
     const resolved = new Promise<void>((resolveApproval, reject) => {
       const deadline = setTimeout(() => { offResolved(); reject(new Error("approval resolution was not acknowledged")); }, 10_000);
       const offResolved = client!.onFrame((frame) => {
@@ -174,7 +174,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
         }
       });
     });
-    client.resolveApproval({ approval_id: approvalId, option_id: rejectOptionId });
+    client.resolveApproval({ approval_id: approvalId, option_id: rejectOptionId, content_hash: binding.content_hash, session_id: binding.session_id, turn_id: binding.turn_id, provider_request_id: binding.provider_request_id });
     await resolved;
 
     client.resume(0);
@@ -226,20 +226,20 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
     const [firstListenerCursors, secondListenerCursors] = await replayed;
     assert.deepEqual(firstListenerCursors, Array.from({ length: 41 }, (_, index) => index + 1));
     assert.deepEqual(secondListenerCursors, firstListenerCursors);
-    const allowedApproval = new Promise<{ approvalId: string; optionId: string }>((resolveApproval, reject) => {
+    const allowedApproval = new Promise<{ approvalId: string; optionId: string; binding: { content_hash: string; session_id: string; turn_id: string; provider_request_id: string } }>((resolveApproval, reject) => {
       const deadline = setTimeout(() => { offAllowed(); reject(new Error("fake agent did not request the second approval")); }, 10_000);
       const offAllowed = client!.onFrame((frame) => {
         if (frame.kind !== "durable_event" || frame.event.kind !== "approval_requested") return;
-        const payload = frame.event.payload as { approval_id: string; options: { option_id: string; decision: string }[] };
+        const payload = frame.event.payload as { approval_id: string; options: { option_id: string; decision: string }[]; binding: { content_hash: string; session_id: string; turn_id: string; provider_request_id: string } };
         const allowOption = payload.options.find((option) => option.decision === "allow");
-        if (!allowOption) { clearTimeout(deadline); offAllowed(); reject(new Error("fake agent approval has no allow option")); return; }
+        if (!allowOption || !payload.binding?.content_hash) { clearTimeout(deadline); offAllowed(); reject(new Error("fake agent approval has no allow option")); return; }
         clearTimeout(deadline);
         offAllowed();
-        resolveApproval({ approvalId: payload.approval_id, optionId: allowOption.option_id });
+        resolveApproval({ approvalId: payload.approval_id, optionId: allowOption.option_id, binding: payload.binding });
       });
     });
     client.request({ command_id: randomUUID(), kind: "session.create", expected_state: null, expected_turn_id: null, payload: {} });
-    const { approvalId: allowedId, optionId } = await allowedApproval;
+    const { approvalId: allowedId, optionId, binding: allowBinding } = await allowedApproval;
     const allowed = new Promise<void>((resolveApproval, reject) => {
       const deadline = setTimeout(() => { offAllowed(); reject(new Error("allow approval resolution was not acknowledged")); }, 10_000);
       const offAllowed = client!.onFrame((frame) => {
@@ -250,7 +250,7 @@ test("authenticates, sends a command, resumes and reconnects to the real daemon"
         }
       });
     });
-    client.resolveApproval({ approval_id: allowedId, option_id: optionId });
+    client.resolveApproval({ approval_id: allowedId, option_id: optionId, content_hash: allowBinding.content_hash, session_id: allowBinding.session_id, turn_id: allowBinding.turn_id, provider_request_id: allowBinding.provider_request_id });
     await allowed;
     let disconnectCount = 0;
     const connectionError = new Promise<Error>((resolveError) => {

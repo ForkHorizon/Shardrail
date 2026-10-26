@@ -399,6 +399,8 @@ def main():
             if MODE == "notification-ephemeral":
                 notified_thread["ephemeral"] = False
             notify("thread/started", {"thread": notified_thread})
+            if MODE == "settings-updated":
+                notify("thread/settings/updated", {"threadId": "thread-1"})
             if MODE == "mcp-startup":
                 notify(
                     "mcpServer/startupStatus/updated",

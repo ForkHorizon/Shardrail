@@ -252,14 +252,14 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Runs once after daemon startup and before opening session coordinators.
-    pub fn recover_journal(journal: &mut Journal) -> Result<(), CoordinatorError> {
+    /// Returns how many pending approvals were abandoned. They are not answerable.
+    pub fn recover_journal(journal: &mut Journal) -> Result<usize, CoordinatorError> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
         journal.recover_responding(now_ms)?;
-        journal.recover_pending_approvals(now_ms)?;
-        Ok(())
+        Ok(journal.recover_pending_approvals(now_ms)?)
     }
 
     pub fn open(journal: Journal, session_id: Uuid) -> Result<Self, CoordinatorError> {
@@ -494,6 +494,8 @@ impl Coordinator {
             responded_at_ms: request.now_ms,
             option_class: request.option_class,
             client_scope: request.client_scope,
+            content_hash: candidate.content_hash.clone(),
+            client_label: candidate.client_label.clone(),
         };
         self.write_response(approval, candidate, response, false, effect)
     }
@@ -636,6 +638,8 @@ impl Coordinator {
             responded_at_ms: request.now_ms,
             option_class: OptionClass::Once,
             client_scope: ClientScope::Full,
+            content_hash: candidate.content_hash.clone(),
+            client_label: "daemon".to_owned(),
         };
         if cancel_turn {
             let mut next_session = self.session.clone();
@@ -1117,6 +1121,8 @@ mod tests {
             responded_at_ms: 2,
             option_class: shardrail_protocol::OptionClass::Once,
             client_scope: shardrail_protocol::ClientScope::Full,
+            content_hash: String::new(),
+            client_label: String::new(),
         };
         journal
             .begin_approval_response(&response, pending.session_id)

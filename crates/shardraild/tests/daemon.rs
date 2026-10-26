@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use shardrail_journal::Journal;
 use std::io::{BufRead, BufReader, Write};
 use std::ops::{Deref, DerefMut};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -458,13 +459,29 @@ fn next_approval(reader: &mut BufReader<UnixStream>) -> Value {
     }
 }
 
-fn send_resolution(stream: &mut UnixStream, approval_id: &Value, option_id: &str) {
+fn send_resolution(stream: &mut UnixStream, approval: &Value, option_id: &str) {
+    send_resolution_with(stream, approval, option_id, json!({}));
+}
+
+fn send_resolution_with(stream: &mut UnixStream, approval: &Value, option_id: &str, patch: Value) {
+    let binding = &approval["binding"];
+    let mut request = json!({
+        "approval_id": approval["approval_id"],
+        "option_id": option_id,
+        "content_hash": binding["content_hash"],
+        "session_id": binding["session_id"],
+        "turn_id": binding["turn_id"],
+        "provider_request_id": binding["provider_request_id"],
+    });
+    if let (Some(object), Some(extra)) = (request.as_object_mut(), patch.as_object()) {
+        for (key, value) in extra {
+            object.insert(key.clone(), value.clone());
+        }
+    }
     writeln!(
         stream,
         "{}",
-        json!({"kind":"approval_resolution","request":{
-            "approval_id":approval_id,"option_id":option_id
-        }})
+        json!({"kind":"approval_resolution","request": request})
     )
     .unwrap();
 }
@@ -1223,7 +1240,7 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
     let _ = next_approval(&mut limited_reader);
     let approval_id = approval["approval_id"].clone();
 
-    send_resolution(&mut limited_stream, &approval_id, "allow_always");
+    send_resolution(&mut limited_stream, &approval, "allow_always");
     let limited_result = read_command_reply(&mut limited_reader);
     assert_eq!(limited_result["kind"], "error");
     assert!(
@@ -1232,7 +1249,7 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
             .unwrap()
             .contains("limited clients")
     );
-    send_resolution(&mut limited_stream, &approval_id, "grant_access");
+    send_resolution(&mut limited_stream, &approval, "grant_access");
     let limited_result = read_command_reply(&mut limited_reader);
     assert!(
         limited_result["error"]
@@ -1240,7 +1257,7 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
             .unwrap()
             .contains("limited clients")
     );
-    send_resolution(&mut limited_stream, &approval_id, "allow_boundary");
+    send_resolution(&mut limited_stream, &approval, "allow_boundary");
     let limited_result = read_command_reply(&mut limited_reader);
     assert!(
         limited_result["error"]
@@ -1251,16 +1268,16 @@ fn daemon_fans_out_approvals_enforces_authenticated_scope_and_resolves_once() {
 
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let full_barrier = std::sync::Arc::clone(&barrier);
-    let full_approval_id = approval_id.clone();
-    let limited_approval_id = approval_id.clone();
+    let full_approval = approval.clone();
+    let limited_approval = approval.clone();
     let full_thread = thread::spawn(move || {
         full_barrier.wait();
-        send_resolution(&mut full_stream, &full_approval_id, "allow_once");
+        send_resolution(&mut full_stream, &full_approval, "allow_once");
         read_command_reply(&mut full_reader)
     });
     let limited_thread = thread::spawn(move || {
         barrier.wait();
-        send_resolution(&mut limited_stream, &limited_approval_id, "reject_once");
+        send_resolution(&mut limited_stream, &limited_approval, "reject_once");
         read_command_reply(&mut limited_reader)
     });
     let full_result = full_thread.join().unwrap();
@@ -1338,7 +1355,7 @@ fn limited_client_can_choose_once_option() {
     request_session(&mut full_stream, &mut full_reader);
     let _ = next_approval(&mut full_reader);
     let approval = next_approval(&mut limited_reader);
-    send_resolution(&mut limited_stream, &approval["approval_id"], "allow_once");
+    send_resolution(&mut limited_stream, &approval, "allow_once");
     assert_eq!(
         read_command_reply(&mut limited_reader)["kind"],
         "approval_resolved"
@@ -1371,7 +1388,7 @@ fn fake_agent_terminal_events_reach_a_live_client() {
     let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
     request_session(&mut stream, &mut reader);
     let approval = next_approval(&mut reader);
-    send_resolution(&mut stream, &approval["approval_id"], "allow_once");
+    send_resolution(&mut stream, &approval, "allow_once");
     assert_eq!(read_json(&mut reader)["kind"], "approval_resolved");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut kinds = Vec::new();
@@ -1616,7 +1633,7 @@ fn kill_after_write_ahead_recovers_as_delivered_unconfirmed() {
     request_session(&mut stream, &mut reader);
     let approval = next_approval(&mut reader);
     let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
-    send_resolution(&mut stream, &approval["approval_id"], "allow_once");
+    send_resolution(&mut stream, &approval, "allow_once");
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let events = shardrail_journal::Journal::open(dir.path().join("journal.sqlite3"))
@@ -1660,4 +1677,453 @@ fn kill_after_write_ahead_recovers_as_delivered_unconfirmed() {
     assert_eq!(state.as_deref(), Some("delivered_unconfirmed"));
     restarted.kill().unwrap();
     restarted.wait().unwrap();
+}
+
+fn rejection_reasons(path: &Path, approval_id: Uuid) -> Vec<String> {
+    Journal::open(path.join("journal.sqlite3"))
+        .unwrap()
+        .events_after(0)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.kind == "approval_rejected"
+                && event.payload["approval_id"] == approval_id.to_string()
+        })
+        .map(|event| event.payload["reason"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+
+fn set_allow_approvals(path: &Path, client_id: Uuid, allowed: bool) {
+    let file = path.join("authorized-clients.json");
+    let mut registered: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for client in registered["clients"].as_array_mut().unwrap() {
+        if client["client_id"] == client_id.to_string() {
+            client["allow_approvals"] = json!(allowed);
+        }
+    }
+    std::fs::write(&file, serde_json::to_vec(&registered).unwrap()).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn approval_decision_is_bound_once_and_rejects_a_mismatch() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    assert!(approval["binding"]["content_hash"].as_str().unwrap().len() == 64);
+    assert_eq!(approval["binding"]["provider_request_id"], "permission-1");
+
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "allow_once",
+        json!({"content_hash": "ab".repeat(32)}),
+    );
+    let mismatch = read_command_reply(&mut reader);
+    assert!(
+        mismatch["error"].as_str().unwrap().contains("binding"),
+        "{mismatch}"
+    );
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "allow_once",
+        json!({"session_id": Uuid::now_v7()}),
+    );
+    assert!(
+        read_command_reply(&mut reader)["error"]
+            .as_str()
+            .unwrap()
+            .contains("binding")
+    );
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "allow_once",
+        json!({"turn_id": "other-turn"}),
+    );
+    assert!(
+        read_command_reply(&mut reader)["error"]
+            .as_str()
+            .unwrap()
+            .contains("binding")
+    );
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "allow_once",
+        json!({"provider_request_id": "permission-2"}),
+    );
+    assert!(
+        read_command_reply(&mut reader)["error"]
+            .as_str()
+            .unwrap()
+            .contains("binding")
+    );
+    send_resolution(&mut stream, &approval, "acceptForSession");
+    assert!(
+        read_command_reply(&mut reader)["error"]
+            .as_str()
+            .unwrap()
+            .contains("acceptForSession")
+    );
+    let reasons = rejection_reasons(dir.path(), approval_id);
+    for reason in [
+        "content_hash",
+        "session",
+        "turn",
+        "provider_request",
+        "accept_for_session",
+    ] {
+        assert!(reasons.iter().any(|item| item == reason), "{reasons:?}");
+    }
+    assert_eq!(
+        Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+
+    send_resolution(&mut stream, &approval, "allow_once");
+    assert_eq!(read_command_reply(&mut reader)["kind"], "approval_resolved");
+    send_resolution(&mut stream, &approval, "reject_once");
+    assert!(
+        read_command_reply(&mut reader)["error"]
+            .as_str()
+            .unwrap()
+            .contains("already resolved")
+    );
+    assert!(
+        rejection_reasons(dir.path(), approval_id)
+            .iter()
+            .any(|reason| reason == "already_decided")
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn unknown_approval_id_is_rejected_without_answering() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let missing = Uuid::now_v7();
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "allow_once",
+        json!({"approval_id": missing}),
+    );
+    let reply = read_command_reply(&mut reader);
+    assert!(
+        reply["error"].as_str().unwrap().contains("unavailable"),
+        "{reply}"
+    );
+    assert!(
+        rejection_reasons(dir.path(), missing)
+            .iter()
+            .any(|reason| reason == "unknown_approval")
+    );
+    assert_eq!(
+        Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap())
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn late_decision_after_timeout_is_rejected() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 1, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap();
+        if state.as_deref() == Some("expired") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "approval did not expire");
+        thread::sleep(Duration::from_millis(20));
+    }
+    send_resolution(&mut stream, &approval, "allow_once");
+    let reply = read_command_reply(&mut reader);
+    assert!(
+        reply["error"].as_str().unwrap().contains("expired"),
+        "{reply}"
+    );
+    assert!(
+        rejection_reasons(dir.path(), approval_id)
+            .iter()
+            .any(|reason| reason == "expired")
+    );
+    assert_eq!(
+        Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap()
+            .as_deref(),
+        Some("expired")
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn decision_after_daemon_restart_is_abandoned() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    drop(stream);
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+
+    let mut restarted = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    let replayed = next_approval(&mut reader);
+    assert_eq!(replayed["approval_id"], approval["approval_id"]);
+    send_resolution(&mut stream, &replayed, "allow_once");
+    let reply = read_command_reply(&mut reader);
+    assert!(
+        reply["error"].as_str().unwrap().contains("abandoned"),
+        "{reply}"
+    );
+    assert!(
+        rejection_reasons(dir.path(), approval_id)
+            .iter()
+            .any(|reason| reason == "abandoned")
+    );
+    assert_eq!(
+        Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap()
+            .as_deref(),
+        Some("withdrawn")
+    );
+    restarted.kill().unwrap();
+    restarted.wait().unwrap();
+}
+
+#[test]
+fn observer_cannot_decide_and_a_reconnect_can_answer_once() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    set_allow_approvals(dir.path(), client.id, false);
+    send_resolution(&mut stream, &approval, "allow_once");
+    let denied = read_command_reply(&mut reader);
+    assert!(
+        denied["error"].as_str().unwrap().contains("cannot decide"),
+        "{denied}"
+    );
+    assert!(
+        rejection_reasons(dir.path(), approval_id)
+            .iter()
+            .any(|reason| reason == "no_approval_rights")
+    );
+    assert_eq!(
+        Journal::open(dir.path().join("journal.sqlite3"))
+            .unwrap()
+            .approval_state(approval_id)
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+    drop(stream);
+    set_allow_approvals(dir.path(), client.id, true);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    let replayed = next_approval(&mut reader);
+    send_resolution(&mut stream, &replayed, "reject_once");
+    assert_eq!(read_command_reply(&mut reader)["kind"], "approval_resolved");
+    send_resolution(&mut stream, &replayed, "allow_once");
+    assert!(
+        read_command_reply(&mut reader)["error"]
+            .as_str()
+            .unwrap()
+            .contains("already resolved")
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn rejection_for_a_decided_approval_stays_on_its_session() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let stored = Uuid::parse_str(approval["binding"]["session_id"].as_str().unwrap()).unwrap();
+    let foreign = Uuid::now_v7();
+    send_resolution(&mut stream, &approval, "allow_once");
+    assert_eq!(read_command_reply(&mut reader)["kind"], "approval_resolved");
+    send_resolution_with(
+        &mut stream,
+        &approval,
+        "reject_once",
+        json!({"session_id": foreign}),
+    );
+    let reply = read_command_reply(&mut reader);
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("already resolved"),
+        "{reply}"
+    );
+    let journal = Journal::open(dir.path().join("journal.sqlite3")).unwrap();
+    assert!(
+        journal
+            .events_for_session(stored)
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event.kind == "approval_rejected"
+                    && event.payload["reason"] == "already_decided"
+                    && event.payload["session_id"] == stored.to_string()
+                    && event.payload["approval_id"] == approval_id.to_string()
+                    && event.session_id == stored
+            })
+    );
+    assert!(
+        journal
+            .events_for_session(foreign)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "approval_rejected")
+    );
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn missing_binding_is_journaled_and_does_not_answer() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let approval = next_approval(&mut reader);
+    let approval_id = Uuid::parse_str(approval["approval_id"].as_str().unwrap()).unwrap();
+    let stored = Uuid::parse_str(approval["binding"]["session_id"].as_str().unwrap()).unwrap();
+    let foreign = Uuid::now_v7();
+    writeln!(
+        stream,
+        "{}",
+        json!({
+            "kind": "approval_resolution",
+            "request": {
+                "approval_id": approval_id,
+                "option_id": "allow_once",
+                "session_id": foreign,
+                "turn_id": approval["binding"]["turn_id"],
+                "provider_request_id": approval["binding"]["provider_request_id"],
+            }
+        })
+    )
+    .unwrap();
+    let mut line = String::new();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0, "{line}");
+    let journal = Journal::open(dir.path().join("journal.sqlite3")).unwrap();
+    let events = journal.events_for_session(stored).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == "approval_rejected"
+            && event.payload["reason"] == "missing_binding"
+            && event.payload["approval_id"] == approval_id.to_string()
+            && event.session_id == stored
+    }));
+    assert!(events.iter().all(|event| {
+        event.kind != "approval_responding" && event.kind != "allowed" && event.kind != "denied"
+    }));
+    assert!(
+        journal
+            .events_for_session(foreign)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "approval_rejected")
+    );
+    assert_eq!(
+        journal.approval_state(approval_id).unwrap().as_deref(),
+        Some("pending")
+    );
+    let (disposition_session, state, _) =
+        journal.approval_disposition(approval_id).unwrap().unwrap();
+    assert_eq!(disposition_session, stored);
+    assert_eq!(state, "pending");
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
+fn fake_acp_checklist_stays_not_verified() {
+    let dir = tempdir().unwrap();
+    let client = add_client(dir.path());
+    let mut daemon = start_fake_daemon(dir.path(), 30, 0);
+    let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
+    request_session(&mut stream, &mut reader);
+    let _ = next_approval(&mut reader);
+    let events = Journal::open(dir.path().join("journal.sqlite3"))
+        .unwrap()
+        .events_after(0)
+        .unwrap();
+    let checks: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "session_check_result")
+        .collect();
+    assert_eq!(checks.len(), 12, "{checks:?}");
+    for event in checks {
+        assert_eq!(event.payload["status"], "not_verified");
+        assert!(event.payload["detail"].as_str().unwrap().len() > 10);
+        assert!(event.payload["checked_at_ms"].as_i64().unwrap() > 0);
+    }
+    let detail = |item: &str| {
+        events
+            .iter()
+            .find(|event| event.kind == "session_check_result" && event.payload["item_id"] == item)
+            .unwrap()
+            .payload["detail"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(detail("containment").contains("process group"));
+    assert!(detail("credentials").contains("SSH_AUTH_SOCK"));
+    assert!(detail("writes").contains("workspace-write"));
+    assert!(detail("identity").contains("socket"));
+    assert!(detail("boundary").contains("journal"));
+    assert!(detail("gaps").contains("read-only"));
+    assert!(detail("mcp").contains("does not prove"));
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
 }

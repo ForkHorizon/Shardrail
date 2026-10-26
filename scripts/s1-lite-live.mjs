@@ -217,6 +217,37 @@ async function main() {
       codex_home_paths: codexHomeHits,
       shardrail_git_status_unchanged: shardrailUnchanged,
     };
+    const checkEvents = events.filter((event) => event.kind === 'session_check_result' && event.session_id === sessionId);
+    const latestChecks = new Map();
+    for (const event of checkEvents) {
+      const item = event.payload?.item_id;
+      if (typeof item === 'string') latestChecks.set(item, event);
+    }
+    result.checklist = [...latestChecks.entries()].map(([itemId, event]) => ({
+      item_id: itemId,
+      status: event.payload?.status ?? null,
+      source: event.payload?.source ?? null,
+      checked_at_ms: event.payload?.checked_at_ms ?? null,
+      detail: event.payload?.detail ?? null,
+    }));
+    await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
+    result.banner = await page.locator('.host-banner').innerText();
+    const expectedChecks = ['sandbox', 'bypass', 'routing', 'config', 'widening', 'containment', 'credentials', 'writes', 'identity', 'mcp', 'boundary', 'gaps'];
+    for (const id of expectedChecks) {
+      if (!latestChecks.has(id)) throw new Error(`missing session check item in live run: ${id}`);
+    }
+    if (result.checklist.length !== 12) throw new Error(`expected 12 checklist items, got ${result.checklist.length}`);
+    for (const row of result.checklist) {
+      if (row.status === 'verified' && (typeof row.source !== 'string' || row.source.length === 0 || typeof row.checked_at_ms !== 'number' || row.checked_at_ms <= 0)) {
+        throw new Error(`checklist item ${row.item_id} is verified without daemon evidence`);
+      }
+    }
+    if (!result.banner.includes('approvals not protected')) {
+      throw new Error(`banner dropped approvals not protected: ${result.banner}`);
+    }
+    if (/\d+ of \d+ session checks verified/.test(result.banner)) {
+      throw new Error(`banner adds checklist rows into one verdict: ${result.banner}`);
+    }
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
     if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');

@@ -171,6 +171,58 @@ test('allow once stays pending until a second confirmation and the journal, and 
   await expect(blocked.getByRole('button', { name: 'Confirm allow once' })).toHaveCount(0);
 });
 
+test('a reload can deny once and a stale tab cannot answer the same approval', async ({ page, context }) => {
+  test.setTimeout(60_000);
+  await pair(page);
+  const sessionId = await createSession();
+  await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
+  await expect(page.getByRole('button', { name: 'Deny' })).toBeEnabled();
+  await expect(page.locator('[data-check=sandbox]')).toHaveAttribute('data-status', 'not verified');
+  await expect(page.locator('[data-check=sandbox]')).toContainText('fake ACP');
+  await expect(page.locator('.host-banner')).toContainText('approvals not protected');
+  await page.reload();
+  await expect(page.getByText('Connected · browser WebSocket')).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
+  await expect(page.getByRole('button', { name: 'Deny' })).toBeEnabled();
+  const stale = await context.newPage();
+  // Hold journal frames on the second tab so its card stays pending after the first decision.
+  let holdIncoming = false;
+  const buffered: Array<string | Buffer> = [];
+  let staleSocket: { send: (message: string | Buffer) => void } | null = null;
+  await stale.routeWebSocket(/\/ws/, (socket) => {
+    staleSocket = socket;
+    const server = socket.connectToServer();
+    server.onMessage((message) => {
+      if (holdIncoming) buffered.push(message);
+      else socket.send(message);
+    });
+    socket.onMessage((message) => server.send(message));
+  });
+  await stale.goto(state.baseUrl);
+  await expect(stale.getByText('Connected · browser WebSocket')).toBeVisible({ timeout: 15_000 });
+  await stale.getByRole('option', { name: new RegExp(sessionId) }).focus();
+  const staleDeny = stale.getByRole('button', { name: 'Deny' });
+  await expect(staleDeny).toBeEnabled();
+  holdIncoming = true;
+  await page.getByRole('button', { name: 'Deny' }).click();
+  const approval = page.getByRole('article', { name: /Approval/ });
+  await expect(approval).toContainText(/responded_unacked|denied/, { timeout: 15_000 });
+  await expect(approval).not.toContainText(/\ballowed\b/, { useInnerText: true });
+  await expect(page.getByRole('button', { name: 'Deny' })).toHaveCount(0);
+  await expect(staleDeny).toBeEnabled();
+  const heldBeforeLateDecision = buffered.length;
+  await staleDeny.click();
+  await expect.poll(() => buffered.length).toBeGreaterThan(heldBeforeLateDecision);
+  const late = buffered.splice(0);
+  for (const message of late) staleSocket?.send(message);
+  holdIncoming = false;
+  const staleApproval = stale.getByRole('article', { name: /Approval/ });
+  await expect(stale.getByRole('alert')).toContainText(/not allowed|already resolved/);
+  await expect(staleApproval).not.toContainText(/\ballowed\b/, { useInnerText: true });
+  await expect(approval).not.toContainText(/\ballowed\b/, { useInnerText: true });
+  await expect(stale.getByRole('button', { name: 'Deny' })).toHaveCount(0);
+});
+
 test('the paired main screen has no axe violations', async ({ page }) => {
   await pair(page);
   const sessionId = await createSession();
