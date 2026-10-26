@@ -43,7 +43,7 @@ The hash is SHA-256 of one canonical JSON object. Object keys are sorted at ever
 - `approvals_reviewer` — token or null
 - `sandbox` — `mode` from `sandbox_mode`, and `network_access`, `exclude_slash_tmp`, and `exclude_tmpdir_env_var` from `sandbox_workspace_write`. Each bool is null when that object or field is absent
 - `workspace_roots` — sorted, de-duplicated `sandbox_workspace_write.writable_roots`
-- `model` and `model_provider`
+- `model` and `model_provider` — token or null. A token may include `/` so a provider model id such as `openai/gpt-4o` still hashes. Other punctuation, spaces, and values longer than 128 characters make the read invalid. Approval-policy tokens do not allow `/`
 - `extensions` — `apps`, `connectors`, `hooks`, and `plugins` as name to `enabled` only; `skills` as `bundled_enabled`, `include_instructions`, and `{name, enabled}` rows
 - `mcp_servers` — name to `{enabled}` only
 - `features` — name to bool

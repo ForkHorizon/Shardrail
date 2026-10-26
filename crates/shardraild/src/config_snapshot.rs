@@ -9,7 +9,7 @@
 //! - `sandbox` — `mode`, `network_access`, `exclude_slash_tmp`, and
 //!   `exclude_tmpdir_env_var`
 //! - `workspace_roots` — sorted `sandbox_workspace_write.writable_roots`
-//! - `model` and `model_provider`
+//! - `model` and `model_provider` — a token, or null. `/` is allowed
 //! - `extensions` — apps, connectors, hooks, and plugins as name → enabled;
 //!   skills as `bundled_enabled`, `include_instructions`, and `{name, enabled}`
 //! - `mcp_servers` — name → `{enabled}` only
@@ -91,8 +91,8 @@ fn canonical_config(config: &Map<String, Value>) -> Result<Value, &'static str> 
         },
         "features": feature_flags(config.get("features"))?,
         "mcp_servers": mcp_servers(config)?,
-        "model": short_string(config.get("model"), 128)?,
-        "model_provider": short_string(config.get("model_provider"), 128)?,
+        "model": model_string(config.get("model"))?,
+        "model_provider": model_string(config.get("model_provider"))?,
         "sandbox": {
             "exclude_slash_tmp": exclude_slash_tmp,
             "exclude_tmpdir_env_var": exclude_tmpdir_env_var,
@@ -375,6 +375,23 @@ fn short_string(value: Option<&Value>, max_chars: usize) -> Result<Value, &'stat
     }
 }
 
+fn model_string(value: Option<&Value>) -> Result<Value, &'static str> {
+    match value {
+        None | Some(Value::Null) => Ok(Value::Null),
+        Some(Value::String(text)) if model_token(text) => Ok(Value::String(text.clone())),
+        Some(_) => Err(INVALID),
+    }
+}
+
+fn model_token(text: &str) -> bool {
+    let count = text.chars().count();
+    (1..=128).contains(&count)
+        && text.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_' | '.' | ':' | '@' | '/')
+        })
+}
+
 fn safe_token(text: &str, max_chars: usize) -> bool {
     let count = text.chars().count();
     (1..=max_chars).contains(&count)
@@ -602,5 +619,32 @@ mod tests {
         bad_flag["config"]["sandbox_workspace_write"]["exclude_slash_tmp"] = json!(false);
         bad_flag["config"]["sandbox_workspace_write"]["exclude_tmpdir_env_var"] = json!(0);
         assert!(snapshot_config(&bad_flag).is_err());
+    }
+
+    #[test]
+    fn slash_model_ids_are_hashed_and_other_punctuation_is_rejected() {
+        let mut value = sample("untrusted");
+        value["config"]["model"] = json!("openai/gpt-4o");
+        value["config"]["model_provider"] = json!("openrouter/openai");
+        let snapshot = snapshot_config(&value).unwrap();
+        assert!(snapshot.canonical.contains("\"model\":\"openai/gpt-4o\""));
+        assert!(
+            snapshot
+                .canonical
+                .contains("\"model_provider\":\"openrouter/openai\"")
+        );
+        let mut changed = value.clone();
+        changed["config"]["model"] = json!("openai/gpt-4o-mini");
+        let next = snapshot_config(&changed).unwrap();
+        assert_ne!(snapshot.hash, next.hash);
+        assert_eq!(changed_groups(&snapshot, &next), vec!["model"]);
+
+        value["config"]["model"] = json!("openai/gpt 4o");
+        assert!(snapshot_config(&value).is_err());
+        value["config"]["model"] = json!("openai/gpt-4o\n");
+        assert!(snapshot_config(&value).is_err());
+        value["config"]["model"] = json!("a".repeat(129));
+        assert!(snapshot_config(&value).is_err());
+        assert!(snapshot_config(&sample("on-request/extra")).is_err());
     }
 }
