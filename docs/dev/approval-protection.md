@@ -19,7 +19,7 @@ The host banner always says “approvals not protected”. With no session selec
 | sandbox | verified after a good `thread/start` echo | `workspace-write` or `read-only`, network closed. A bad echo is `failed` and later turns are refused. |
 | bypass | verified after the same echo | `approvalPolicy` is `untrusted`, the spawn has no `--dangerously` flag, and `acceptForSession` is not a decision. A weaker policy is `failed`. |
 | routing | verified after the same echo | `approvalsReviewer` is `user`. An unknown server request is refused. A non-user reviewer is `failed`. |
-| config | not verified | Per-run `-c` overrides are used and config writes are not issued. A hash of the provider approval config at session start, before every turn, and at session end is not taken. An extension failure is still `failed` on a nil session id and no session is created. |
+| config | verified after the session-start snapshot | SHA-256 of the effective Codex approval config from `config/read` (session cwd). Journaled at session start, before every turn, and at session end. A later read that drifts, fails, times out, or does not parse fails the row, does not send `turn/start`, and stops the session. An extension failure before admission is still `failed` on a nil session id and no session is created. |
 | widening | verified when the session is ready | `thread/settings/updated` is refused, the row becomes `failed`, and the session stops. None is accepted. A startup echo failure leaves this row `not_verified` because settings monitoring has not started. |
 | mcp | verified when extension verification reports `mcp_servers: 0` | The label is “MCP servers disabled”. Any `mcpServer` activity journals `failed` and stops the session. |
 | containment | not verified | The child is in its own process group. A macOS sandbox helper and a descendant snapshot are not checked. |
@@ -30,3 +30,25 @@ The host banner always says “approvals not protected”. With no session selec
 | gaps | not verified | Codex can run a built-in read-only command without an approval card. A file change that skips approval is detected only after it completes. |
 
 A failed check blocks later `turn.start` for that session. Extension failure before admission does not create a session. Fake ACP does not echo a sandbox, a policy, a reviewer, a config pin, a mode change, or an MCP server list, so those six rows are `not_verified` there as well.
+
+## Config snapshot
+
+The `config` row is `verified` only after the session-start snapshot is journaled, and it stays `verified` while each pre-turn snapshot has the same hash. The screen shows that row's source and last-checked time from the latest `session_check_result`. The host banner still starts with “approvals not protected”.
+
+`config/read` on the session child is the source. That read sees the effective config, including the per-run `-c` overrides. The daemon does not merge `config.toml` itself and does not call `mcpServerStatus/list`. The session-start hash reuses the verification `config/read` taken before `thread/start`. Each `turn.start` does a fresh `config/read` and compares it before `turn/start` is sent. At session end the daemon reads once more while the child is still alive. If the child is already gone, or that read times out, it journals `config_snapshot` with `recorded: false` and does not change a `verified` row.
+
+The hash is SHA-256 of one canonical JSON object. Object keys are sorted at every level. Missing values are explicit nulls. The object always has these keys:
+
+- `approval_policy` — a short token, or `{granular: {mcp_elicitations, request_permissions, rules, sandbox_approval, skill_approval}}` with explicit nulls for the optional bools
+- `approvals_reviewer` — token or null
+- `sandbox` — `mode` from `sandbox_mode`, and `network_access` from `sandbox_workspace_write.network_access`
+- `workspace_roots` — sorted, de-duplicated `sandbox_workspace_write.writable_roots`
+- `model` and `model_provider`
+- `extensions` — `apps`, `connectors`, `hooks`, and `plugins` as name to `enabled` only; `skills` as `bundled_enabled`, `include_instructions`, and `{name, enabled}` rows
+- `mcp_servers` — name to `{enabled}` only
+- `features` — name to bool
+- `web_search` — `disabled`, `cached`, `indexed`, `live`, or null
+
+`model_reasoning_effort` is not part of the hash. MCP `env`, headers, commands, args, URLs, tokens, API keys, and auth are not copied into the object, the hash, the journal, or the log. A `features` value that is not a bool, or an extension entry with no `enabled` bool, makes the read invalid. `apps._default` is skipped when it has no `enabled` bool.
+
+Each snapshot is a `config_snapshot` event (`point`, `hash`, `matched`, `changed`, `recorded`) plus the `config` check row. `point` is `session-start`, `pre-turn`, or `session-end`. `hash` is `sha256:` plus the 64 hex digits. The `sha256:` label keeps the digest in the journal; a bare 64-hex string would be entropy-redacted. The check source names that point and the same labeled hash. On drift the detail is `config drifted:` plus the canonical group names that changed, with no values. A failed read uses a fixed reason: `config/read failed`, `config/read timed out`, or `config/read response is invalid`. A matching session-end snapshot does not turn a failed row back to `verified`.
