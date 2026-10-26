@@ -3,8 +3,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shardrail_journal::Journal;
 use std::io::{BufRead, BufReader, Write};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -20,6 +22,19 @@ struct TestClient {
 
 struct DaemonGuard(Child);
 
+impl Deref for DaemonGuard {
+    type Target = Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DaemonGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 struct KillThese(Vec<u32>);
 
 impl Drop for KillThese {
@@ -27,6 +42,7 @@ impl Drop for KillThese {
         for pid in &self.0 {
             let _ = Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
+                .stderr(Stdio::null())
                 .status();
         }
     }
@@ -42,23 +58,25 @@ impl Drop for RemoveDir {
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
+        let pid = self.0.id().to_string();
         let _ = Command::new("kill")
-            .args(["-TERM", &self.0.id().to_string()])
+            .args(["-TERM", &pid])
+            .stderr(Stdio::null())
             .status();
         let started = Instant::now();
-        loop {
+        while started.elapsed() < Duration::from_secs(2) {
             match self.0.try_wait() {
                 Ok(Some(_)) => return,
-                Ok(None) if started.elapsed() < Duration::from_secs(2) => {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                _ => {
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
-                    return;
-                }
+                Ok(None) => thread::sleep(Duration::from_millis(20)),
+                Err(_) => break,
             }
         }
+        let group = format!("-{}", self.0.id());
+        let _ = Command::new("kill")
+            .args(["-KILL", &group])
+            .stderr(Stdio::null())
+            .status();
+        let _ = self.0.wait();
     }
 }
 
@@ -130,6 +148,7 @@ fn start_codex_with(
     command
         .arg("--data-dir")
         .arg(dirs.data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-app-server")
         .arg(fake_program())
@@ -144,6 +163,7 @@ fn start_codex_with(
         .env("SHARDRAIL_CODEX_ARGV_OUT", &dirs.argv)
         .env("SHARDRAIL_CODEX_PID_OUT", pid_path(dirs))
         .env("SHARDRAIL_CODEX_FD_OUT", fd_path(dirs))
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::from(
             std::fs::File::create(dirs.data.path().join("daemon.stderr")).unwrap(),
@@ -151,6 +171,7 @@ fn start_codex_with(
     for arg in extra {
         command.arg(arg);
     }
+    command.process_group(0);
     DaemonGuard(command.spawn().unwrap())
 }
 
@@ -423,6 +444,7 @@ fn codex_streams_approvals_redacts_and_interrupts() {
     );
     let thread = inbound(&trace, "thread/start");
     assert_eq!(thread["params"]["approvalsReviewer"], "user");
+    assert!(thread["params"]["ephemeral"].as_bool().unwrap());
     assert_eq!(thread["params"]["sandbox"], "workspace-write");
     assert_eq!(thread["params"]["approvalPolicy"], "untrusted");
     let cwd = dirs.work.path().canonicalize().unwrap();
@@ -742,6 +764,7 @@ fn codex_daemon_exit_kills_the_child_group() {
     command
         .arg("--data-dir")
         .arg(dirs.data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-app-server")
         .arg(fake_program())
@@ -751,9 +774,11 @@ fn codex_daemon_exit_kills_the_child_group() {
         .env("SHARDRAIL_CODEX_TRACE", &dirs.trace)
         .env("SHARDRAIL_CODEX_ARGV_OUT", &dirs.argv)
         .env("SHARDRAIL_CODEX_PID_OUT", &pid_path)
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let mut daemon = command.spawn().unwrap();
+    command.process_group(0);
+    let mut daemon = DaemonGuard(command.spawn().unwrap());
     let client = add_client(dirs.data.path(), "full");
     let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
     send_command(&mut stream, "session.create", json!({}));
@@ -773,6 +798,7 @@ fn codex_daemon_exit_kills_the_child_group() {
     while Instant::now() < deadline {
         let probe = Command::new("kill")
             .args(["-0", &child_pid])
+            .stderr(Stdio::null())
             .status()
             .unwrap();
         if !probe.success() {
@@ -985,6 +1011,7 @@ fn failed_codex_start_retry_stays_rejected() {
     command
         .arg("--data-dir")
         .arg(dirs.data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-app-server")
         .arg("/usr/bin/false")
@@ -992,6 +1019,8 @@ fn failed_codex_start_retry_stays_rejected() {
         .arg(dirs.work.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    command.stdin(Stdio::piped());
+    command.process_group(0);
     let _daemon = DaemonGuard(command.spawn().unwrap());
     let client = add_client(dirs.data.path(), "full");
     let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
@@ -1224,6 +1253,73 @@ fn codex_mcp_startup_during_a_turn_interrupts_and_stops() {
 }
 
 #[test]
+fn codex_mcp_item_started_stops_without_journaling_item() {
+    assert_mcp_item_stops("mcp-item-started");
+}
+
+#[test]
+fn codex_mcp_item_updated_stops_without_journaling_item() {
+    assert_mcp_item_stops("mcp-item-updated");
+}
+
+#[test]
+fn codex_mcp_item_completed_stops_without_journaling_item() {
+    assert_mcp_item_stops("mcp-item-completed");
+}
+
+#[test]
+fn codex_mcp_tool_call_method_stops() {
+    assert_mcp_item_stops("mcp-item-method");
+}
+
+#[test]
+fn codex_dynamic_tool_item_stops() {
+    assert_mcp_item_stops("dynamic-tool-item");
+}
+
+#[test]
+fn codex_mcp_auto_approval_review_stops() {
+    assert_mcp_item_stops("mcp-auto-review-started");
+    assert_mcp_item_stops("mcp-auto-review-completed");
+}
+
+#[test]
+fn codex_mcp_turn_items_stop() {
+    assert_mcp_item_stops("mcp-turn-started-items");
+    assert_mcp_item_stops("mcp-turn-completed-items");
+}
+
+#[test]
+fn codex_dynamic_tool_request_stops_without_journaling_arguments() {
+    assert_mcp_item_stops("dynamic-tool-request");
+}
+
+#[test]
+fn codex_mcp_item_during_turn_interrupts_and_stops() {
+    assert_mcp_item_stops("mcp-item-during-turn");
+}
+
+#[test]
+fn codex_thread_rollout_path_fails_closed() {
+    assert_thread_echo_rejected("thread-path", "rollout path");
+}
+
+#[test]
+fn codex_thread_ephemeral_echo_must_be_true() {
+    assert_thread_echo_rejected("bad-ephemeral", "not ephemeral");
+}
+
+#[test]
+fn codex_thread_started_notification_must_not_report_rollout_path() {
+    assert_thread_echo_rejected("notification-path", "rollout path");
+}
+
+#[test]
+fn codex_thread_started_notification_must_echo_ephemeral() {
+    assert_thread_echo_rejected("notification-ephemeral", "not ephemeral");
+}
+
+#[test]
 fn codex_replaced_path_after_pin_refuses_to_start() {
     let dirs = codex_dirs();
     let replaced = replaced_workdir(&dirs);
@@ -1293,7 +1389,8 @@ fn codex_parent_stdin_eof_stops_the_daemon_and_the_child() {
         .stderr(Stdio::from(
             std::fs::File::create(dirs.data.path().join("daemon.stderr")).unwrap(),
         ));
-    let mut daemon = command.spawn().unwrap();
+    command.process_group(0);
+    let mut daemon = DaemonGuard(command.spawn().unwrap());
     let mut kill = KillThese(vec![daemon.id()]);
     let stdin = daemon.stdin.take();
     let client = add_client(dirs.data.path(), "full");
@@ -1385,6 +1482,89 @@ fn assert_mcp_activity_stops(dirs: &CodexDirs, mode: &str, during_turn: bool) {
     assert_no_decoy(dirs, "mcp-decoy-secret-SHOULD-NOT-LEAK-9c1e4b");
 }
 
+fn assert_mcp_item_stops(mode: &str) {
+    let dirs = codex_dirs();
+    let daemon = start_codex(&dirs, mode, 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = journal_session_id(dirs.data.path());
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "trigger MCP guard"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let events = wait_for_journal(dirs.data.path(), "codex_extensions_rejected");
+    assert!(events.iter().any(|event| {
+        event.kind == "codex_extensions_rejected"
+            && event.payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("mcp server activity")
+    }));
+    assert!(
+        events.iter().all(|event| {
+            !(matches!(
+                event.kind.as_str(),
+                "provider_item" | "provider_notice" | "provider_request_refused"
+            ) && (event.payload.to_string().contains("mcpToolCall")
+                || event.payload.to_string().contains("dynamicToolCall")
+                || event.payload.to_string().contains("mcp-item-secret")
+                || event.payload.to_string().contains("dynamic-tool-secret")
+                || event.payload.to_string().contains("mcp-server-secret")
+                || event.payload.to_string().contains("mcp-tool-secret")
+                || event.payload.to_string().contains("mcp-turn-item-secret")
+                || event.payload.to_string().contains("dynamic-args-secret")))
+        }),
+        "MCP tool item was journaled"
+    );
+    let trace = trace_messages(&dirs.trace);
+    assert_eq!(extension_indexes(&trace, "turn/start").len(), 1);
+    assert_eq!(
+        extension_indexes(&trace, "turn/interrupt").len(),
+        1,
+        "{trace:?}"
+    );
+    if mode == "dynamic-tool-request" {
+        assert!(trace.iter().any(|frame| {
+            frame["direction"] == "in"
+                && frame["message"]["id"] == "dynamic-call"
+                && frame["message"]["error"]["code"] == -32601
+        }));
+    }
+    let child_pid = read_pid_file(&pid_path(&dirs));
+    wait_until_pid_gone(&child_pid);
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "must be refused"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_rejected");
+    drop(daemon);
+}
+
+fn assert_thread_echo_rejected(mode: &str, reason: &str) {
+    let dirs = codex_dirs();
+    let daemon = start_codex(&dirs, mode, 30);
+    let client = add_client(dirs.data.path(), "full");
+    let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
+    send_command(&mut stream, "session.create", json!({}));
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let rejected = next_event(&mut reader, "approval_routing_rejected");
+    assert!(
+        rejected["payload"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains(reason)
+    );
+    assert!(extension_indexes(&trace_messages(&dirs.trace), "turn/start").is_empty());
+    let child_pid = read_pid_file(&pid_path(&dirs));
+    wait_until_pid_gone(&child_pid);
+    drop(daemon);
+}
+
 fn fd_path(dirs: &CodexDirs) -> PathBuf {
     dirs.data.path().join("codex.fds")
 }
@@ -1416,6 +1596,7 @@ fn read_pid_file(path: &Path) -> String {
 fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -1453,6 +1634,7 @@ fn wait_until_pid_gone(text: &str) {
     while Instant::now() < deadline {
         let alive = Command::new("kill")
             .args(["-0", pid])
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success());
         if !alive {

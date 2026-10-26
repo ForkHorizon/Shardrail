@@ -7,12 +7,12 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, turn1Failure } from './s1-lite-guard.mjs';
+import { INITIAL_COMMIT_PREFIX, assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, turn1Failure } from './s1-lite-guard.mjs';
 
 const HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const TURN_WAIT_MS = 8 * 60 * 1000;
@@ -183,11 +183,14 @@ async function main() {
     const mcpServers = verifiedExtensions.map((event) => event.payload?.mcp_servers);
     const refused = events.filter((event) => event.kind === 'provider_request_refused');
     const usage = events.filter((event) => JSON.stringify(event.payload ?? {}).toLowerCase().includes('token'));
+    const threadIds = codexThreadIds(events);
+    const rolloutFilenameChecks = await codexRolloutFilenameChecks(threadIds);
     const statusAfter = { shardrail: porcelain(SHARDRAIL), worktree: porcelain(worktree) };
     const shardrailUnchanged = statusBefore.shardrail === statusAfter.shardrail && statusBefore.worktree === statusAfter.worktree;
     const result = {
       session_id: sessionId,
-      thread_ids: uniqueStrings(events, 'thread_id'),
+      thread_ids: threadIds,
+      rollout_filename_checks: rolloutFilenameChecks,
       turn_ids: uniqueStrings(events, 'turn_id'),
       event_counts_by_kind: countKinds(events),
       approvals: events.filter((event) => String(event.kind).includes('approval') || event.kind === 'denied' || event.kind === 'allowed' || event.kind === 'expired').map(summarizeEvent),
@@ -217,11 +220,15 @@ async function main() {
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');
     if (result.routing_rejected.length) throw new Error('the daemon rejected approval routing during the live run');
+    if (events.some((event) => event.kind === 'process_started') && threadIds.length === 0) {
+      throw new Error('no Codex thread id was recorded for rollout filename checks');
+    }
     if (codexHomeHits.length) throw new Error(`journal references ${[...new Set(codexHomeHits.flatMap((hit) => hit.markers))].join(', ')}: ${JSON.stringify(codexHomeHits)}`);
     if (rejectedExtensions.length) throw new Error('codex extensions were rejected');
     if (!verifiedExtensions.length) throw new Error('codex extension verification was not journaled');
     if (mcpStartup.length || mcpNotices.length) throw new Error('mcp server activity was journaled');
     if (!mcpServers.length || mcpServers.some((count) => count !== 0)) throw new Error(`mcp servers were not verified off: ${JSON.stringify(mcpServers)}`);
+    if (rolloutFilenameChecks.some((check) => check.matches.length)) throw new Error(`Codex session filename contains a live thread id: ${JSON.stringify(rolloutFilenameChecks)}`);
     const turnFailure = turn1Failure({ ...turn1, finished: true });
     if (turnFailure) throw new Error(turnFailure);
     console.log(`S1-lite result written to ${resultDir}`);
@@ -531,6 +538,25 @@ function uniqueStrings(events, field) {
   return [...new Set(events.map((event) => event.payload?.[field]).filter((value) => typeof value === 'string'))];
 }
 
+async function codexRolloutFilenameChecks(threadIds, now = new Date()) {
+  const dates = [now, new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)];
+  return Promise.all(dates.map(async (date) => {
+    const year = String(date.getFullYear()).padStart(4, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const datePath = `${year}/${month}/${day}`;
+    let files = [];
+    try {
+      files = (await readdir(join(homedir(), '.codex', 'sessions', year, month, day), { withFileTypes: true }))
+        .filter((entry) => entry.isFile())
+        .map((entry) => entry.name);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    return { date: datePath, files, matches: files.filter((name) => threadIds.some((id) => name.includes(id))) };
+  }));
+}
+
 function summarizeEvent(event) {
   return { event_id: event.event_id, kind: event.kind, payload: event.payload };
 }
@@ -554,6 +580,7 @@ function renderMarkdown(result) {
     `- Shardrail git status unchanged: ${result.shardrail_git_status_unchanged}`,
     `- Codex extensions verified: ${result.extensions?.verified?.length ?? 0}`,
     `- Codex home paths in the journal: ${result.codex_home_paths?.length ?? 0}`,
+    `- Codex rollout filename checks: ${JSON.stringify(result.rollout_filename_checks)}`,
     '',
     '## Event counts',
     '',

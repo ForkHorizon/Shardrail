@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -74,7 +74,14 @@ try {
   const baseUrl = await endpoint;
   const ready = await fetch(baseUrl);
   if (!ready.ok) throw new Error(`test daemon served ${ready.status}`);
-  await writeFile(stateFile, JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint, daemonPid: daemon.pid, assetsDir: dist, browserPort: new URL(baseUrl).port }));
+  const stateTemp = `${stateFile}.${process.pid}.tmp`;
+  try {
+    await writeFile(stateTemp, JSON.stringify({ baseUrl, dataDir, clientId: client.client_id, publicKey: client.public_key, privateKey, hostPublicKey, hostFingerprint, daemonPid: daemon.pid, assetsDir: dist, browserPort: new URL(baseUrl).port }));
+    await rename(stateTemp, stateFile);
+  } catch (error) {
+    await rm(stateTemp, { force: true });
+    throw error;
+  }
   await new Promise((resolve) => {
     const keepAlive = setInterval(() => {}, 60_000);
     const stop = () => { clearInterval(keepAlive); resolve(); };

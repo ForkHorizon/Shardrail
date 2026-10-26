@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, turn1Failure } from './s1-lite-guard.mjs';
+import { assertHeadIsCommit, assertRepoIdentity, assertResultDirectory, codexHomePathHits, codexThreadIds, turn1Failure } from './s1-lite-guard.mjs';
 
 const FULL = '1bb8838aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -167,15 +167,23 @@ test('journaled commands, approvals, items, and paths must stay out of Codex and
     { event_id: 'warn', kind: 'provider_notice', payload: { method: 'configWarning', params: { summary: 'user (/Users/owner/.codex/config.toml): `x` is ignored.' } } },
     { event_id: 'warn2', kind: 'provider_notice', payload: { method: 'warning', params: { message: 'Codex is ignoring 1 unrecognized configuration setting.\n  user (/Users/owner/.codex/config.toml): `x` is ignored.' } } },
   ]), []);
-  assert.deepEqual(codexHomePathHits([
+  assert.equal(codexHomePathHits([
     { event_id: 'rollout', kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { path: '/Users/owner/.codex/sessions/2026/10/25/rollout-2026-10-25T20-25-22-abc.jsonl', cwd: '/tmp/repo' } } } },
-  ]), []);
+  ]).length, 1);
   assert.equal(codexHomePathHits([
     { event_id: 'rollout-cwd', kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { path: '/Users/owner/.codex/sessions/2026/10/25/rollout-x.jsonl', cwd: '/Users/owner/.codex/skills' } } } },
   ]).length, 1);
   assert.equal(codexHomePathHits([
     { event_id: 'other', kind: 'provider_notice', payload: { method: 'item/started', params: { path: '/Users/owner/.codex/skills/a' } } },
   ]).length, 1);
+});
+
+test('thread filename checks collect IDs from started and rejected routing events', () => {
+  assert.deepEqual(codexThreadIds([
+    { kind: 'provider_notice', payload: { method: 'thread/started', params: { thread: { id: 'thread-started' } } } },
+    { kind: 'approval_routing_rejected', payload: { result: { thread: { id: 'thread-rejected' } } } },
+  ]), ['thread-started', 'thread-rejected']);
+  assert.deepEqual(codexThreadIds([]), []);
 });
 
 test('the live script gates on the env and resets only through the guard', () => {
@@ -186,6 +194,8 @@ test('the live script gates on the env and resets only through the guard', () =>
   assert.match(source, /--allow-session-create/);
   assert.match(source, /New session/);
   assert.match(source, /codexHomePathHits\(/);
+  assert.match(source, /no Codex thread id was recorded for rollout filename checks/);
+  assert.match(source, /kind === 'process_started'\) && threadIds\.length === 0/);
   assert.match(source, /mcpServer\/startupStatus\/updated/);
   assert.match(source, /rev-parse', '--git-common-dir'/);
   assert.doesNotMatch(source, /\/Users\/daliys/);

@@ -128,9 +128,10 @@ def thread_result(params):
             "cliVersion": "0.160.0",
             "createdAt": 0,
             "cwd": cwd,
-            "ephemeral": True,
+            "ephemeral": params.get("ephemeral") is True and MODE != "bad-ephemeral",
             "id": "thread-1",
             "modelProvider": "fake",
+            "path": "/tmp/rollout-thread-1.jsonl" if MODE == "thread-path" else None,
             "preview": "",
             "projectId": None,
             "sessionId": "session-1",
@@ -390,7 +391,14 @@ def main():
                 reply(message["id"], result)
             continue
         if method == "thread/start":
-            reply(message["id"], thread_result(message.get("params") or {}))
+            result = thread_result(message.get("params") or {})
+            reply(message["id"], result)
+            notified_thread = dict(result["thread"])
+            if MODE == "notification-path":
+                notified_thread["path"] = "/tmp/rollout-notification.jsonl"
+            if MODE == "notification-ephemeral":
+                notified_thread["ephemeral"] = False
+            notify("thread/started", {"thread": notified_thread})
             if MODE == "mcp-startup":
                 notify(
                     "mcpServer/startupStatus/updated",
@@ -420,6 +428,48 @@ def main():
                 nxt = read_message()
                 if nxt and nxt.get("method") == "turn/interrupt":
                     reply(nxt["id"], {})
+                return
+            if MODE == "mcp-item-during-turn":
+                notify("item/started", {"threadId": "thread-1", "turnId": turn_id, "item": {"id": "mcp-item", "type": "mcpToolCall"}})
+                read_message()
+                return
+            if MODE in ("mcp-item-started", "mcp-item-updated", "mcp-item-completed"):
+                item_method = {
+                    "mcp-item-started": "item/started",
+                    "mcp-item-updated": "item/updated",
+                    "mcp-item-completed": "item/completed",
+                }[MODE]
+                notify(item_method, {"threadId": "thread-1", "turnId": turn_id, "item": {"id": "mcp-item-secret", "type": "mcpToolCall"}})
+                read_message()
+                return
+            if MODE == "dynamic-tool-item":
+                notify("item/started", {"threadId": "thread-1", "turnId": turn_id, "item": {"id": "dynamic-tool-secret", "type": "dynamicToolCall"}})
+                read_message()
+                return
+            if MODE == "mcp-item-method":
+                notify("item/mcpToolCall/progress", {"threadId": "thread-1", "turnId": turn_id, "itemId": "mcp-item-secret"})
+                read_message()
+                return
+            if MODE in ("mcp-auto-review-started", "mcp-auto-review-completed"):
+                method = MODE.removeprefix("mcp-auto-review-")
+                notify(f"item/autoApprovalReview/{method}", {
+                    "threadId": "thread-1", "turnId": turn_id,
+                    "action": {"type": "mcpToolCall", "server": "mcp-server-secret", "toolName": "mcp-tool-secret"}
+                })
+                read_message()
+                return
+            if MODE in ("mcp-turn-started-items", "mcp-turn-completed-items"):
+                method = "turn/started" if MODE == "mcp-turn-started-items" else "turn/completed"
+                notify(method, {"threadId": "thread-1", "turn": {"id": turn_id, "status": "completed", "items": [{"id": "mcp-turn-item-secret", "type": "mcpToolCall"}]}})
+                read_message()
+                return
+            if MODE == "dynamic-tool-request":
+                request("dynamic-call", "item/tool/call", {
+                    "callId": "dynamic-call", "namespace": "test", "threadId": "thread-1", "turnId": turn_id,
+                    "tool": "lookup", "arguments": {"secret": "dynamic-args-secret"}
+                })
+                read_message()
+                read_message()
                 return
             if MODE == "slow-turn":
                 complete(turn_id, "completed")

@@ -4,13 +4,41 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shardrail_journal::Journal;
 use std::io::{BufRead, BufReader, Write};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+struct DaemonGuard(Child);
+
+impl Deref for DaemonGuard {
+    type Target = Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DaemonGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let group = format!("-{}", self.0.id());
+        let _ = Command::new("kill")
+            .args(["-KILL", &group])
+            .stderr(Stdio::null())
+            .status();
+        let _ = self.0.wait();
+    }
+}
 
 #[derive(Clone)]
 struct TestClient {
@@ -52,30 +80,36 @@ fn add_client_with_scope(path: &Path, scope: &str) -> TestClient {
     }
 }
 
-fn start_daemon(path: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_shardraild"))
+fn start_daemon(path: &Path) -> DaemonGuard {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::inherit());
+    command.process_group(0);
+    DaemonGuard(command.spawn().unwrap())
 }
 
 #[test]
 fn daemon_startup_writes_to_log_directory_override() {
     let data = tempdir().unwrap();
     let logs = tempdir().unwrap();
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
         .arg("--data-dir")
         .arg(data.path())
+        .arg("--exit-with-stdin")
         .arg("--log-dir")
         .arg(logs.path())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    command.process_group(0);
+    let mut daemon = DaemonGuard(command.spawn().unwrap());
     let log_path = logs.path().join("shardraild.log");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut contents = String::new();
@@ -93,10 +127,12 @@ fn daemon_startup_writes_to_log_directory_override() {
     assert!(!contents.contains("epoch [REDACTED]"));
 }
 
-fn start_browser_daemon(path: &Path, port: u16) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_shardraild"))
+fn start_browser_daemon(path: &Path, port: u16) -> DaemonGuard {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
@@ -105,10 +141,11 @@ fn start_browser_daemon(path: &Path, port: u16) -> Child {
         )
         .arg("--browser-listen")
         .arg(format!("127.0.0.1:{port}"))
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::inherit());
+    command.process_group(0);
+    DaemonGuard(command.spawn().unwrap())
 }
 
 #[test]
@@ -229,7 +266,7 @@ fn browser_websocket_authenticates_rejects_pre_auth_command_and_delivers_events(
     daemon.wait().unwrap();
 }
 
-fn start_fake_daemon(path: &Path, timeout_secs: u64, write_delay_ms: u64) -> Child {
+fn start_fake_daemon(path: &Path, timeout_secs: u64, write_delay_ms: u64) -> DaemonGuard {
     start_fake_daemon_with(path, timeout_secs, write_delay_ms, false)
 }
 
@@ -238,11 +275,12 @@ fn start_fake_daemon_with(
     timeout_secs: u64,
     write_delay_ms: u64,
     no_reject: bool,
-) -> Child {
+) -> DaemonGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
     command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--fake-acp-path")
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -257,16 +295,19 @@ fn start_fake_daemon_with(
     }
     command
         .arg("--no-file-log")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::inherit());
+    command.process_group(0);
+    DaemonGuard(command.spawn().unwrap())
 }
 
-fn start_disconnect_after_approval_daemon(path: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_shardraild"))
+fn start_disconnect_after_approval_daemon(path: &Path) -> DaemonGuard {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
         .arg("--data-dir")
         .arg(path)
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
@@ -274,10 +315,11 @@ fn start_disconnect_after_approval_daemon(path: &Path) -> Child {
                 .join("../../target/debug/shardrail-fake-acp"),
         )
         .arg("--fake-acp-disconnect-after-permission")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::inherit());
+    command.process_group(0);
+    DaemonGuard(command.spawn().unwrap())
 }
 
 fn connect(path: &Path) -> (UnixStream, BufReader<UnixStream>) {
@@ -1081,9 +1123,11 @@ fn epoch_mismatch_signals_resync_and_streams_history_on_same_connection() {
 fn fake_agent_stream_chunks_are_durable_events_with_receipt_timestamps() {
     let dir = tempdir().unwrap();
     let client = add_client(dir.path());
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg(
@@ -1091,10 +1135,11 @@ fn fake_agent_stream_chunks_are_durable_events_with_receipt_timestamps() {
                 .join("../../target/debug/shardrail-fake-acp"),
         )
         .env("SHARDRAIL_FAKE_ACP_STREAM_EVENTS", "3")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::inherit());
+    command.process_group(0);
+    let mut daemon = DaemonGuard(command.spawn().unwrap());
     let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
     writeln!(stream, "{}", json!({"kind":"request","request":{"command_id":Uuid::now_v7(),"kind":"session.create","expected_state":null,"expected_turn_id":null,"payload":{}}})).unwrap();
     let mut chunks = 0;
@@ -1361,16 +1406,19 @@ fn fake_agent_terminal_events_reach_a_live_client() {
 fn early_provider_exit_finishes_the_turn_and_process_lifecycle() {
     let dir = tempdir().unwrap();
     let client = add_client(dir.path());
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_shardraild"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shardraild"));
+    command
         .arg("--data-dir")
         .arg(dir.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--fake-acp-path")
         .arg("/usr/bin/false")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::inherit());
+    command.process_group(0);
+    let mut daemon = DaemonGuard(command.spawn().unwrap());
     let (mut stream, mut reader, _) = handshake(dir.path(), None, 0, &client);
     request_session(&mut stream, &mut reader);
     let deadline = Instant::now() + Duration::from_secs(3);
