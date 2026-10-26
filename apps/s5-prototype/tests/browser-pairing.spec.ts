@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 import { connect } from '@shardrail/client';
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -43,6 +44,17 @@ async function startDaemon() {
   await writeFile(stateFile, JSON.stringify(state));
   return daemon.pid!;
 }
+
+test('pairing page has no axe violations in either theme', async ({ page }) => {
+  await page.goto(state.baseUrl);
+  const initial = (await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)) ? 'dark' : 'light';
+  const first = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
+  expect(first, first.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);
+  const next = initial === 'dark' ? 'light' : 'dark';
+  await page.getByRole('button', { name: `Use ${next} theme` }).click();
+  const second = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;
+  expect(second, second.map((violation) => `${violation.id}: ${violation.help}`).join('\n')).toEqual([]);
+});
 
 test('pairs, persists the key on reload, reconnects, receives events, and blocks a changed daemon key', async ({ page }) => {
   const binary = process.env.SHARDRAILD_BIN ?? '../../target/debug/shardraild';

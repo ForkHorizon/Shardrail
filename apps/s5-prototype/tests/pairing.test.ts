@@ -57,6 +57,12 @@ test('changed pinned daemon key blocks automatic reconnect', () => {
 });
 
 test('failed registration and unpair remain explicit errors', async () => {
-  assert.equal((await confirmPairing(beginConfirmation(info), api({ pair: async () => { throw new Error('secret'); } }))).kind, 'error');
+  const enrollment = await confirmPairing(beginConfirmation(info), api({ pair: async () => { throw new Error('secret'); } }));
+  assert.deepEqual(enrollment, { kind: 'error', message: 'Enrollment failed. Check the one-time code, daemon connection, and browser key acknowledgement, then retry.', info });
   assert.equal((await unpairClient(api({ unpair: async () => { throw new Error('secret'); } }))).kind, 'error');
+});
+
+test('identity read failure has distinct recovery copy from enrollment rejection', async () => {
+  const state = await confirmPairing(beginConfirmation(info), api({ inspect: async () => { throw new Error('offline'); } }));
+  assert.deepEqual(state, { kind: 'error', message: 'Could not read daemon identity. Check that the daemon is available, then retry.', info });
 });

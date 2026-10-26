@@ -72,14 +72,19 @@ test.afterAll(async () => {
 test('a browser with session.create can start a session and send a prompt', async ({ page }) => {
   test.setTimeout(60_000);
   await pair(page, true);
-  await expect(page.locator('#session-workdir')).toBeVisible();
-  await expect(page.locator('#session-workdir option')).toHaveCount(1);
+  const workdir = page.getByRole('button', { name: /Workdir/ });
+  await expect(workdir).toBeVisible();
+  await workdir.click();
+  await expect(page.getByRole('option')).toHaveCount(1);
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'New session' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the daemon to confirm the new session.' })).toBeVisible();
   const option = page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ });
   await expect(option).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the daemon to confirm the new session.' })).toHaveCount(0);
   const sessionId = (await option.innerText()).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0];
   if (!sessionId) throw new Error('new session id was not shown');
-  await expect(page.getByRole('heading', { name: `Events for ${sessionId}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Events for ${sessionId.slice(0, 8)}` })).toBeVisible();
   await page.locator('#session-prompt').fill('Add a function sub');
   await page.getByRole('button', { name: 'Send prompt' }).click();
   await expect(page.getByRole('button', { name: 'Deny' })).toBeVisible({ timeout: 15_000 });
@@ -228,7 +233,7 @@ test('a daemon rejection of New session stays on the create alert', async ({ pag
     await page.getByRole('button', { name: 'New session' }).click();
     await expect(page.getByRole('alert').filter({ hasText: 'enabled plugins remain' })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ })).toHaveCount(0);
-    await expect(page.getByText('No sessions yet.')).toBeVisible();
+    await expect(page.locator('.empty-detail')).toContainText('No sessions yet.');
   } finally {
     if (rejected.exitCode === null) {
       rejected.kill('SIGTERM');
@@ -248,7 +253,8 @@ test('a browser without session.create has no New session button', async ({ brow
   try {
     await pair(page, false);
     await expect(page.getByRole('button', { name: 'New session' })).toHaveCount(0);
-    await expect(page.locator('#session-workdir')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Workdir/ })).toHaveCount(0);
+    await expect(page.getByText('Session creation unavailable')).toBeVisible();
   } finally {
     await context.close();
   }

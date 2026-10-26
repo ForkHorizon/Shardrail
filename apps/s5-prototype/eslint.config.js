@@ -10,7 +10,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}', 'tests/**/*.mjs', 'bench.ts', 'a11y.ts', 'isolation/**/*.js'],
+    files: ['src/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}', 'tests/**/*.mjs', 'scripts/screens.mjs', 'bench.ts', 'a11y.ts', 'isolation/**/*.js'],
     languageOptions: { globals: { ...globals.browser, ...globals.node, fetch: 'readonly' }, parserOptions: { ecmaFeatures: { jsx: true } } },
     plugins: { 'react-hooks': reactHooks, 'react-compiler': reactCompiler, 'jsx-a11y': jsxA11y },
     rules: {

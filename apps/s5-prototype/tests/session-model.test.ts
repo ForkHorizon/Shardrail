@@ -97,7 +97,7 @@ test('approval cards expose once options only and follow the daemon state', () =
   assert.equal(revealHiddenCharacters(disclosed?.command ?? ''), 'curl\\u202e');
 });
 
-test('coalesces chunk text and keeps other events as plain text', () => {
+test('coalesces chunk text and summarizes activity while preserving raw payloads', () => {
   const items = transcriptItems([
     event(1, 'session-a', 'agent_message_chunk', { content: { text: '```python\n' } }),
     event(2, 'session-a', 'agent_message_chunk', { content: { text: 'print(1)\n```' } }),
@@ -107,9 +107,23 @@ test('coalesces chunk text and keeps other events as plain text', () => {
   assert.equal(items.length, 3);
   assert.equal(items[0]?.markdown, '```python\nprint(1)\n```');
   assert.equal(items[0]?.cursorLabel, '#1–#2');
+  assert.deepEqual(items[0]?.rawEvents, ['{"content":{"text":"```python\\n"}}', '{"content":{"text":"print(1)\\n```"}}']);
   assert.equal(items[1]?.plain, plainEventText(event(3, 'session-a', 'tool_call_started', { name: 'echo', argv: ['echo', 'hi'] })));
   assert.equal(items[1]?.markdown, null);
+  assert.equal(items[1]?.presentation, 'tool');
+  assert.equal(items[1]?.summary, 'echo');
+  assert.equal(items[1]?.status, 'Running');
   assert.equal(items[2]?.markdown, 'after');
+  const approval = transcriptItems([event(5, 'session-a', 'approval_requested', { approval_id: 'approval-5' })])[0];
+  assert.equal(approval?.presentation, 'approval');
+  assert.equal(approval?.approvalId, 'approval-5');
+  assert.equal(approval?.plain, '{"approval_id":"approval-5"}');
+  assert.deepEqual(approval?.rawEvents, ['{"approval_id":"approval-5"}']);
+  assert.equal(transcriptItems([event(6, 'session-a', 'unfamiliar_event', { keep: true })])[0]?.presentation, 'raw');
+});
+
+test('keeps session check events in the checklist instead of repeating them in activity', () => {
+  assert.deepEqual(transcriptItems([event(1, 'session-a', 'session_check_result', { check: 'sandbox' })]), []);
 });
 
 test('activity timestamps reject non-finite values', () => {
@@ -127,7 +141,7 @@ test('the verification checklist stays not verified and does not claim a single 
   assert.equal(summary.checks.some((item) => item.status === 'verified' || /protected/i.test(item.status)), false);
   assert.equal(summary.checks[0]?.lastChecked, null);
   assert.equal(summary.checks.every((item) => item.source === 'no daemon evidence'), true);
-  assert.equal(hostBanner(summary.checks, false), 'approvals not protected. No session is selected.');
+  assert.equal(hostBanner(summary.checks, false), 'approvals not protected. Sandbox, approval routing, containment, and the other session checks are not verified. No session is selected.');
   assert.match(hostBanner(summary.checks, true), /approvals not protected/);
 });
 
@@ -183,6 +197,12 @@ test('checklist rows follow the latest daemon evidence and a missing row stays n
   const other = sessionChecks(events, 'session-b');
   assert.equal(other.every((item) => item.status === 'not verified' && item.source === 'no daemon evidence'), true);
   assert.match(hostBanner(other, true), /^approvals not protected\. Sandbox, approval routing/);
+});
+
+test('a not-applicable checklist result stays explicit and does not count as verified', () => {
+  const checks = sessionChecks([checkEvent(1, 'mcp', 'not_applicable', 'static provider check', 'MCP is unavailable for this provider')], 'session-a');
+  assert.equal(checks.find((item) => item.id === 'mcp')?.status, 'n/a');
+  assert.equal(checklistSummary(checks).unverified, 11);
 });
 
 test('a config snapshot shows its source and a later drift fails the row', () => {
@@ -253,7 +273,7 @@ test('a confirmed approval leaves the in-flight set and a later disconnect does 
   const lost = reduceApprovalFlight(sent, { type: 'disconnect' });
   assert.equal(lost.inFlight.size, 0);
   assert.match(lost.error ?? '', /not confirmed/);
-  assert.match(reduceApprovalFlight(sent, { type: 'blocked' }).error ?? '', /not allowed/);
+  assert.match(reduceApprovalFlight(sent, { type: 'blocked' }).error ?? '', /response was not sent/);
   assert.equal(reduceApprovalFlight(sent, { type: 'journal', kind: 'agent_message_chunk', approvalId: 'approval-1' }), sent);
 });
 

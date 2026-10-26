@@ -49,7 +49,7 @@ export type ApprovalBindingEcho = {
 export type VerificationCheck = {
   id: string;
   label: string;
-  status: 'verified' | 'not verified' | 'failed';
+  status: 'verified' | 'not verified' | 'failed' | 'n/a';
   source: string;
   detail: string;
   lastChecked: string | null;
@@ -62,6 +62,11 @@ export type TranscriptItem = {
   occurredAtMs: number;
   markdown: string | null;
   plain: string | null;
+  rawEvents: string[];
+  presentation: 'message' | 'approval' | 'tool' | 'lifecycle' | 'raw';
+  summary: string | null;
+  status: string | null;
+  approvalId: string | null;
 };
 
 export type ApprovalFlight = { inFlight: ReadonlySet<string>; error: string | null };
@@ -111,7 +116,7 @@ export function sessionChecks(events: readonly JournalEvent[], sessionId: string
     if (!evidence || evidence.source.length === 0) {
       return { id: item.id, label: item.label, status: 'not verified' as const, source: NO_DAEMON_EVIDENCE, detail: 'The daemon has not journaled this check.', lastChecked: null };
     }
-    const status = evidence.status === 'verified' ? 'verified' as const : evidence.status === 'failed' ? 'failed' as const : 'not verified' as const;
+    const status = evidence.status === 'verified' ? 'verified' as const : evidence.status === 'failed' ? 'failed' as const : ['n/a', 'not_applicable', 'not applicable'].includes(evidence.status) ? 'n/a' as const : 'not verified' as const;
     const lastChecked = activityTimestamp(evidence.checkedAt);
     if (status === 'verified' && lastChecked === null) {
       return { id: item.id, label: item.label, status: 'not verified' as const, source: evidence.source, detail: evidence.detail, lastChecked: null };
@@ -123,7 +128,7 @@ export function sessionChecks(events: readonly JournalEvent[], sessionId: string
 export const VERIFICATION_CHECKS: readonly VerificationCheck[] = sessionChecks([], '');
 
 export function hostBanner(checks: readonly VerificationCheck[], sessionSelected: boolean) {
-  if (!sessionSelected) return 'approvals not protected. No session is selected.';
+  if (!sessionSelected) return `${UNVERIFIED_BANNER} No session is selected.`;
   const verified = checks.filter((item) => item.status === 'verified');
   if (verified.length === 0) return UNVERIFIED_BANNER;
   const failed = checks.filter((item) => item.status === 'failed').map((item) => item.id);
@@ -237,10 +242,12 @@ export function plainEventText(event: JournalEvent) {
 export function transcriptItems(events: readonly JournalEvent[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   for (const event of events) {
+    if (event.kind === 'session_check_result') continue;
     const text = agentText(event);
     const last = items.at(-1);
     if (text !== null && last?.kind === 'agent_message_chunk' && last.markdown !== null) {
       last.markdown += text;
+      last.rawEvents.push(plainEventText(event));
       last.cursorLabel = `${last.cursorLabel.split('–')[0]}–#${event.cursor}`;
       if (Number.isFinite(event.occurredAtMs) && event.occurredAtMs >= last.occurredAtMs) last.occurredAtMs = event.occurredAtMs;
       continue;
@@ -251,10 +258,38 @@ export function transcriptItems(events: readonly JournalEvent[]): TranscriptItem
       cursorLabel: `#${event.cursor}`,
       occurredAtMs: event.occurredAtMs,
       markdown: text,
-      plain: text === null ? plainEventText(event) : null,
+      plain: plainEventText(event),
+      rawEvents: [plainEventText(event)],
+      ...transcriptPresentation(event),
     });
   }
   return items;
+}
+
+function transcriptPresentation(event: JournalEvent): Pick<TranscriptItem, 'presentation' | 'summary' | 'status' | 'approvalId'> {
+  const payload = asRecord(event.payload);
+  const approvalId = typeof payload?.approval_id === 'string' ? payload.approval_id : null;
+  if (event.kind === 'agent_message_chunk') return { presentation: 'message', summary: null, status: null, approvalId: null };
+  if (event.kind === 'approval_requested') return { presentation: 'approval', summary: 'Approval requested', status: 'Pending decision', approvalId };
+  if (/^(tool|command)_/.test(event.kind)) {
+    const name = [payload?.name, payload?.tool_name, payload?.command]
+      .find((value): value is string => typeof value === 'string' && value.length > 0);
+    const argv = Array.isArray(payload?.argv) ? payload.argv.filter((value): value is string => typeof value === 'string') : [];
+    const label = event.kind.replaceAll('_', ' ');
+    return {
+      presentation: 'tool',
+      summary: name ?? (argv.length ? argv.join(' ') : label),
+      status: /fail|error|reject/i.test(event.kind) ? 'Failed' : /complete|finish|exit|success/i.test(event.kind) ? 'Completed' : /start|begin|running/i.test(event.kind) ? 'Running' : 'Recorded',
+      approvalId,
+    };
+  }
+  if (/^(session|turn|process)_/.test(event.kind)) {
+    return { presentation: 'lifecycle', summary: event.kind.replaceAll('_', ' '), status: null, approvalId };
+  }
+  if (event.kind.startsWith('approval_')) {
+    return { presentation: 'lifecycle', summary: event.kind.replaceAll('_', ' '), status: null, approvalId };
+  }
+  return { presentation: 'raw', summary: null, status: null, approvalId: null };
 }
 
 export function activityTimestamp(ms: number) {
@@ -300,7 +335,7 @@ export function promptClearApplies(acceptedSessionId: string | null, visibleSess
 }
 
 export function reduceApprovalFlight(state: ApprovalFlight, action: ApprovalFlightAction): ApprovalFlight {
-  if (action.type === 'blocked') return { inFlight: state.inFlight, error: 'Could not send the approval response. It was not allowed.' };
+  if (action.type === 'blocked') return { inFlight: state.inFlight, error: 'The approval response was not sent. Check the connection and try again.' };
   if (action.type === 'sent') {
     if (state.inFlight.has(action.approvalId) && state.error === null) return state;
     const inFlight = new Set(state.inFlight);
