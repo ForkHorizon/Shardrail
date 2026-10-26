@@ -148,6 +148,7 @@ fn start_codex_with(
     command
         .arg("--data-dir")
         .arg(dirs.data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-app-server")
         .arg(fake_program())
@@ -162,6 +163,7 @@ fn start_codex_with(
         .env("SHARDRAIL_CODEX_ARGV_OUT", &dirs.argv)
         .env("SHARDRAIL_CODEX_PID_OUT", pid_path(dirs))
         .env("SHARDRAIL_CODEX_FD_OUT", fd_path(dirs))
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::from(
             std::fs::File::create(dirs.data.path().join("daemon.stderr")).unwrap(),
@@ -762,6 +764,7 @@ fn codex_daemon_exit_kills_the_child_group() {
     command
         .arg("--data-dir")
         .arg(dirs.data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-app-server")
         .arg(fake_program())
@@ -771,6 +774,7 @@ fn codex_daemon_exit_kills_the_child_group() {
         .env("SHARDRAIL_CODEX_TRACE", &dirs.trace)
         .env("SHARDRAIL_CODEX_ARGV_OUT", &dirs.argv)
         .env("SHARDRAIL_CODEX_PID_OUT", &pid_path)
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     command.process_group(0);
@@ -794,6 +798,7 @@ fn codex_daemon_exit_kills_the_child_group() {
     while Instant::now() < deadline {
         let probe = Command::new("kill")
             .args(["-0", &child_pid])
+            .stderr(Stdio::null())
             .status()
             .unwrap();
         if !probe.success() {
@@ -1006,6 +1011,7 @@ fn failed_codex_start_retry_stays_rejected() {
     command
         .arg("--data-dir")
         .arg(dirs.data.path())
+        .arg("--exit-with-stdin")
         .arg("--no-file-log")
         .arg("--codex-app-server")
         .arg("/usr/bin/false")
@@ -1013,6 +1019,7 @@ fn failed_codex_start_retry_stays_rejected() {
         .arg(dirs.work.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    command.stdin(Stdio::piped());
     command.process_group(0);
     let _daemon = DaemonGuard(command.spawn().unwrap());
     let client = add_client(dirs.data.path(), "full");
@@ -1271,6 +1278,28 @@ fn codex_dynamic_tool_item_stops() {
 }
 
 #[test]
+fn codex_mcp_auto_approval_review_stops() {
+    assert_mcp_item_stops("mcp-auto-review-started");
+    assert_mcp_item_stops("mcp-auto-review-completed");
+}
+
+#[test]
+fn codex_mcp_turn_items_stop() {
+    assert_mcp_item_stops("mcp-turn-started-items");
+    assert_mcp_item_stops("mcp-turn-completed-items");
+}
+
+#[test]
+fn codex_dynamic_tool_request_stops_without_journaling_arguments() {
+    assert_mcp_item_stops("dynamic-tool-request");
+}
+
+#[test]
+fn codex_mcp_item_during_turn_interrupts_and_stops() {
+    assert_mcp_item_stops("mcp-item-during-turn");
+}
+
+#[test]
 fn codex_thread_rollout_path_fails_closed() {
     assert_thread_echo_rejected("thread-path", "rollout path");
 }
@@ -1460,6 +1489,13 @@ fn assert_mcp_item_stops(mode: &str) {
     let (mut stream, mut reader) = handshake(dirs.data.path(), &client);
     send_command(&mut stream, "session.create", json!({}));
     assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
+    let session_id = journal_session_id(dirs.data.path());
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "trigger MCP guard"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_accepted");
     let events = wait_for_journal(dirs.data.path(), "codex_extensions_rejected");
     assert!(events.iter().any(|event| {
         event.kind == "codex_extensions_rejected"
@@ -1470,19 +1506,42 @@ fn assert_mcp_item_stops(mode: &str) {
     }));
     assert!(
         events.iter().all(|event| {
-            !(event.kind == "provider_item"
-                && (event.payload["method"]
-                    .as_str()
-                    .is_some_and(|method| method.starts_with("item/"))
-                    || event.payload.to_string().contains("mcpToolCall")
-                    || event.payload.to_string().contains("dynamicToolCall")))
+            !(matches!(
+                event.kind.as_str(),
+                "provider_item" | "provider_notice" | "provider_request_refused"
+            ) && (event.payload.to_string().contains("mcpToolCall")
+                || event.payload.to_string().contains("dynamicToolCall")
+                || event.payload.to_string().contains("mcp-item-secret")
+                || event.payload.to_string().contains("dynamic-tool-secret")
+                || event.payload.to_string().contains("mcp-server-secret")
+                || event.payload.to_string().contains("mcp-tool-secret")
+                || event.payload.to_string().contains("mcp-turn-item-secret")
+                || event.payload.to_string().contains("dynamic-args-secret")))
         }),
-        "MCP tool item was journaled as a provider item"
+        "MCP tool item was journaled"
     );
     let trace = trace_messages(&dirs.trace);
-    assert!(extension_indexes(&trace, "turn/start").is_empty());
+    assert_eq!(extension_indexes(&trace, "turn/start").len(), 1);
+    assert_eq!(
+        extension_indexes(&trace, "turn/interrupt").len(),
+        1,
+        "{trace:?}"
+    );
+    if mode == "dynamic-tool-request" {
+        assert!(trace.iter().any(|frame| {
+            frame["direction"] == "in"
+                && frame["message"]["id"] == "dynamic-call"
+                && frame["message"]["error"]["code"] == -32601
+        }));
+    }
     let child_pid = read_pid_file(&pid_path(&dirs));
     wait_until_pid_gone(&child_pid);
+    send_command(
+        &mut stream,
+        "turn.start",
+        json!({"session_id": session_id, "prompt": "must be refused"}),
+    );
+    assert_eq!(command_reply(&mut reader)["kind"], "command_rejected");
     drop(daemon);
 }
 
@@ -1537,6 +1596,7 @@ fn read_pid_file(path: &Path) -> String {
 fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -1574,6 +1634,7 @@ fn wait_until_pid_gone(text: &str) {
     while Instant::now() < deadline {
         let alive = Command::new("kill")
             .args(["-0", pid])
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success());
         if !alive {

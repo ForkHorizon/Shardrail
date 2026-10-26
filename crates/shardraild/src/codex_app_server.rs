@@ -1518,7 +1518,7 @@ impl CodexRun {
             .to_owned();
         let id = frame.get("id").cloned().unwrap_or(Value::Null);
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
-        if method.starts_with("mcpServer/") {
+        if method.starts_with("mcpServer/") || method == "item/tool/call" {
             let line = json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -1710,10 +1710,25 @@ impl CodexRun {
             self.stop_mcp(ready, method).await;
             return true;
         }
-        let item_type = params.pointer("/item/type").and_then(Value::as_str);
+        let item_type = params
+            .pointer("/item/type")
+            .or_else(|| params.pointer("/action/type"))
+            .and_then(Value::as_str);
         if method.starts_with("item/mcpToolCall/")
             || (method.starts_with("item/")
                 && matches!(item_type, Some("mcpToolCall" | "dynamicToolCall")))
+            || ((method == "turn/started" || method == "turn/completed")
+                && params
+                    .pointer("/turn/items")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            matches!(
+                                item.get("type").and_then(Value::as_str),
+                                Some("mcpToolCall" | "dynamicToolCall")
+                            )
+                        })
+                    }))
         {
             self.stop_mcp(ready, method).await;
             return true;
