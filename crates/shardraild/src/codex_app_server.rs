@@ -2399,7 +2399,6 @@ impl CodexRun {
             payload["reason"] = Value::String(reason.to_owned());
         }
         let _ = self.append_notice("config_snapshot", payload).await;
-        let prefix = hash.unwrap_or("").chars().take(12).collect::<String>();
         let level = if matched == Some(true) {
             "INFO"
         } else {
@@ -2409,7 +2408,8 @@ impl CodexRun {
             level,
             "codex",
             &format!(
-                "config snapshot {point} sha256:{prefix} session {}",
+                "config snapshot {point} {} session {}",
+                config_snapshot_log_hash(hash),
                 self.session_id
             ),
         );
@@ -3530,6 +3530,16 @@ fn spawn_ack(daemon: Arc<Daemon>, session_id: Uuid, approval_id: Uuid) {
     });
 }
 
+fn config_snapshot_log_hash(hash: Option<&str>) -> String {
+    match hash {
+        Some(hash) => {
+            let prefix: String = hash.chars().take(12).collect();
+            format!("sha256:{prefix}")
+        }
+        None => "sha256:none".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3936,5 +3946,15 @@ mod tests {
                 .values()
                 .any(|pending| matches!(pending, PendingRpc::TurnStart { .. }))
         );
+    }
+
+    #[test]
+    fn config_snapshot_log_hash_uses_a_prefix_or_none() {
+        assert_eq!(
+            config_snapshot_log_hash(Some("0123456789abcdef0123")),
+            "sha256:0123456789ab"
+        );
+        assert_eq!(config_snapshot_log_hash(Some("abcd")), "sha256:abcd");
+        assert_eq!(config_snapshot_log_hash(None), "sha256:none");
     }
 }
