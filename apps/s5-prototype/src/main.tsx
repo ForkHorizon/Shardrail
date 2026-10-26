@@ -135,6 +135,7 @@ function App() {
   const [promptClear, setPromptClear] = useState<{ commandId: string; sessionId: string } | null>(null);
   const [sessionWorkdirsState, setSessionWorkdirs] = useState<readonly string[] | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [createPending, setCreatePending] = useState(false);
   const [createdSessionId, setCreatedSessionId] = useState<string | null>(null);
   const [dismissedSessionId, setDismissedSessionId] = useState<string | null>(null);
   const publishApprovalFlight = (action: ApprovalFlightAction) => {
@@ -172,6 +173,7 @@ function App() {
         if (!identity || !info.clientId) throw new Error('browser key is missing; pair this browser again');
         const applyCreateFlight = (result: CreateFlightResult) => {
           createFlightRef.current = result.flight;
+          setCreatePending(result.selectSessionId === null && (result.flight.pendingCommandId !== null || result.flight.acceptedCommandId !== null));
           if (result.selectSessionId) {
             selectedCreateRef.current = result.selectSessionId;
             setCreatedSessionId(result.selectSessionId);
@@ -494,11 +496,12 @@ function App() {
         expected_state: null,
         expected_turn_id: null,
       }) ?? 'blocked';
-      if (result !== 'sent') { setCreateError('Not connected. The session was not created.'); return; }
+      if (result !== 'sent') { setCreatePending(false); setCreateError('Not connected. The session was not created.'); return; }
       createFlightRef.current = noteCreateSent(commandId);
+      setCreatePending(true);
       setCreateError(null);
     };
-    return <MainScreen phase={connectionPhase} pairedFingerprint={pairing.info.fingerprint} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} promptError={promptError} promptClear={promptClear} workdirs={sessionWorkdirsState} createError={createError} createdSessionId={createdSessionId} dismissedSessionId={dismissedSessionId} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval} onSendPrompt={(sessionId, prompt) => sendCommand('turn.start', { session_id: sessionId, prompt }, 'Not connected. The prompt was not sent.')} onInterrupt={(sessionId) => sendCommand('turn.interrupt', { session_id: sessionId }, 'Not connected. Interrupt was not sent.')} onCreateSession={createSession}/>;
+    return <MainScreen phase={connectionPhase} pairedFingerprint={pairing.info.fingerprint} {...(keyStorage ? { keyStorage } : {})} approvalInFlight={approvalInFlight} approvalError={approvalError} promptError={promptError} promptClear={promptClear} workdirs={sessionWorkdirsState} createError={createError} createPending={createPending} createdSessionId={createdSessionId} dismissedSessionId={dismissedSessionId} onReconnect={() => { if (browserSession.current) browserSession.current.reconnect(); else setReconnect((current) => current + 1); }} onResolveApproval={resolveApproval} onSendPrompt={(sessionId, prompt) => sendCommand('turn.start', { session_id: sessionId, prompt }, 'Not connected. The prompt was not sent.')} onInterrupt={(sessionId) => sendCommand('turn.interrupt', { session_id: sessionId }, 'Not connected. Interrupt was not sent.')} onCreateSession={createSession}/>;
   }
   return <main><header><div><h1>Shardrail · S5 UI load</h1><p>Mock content · no provider connections</p></div><div className="controls">{pairing.kind === 'paired' ? <><span className="paired-fingerprint" aria-label="Paired daemon fingerprint" title={pairing.info.fingerprint}>{pairing.info.fingerprint}</span><Button onPress={() => setReconnect((current) => current + 1)}>Reconnect</Button>{!browserMode ? <Button onPress={() => { void unpairClient(pairingApi).then(setPairing); }}>Unpair</Button> : null}</> : null}{select('Events', String(count), ['0', '5000', '50000'], (value) => updateQuery('events', value))}{select('Streams', String(streams), ['1', '4', '8'], (value) => updateQuery('streams', value))}<Button onPress={() => startStreams(streams, durationMs, runningRef, setRunning)}>Start mock streams</Button></div></header>{browserMode && pairing.kind === 'paired' && pairing.info.keyStorage === 'noble-fallback' ? <p role="note">This browser stores an extractable private key seed in IndexedDB because non-extractable WebCrypto is unavailable. Same-origin script can read it.</p> : null}<section className="status"><span>{ready ? `${eventCount().toLocaleString()} events loaded · ${streams} streams` : 'Loading'}</span><span>{transportStatus} · Metrics: window.__s5Metrics()</span></section><TextField className="composer"><Label>Message</Label><Input aria-label="Message composer" value={draft} placeholder="Type to measure input responsiveness" onChange={handleInput}/><output className="draft-preview" data-draft={draft} aria-live="polite">{draftPreview(draft)}</output></TextField><Profiler id="transcript" onRender={profiler}><Transcript ready={ready} onInput={() => {}} requestRange={requestRange}/></Profiler><footer>{benchStatus || 'Mock content only'} · {running ? 'Streams running' : 'Ready'}</footer></main>;
 }

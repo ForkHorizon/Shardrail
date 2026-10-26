@@ -78,8 +78,10 @@ test('a browser with session.create can start a session and send a prompt', asyn
   await expect(page.getByRole('option')).toHaveCount(1);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'New session' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the daemon to confirm the new session.' })).toBeVisible();
   const option = page.getByRole('option').filter({ hasText: /[0-9a-f]{8}-/ });
   await expect(option).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the daemon to confirm the new session.' })).toHaveCount(0);
   const sessionId = (await option.innerText()).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0];
   if (!sessionId) throw new Error('new session id was not shown');
   await expect(page.getByRole('heading', { name: `Events for ${sessionId}` })).toBeVisible();
@@ -252,6 +254,7 @@ test('a browser without session.create has no New session button', async ({ brow
     await pair(page, false);
     await expect(page.getByRole('button', { name: 'New session' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Workdir/ })).toHaveCount(0);
+    await expect(page.getByText('Session creation unavailable')).toBeVisible();
   } finally {
     await context.close();
   }
