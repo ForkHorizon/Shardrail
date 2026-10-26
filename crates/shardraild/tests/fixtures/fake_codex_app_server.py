@@ -128,9 +128,10 @@ def thread_result(params):
             "cliVersion": "0.160.0",
             "createdAt": 0,
             "cwd": cwd,
-            "ephemeral": True,
+            "ephemeral": params.get("ephemeral") is True and MODE != "bad-ephemeral",
             "id": "thread-1",
             "modelProvider": "fake",
+            "path": "/tmp/rollout-thread-1.jsonl" if MODE == "thread-path" else None,
             "preview": "",
             "projectId": None,
             "sessionId": "session-1",
@@ -390,7 +391,28 @@ def main():
                 reply(message["id"], result)
             continue
         if method == "thread/start":
-            reply(message["id"], thread_result(message.get("params") or {}))
+            result = thread_result(message.get("params") or {})
+            reply(message["id"], result)
+            notified_thread = dict(result["thread"])
+            if MODE == "notification-path":
+                notified_thread["path"] = "/tmp/rollout-notification.jsonl"
+            if MODE == "notification-ephemeral":
+                notified_thread["ephemeral"] = False
+            notify("thread/started", {"thread": notified_thread})
+            if MODE in ("mcp-item-started", "mcp-item-updated", "mcp-item-completed"):
+                item_method = {
+                    "mcp-item-started": "item/started",
+                    "mcp-item-updated": "item/updated",
+                    "mcp-item-completed": "item/completed",
+                }[MODE]
+                notify(item_method, {"item": {"id": "mcp-item", "type": "mcpToolCall"}})
+                return
+            if MODE == "dynamic-tool-item":
+                notify("item/started", {"item": {"id": "dynamic-tool", "type": "dynamicToolCall"}})
+                return
+            if MODE == "mcp-item-method":
+                notify("item/mcpToolCall/progress", {"itemId": "mcp-item"})
+                return
             if MODE == "mcp-startup":
                 notify(
                     "mcpServer/startupStatus/updated",

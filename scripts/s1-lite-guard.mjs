@@ -83,22 +83,11 @@ function isCodexConfigWarning(event) {
   return method === 'warning' && /unrecognized configuration setting/.test(String(event?.payload?.params?.message ?? ''));
 }
 
-// thread/started reports where Codex itself writes the session rollout
-// (~/.codex/sessions/...). That is Codex's own log, not the model reading ~/.codex,
-// so only that one field is dropped before the check.
-function withoutRolloutPath(event) {
-  const thread = event?.payload?.params?.thread;
-  if (event?.kind !== 'provider_notice' || event?.payload?.method !== 'thread/started') return event;
-  if (!thread || typeof thread.path !== 'string' || !/\/\.codex\/sessions\/[^/]+\/[^/]+\/[^/]+\/rollout-[^/]+\.jsonl$/.test(thread.path)) return event;
-  const { path: _rollout, ...rest } = thread;
-  return { ...event, payload: { ...event.payload, params: { ...event.payload.params, thread: rest } } };
-}
-
 export function codexHomePathHits(events) {
   const hits = [];
   for (const event of Array.isArray(events) ? events : []) {
     if (isCodexConfigWarning(event)) continue;
-    const text = JSON.stringify(withoutRolloutPath(event));
+    const text = JSON.stringify(event);
     const markers = CODEX_HOME_MARKERS.filter((marker) => text.includes(marker));
     if (!markers.length) continue;
     const at = text.indexOf(markers[0]);

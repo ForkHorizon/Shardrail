@@ -237,11 +237,22 @@ pub(crate) fn thread_routing_accepted(
     if result.get("cwd").and_then(Value::as_str) != Some(workdir) {
         return Err("codex thread cwd does not match the configured workdir".into());
     }
+    if !thread_ephemeral_accepted(result.get("thread")) {
+        return Err("codex thread is not ephemeral or has a rollout path".into());
+    }
     if !approval_policy_asks(result.get("approvalPolicy")) {
         return Err("codex approval policy is weaker than untrusted".into());
     }
     confirmed_sandbox(result.get("sandbox"))
         .ok_or_else(|| "codex sandbox is not workspace-write or read-only".into())
+}
+
+fn thread_ephemeral_accepted(thread: Option<&Value>) -> bool {
+    thread
+        .and_then(|value| value.get("ephemeral"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && thread.is_some_and(|value| value.get("path") == Some(&Value::Null))
 }
 
 fn approval_policy_asks(value: Option<&Value>) -> bool {
@@ -1291,7 +1302,8 @@ impl CodexRun {
                         "cwd": self.workdir,
                         "approvalPolicy": APPROVAL_POLICY,
                         "sandbox": "workspace-write",
-                        "approvalsReviewer": "user"
+                        "approvalsReviewer": "user",
+                        "ephemeral": true
                     }),
                     PendingRpc::ThreadStart,
                 );
@@ -1696,6 +1708,23 @@ impl CodexRun {
     ) -> bool {
         if method.starts_with("mcpServer/") {
             self.stop_mcp(ready, method).await;
+            return true;
+        }
+        let item_type = params.pointer("/item/type").and_then(Value::as_str);
+        if method.starts_with("item/mcpToolCall/")
+            || (method.starts_with("item/")
+                && matches!(item_type, Some("mcpToolCall" | "dynamicToolCall")))
+        {
+            self.stop_mcp(ready, method).await;
+            return true;
+        }
+        if method == "thread/started" && !thread_ephemeral_accepted(params.get("thread")) {
+            self.reject_routing(
+                ready,
+                "codex thread is not ephemeral or has a rollout path",
+                &params,
+            )
+            .await;
             return true;
         }
         match method {
@@ -2988,7 +3017,7 @@ mod tests {
             "approvalsReviewer": "user",
             "cwd": workdir,
             "sandbox": {"type": "workspaceWrite"},
-            "thread": {"id": "thread-1"}
+            "thread": {"id": "thread-1", "ephemeral": true, "path": null}
         });
         assert!(
             thread_routing_accepted(&weak, workdir)
@@ -3000,7 +3029,7 @@ mod tests {
             "approvalsReviewer": "user",
             "cwd": workdir,
             "sandbox": {"type": "workspaceWrite"},
-            "thread": {"id": "thread-1"}
+            "thread": {"id": "thread-1", "ephemeral": true, "path": null}
         });
         assert!(thread_routing_accepted(&granular, workdir).is_err());
         let ok = json!({
@@ -3008,7 +3037,7 @@ mod tests {
             "approvalsReviewer": "user",
             "cwd": workdir,
             "sandbox": {"type": "workspaceWrite"},
-            "thread": {"id": "thread-1"}
+            "thread": {"id": "thread-1", "ephemeral": true, "path": null}
         });
         assert_eq!(
             thread_routing_accepted(&ok, workdir).unwrap(),
@@ -3019,7 +3048,7 @@ mod tests {
             "approvalsReviewer": "user",
             "cwd": workdir,
             "sandbox": {"type": "readOnly"},
-            "thread": {"id": "thread-1"}
+            "thread": {"id": "thread-1", "ephemeral": true, "path": null}
         });
         assert_eq!(
             thread_routing_accepted(&read_only, workdir).unwrap(),
