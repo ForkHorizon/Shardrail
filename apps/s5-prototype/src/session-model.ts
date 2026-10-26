@@ -89,7 +89,6 @@ const CHECK_DEFS: readonly { id: string; label: string }[] = [
   { id: 'boundary', label: 'No boundary-breaking approval allowed on this host' },
   { id: 'gaps', label: 'Known provider gaps' },
 ];
-const BINDING_CHECK_IDS = ['sandbox', 'bypass', 'routing'] as const;
 const UNVERIFIED_BANNER = 'approvals not protected. Sandbox, approval routing, containment, and the other session checks are not verified.';
 
 export function sessionChecks(events: readonly JournalEvent[], sessionId: string): VerificationCheck[] {
@@ -129,12 +128,11 @@ export function hostBanner(checks: readonly VerificationCheck[], sessionSelected
   if (verified.length === 0) return UNVERIFIED_BANNER;
   const failed = checks.filter((item) => item.status === 'failed').map((item) => item.id);
   const open = checks.filter((item) => item.status === 'not verified').map((item) => item.id);
-  const parts = [`${verified.length} of ${checks.length} session checks verified`];
-  if (failed.length > 0) parts.push(`${failed.join(', ')} failed`);
-  if (open.length > 0) parts.push(`${open.join(', ')} not verified`);
-  const summary = `${parts.join('; ')}.`;
-  const bindingVerified = BINDING_CHECK_IDS.every((id) => checks.find((item) => item.id === id)?.status === 'verified');
-  return bindingVerified ? summary : `approvals not protected. ${summary}`;
+  const causes: string[] = [];
+  if (failed.length > 0) causes.push(`${failed.join(', ')} failed`);
+  if (open.length > 0) causes.push(`${open.join(', ')} not verified`);
+  if (causes.length === 0) causes.push('Host protection is not established by these session checks');
+  return `approvals not protected. ${causes.join('. ')}.`;
 }
 
 const TERMINAL_APPROVAL_STATES = new Set(['allowed', 'denied', 'expired', 'withdrawn', 'delivered_unconfirmed']);

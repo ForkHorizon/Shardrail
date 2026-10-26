@@ -229,14 +229,21 @@ async function main() {
     }));
     await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
     result.banner = await page.locator('.host-banner').innerText();
+    const expectedChecks = ['sandbox', 'bypass', 'routing', 'config', 'widening', 'containment', 'credentials', 'writes', 'identity', 'mcp', 'boundary', 'gaps'];
+    for (const id of expectedChecks) {
+      if (!latestChecks.has(id)) throw new Error(`missing session check item in live run: ${id}`);
+    }
+    if (result.checklist.length !== 12) throw new Error(`expected 12 checklist items, got ${result.checklist.length}`);
     for (const row of result.checklist) {
       if (row.status === 'verified' && (typeof row.source !== 'string' || row.source.length === 0 || typeof row.checked_at_ms !== 'number' || row.checked_at_ms <= 0)) {
         throw new Error(`checklist item ${row.item_id} is verified without daemon evidence`);
       }
     }
-    const bindingVerified = ['sandbox', 'bypass', 'routing'].every((id) => latestChecks.get(id)?.payload?.status === 'verified');
-    if (bindingVerified && result.banner.includes('approvals not protected')) {
-      throw new Error(`banner still says approvals are not protected while sandbox, bypass, and routing are verified: ${result.banner}`);
+    if (!result.banner.includes('approvals not protected')) {
+      throw new Error(`banner dropped approvals not protected: ${result.banner}`);
+    }
+    if (/\d+ of \d+ session checks verified/.test(result.banner)) {
+      throw new Error(`banner adds checklist rows into one verdict: ${result.banner}`);
     }
     await writeResult(resultDir, result, daemonLog);
     if (!shardrailUnchanged) throw new Error('Shardrail or worktree git status changed during the live run');

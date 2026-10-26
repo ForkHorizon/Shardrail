@@ -86,17 +86,19 @@ test('a browser with session.create can start a session and send a prompt', asyn
   await expect(page.locator('[data-check=sandbox]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=bypass]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=routing]')).toHaveAttribute('data-status', 'verified');
-  await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'verified');
+  await expect(page.locator('[data-check=config]')).toHaveAttribute('data-status', 'not verified');
+  await expect(page.locator('[data-check=config]')).toContainText('hash');
   await expect(page.locator('[data-check=widening]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=mcp]')).toHaveAttribute('data-status', 'verified');
   await expect(page.locator('[data-check=mcp]')).toContainText('MCP servers disabled');
   await expect(page.locator('[data-check=mcp]')).toContainText('zero MCP');
-  for (const id of ['containment', 'credentials', 'writes', 'identity', 'boundary', 'gaps']) {
+  for (const id of ['config', 'containment', 'credentials', 'writes', 'identity', 'boundary', 'gaps']) {
     await expect(page.locator(`[data-check=${id}]`)).toHaveAttribute('data-status', 'not verified');
-    await expect(page.locator(`[data-check=${id}]`)).toContainText(/process group|SSH_AUTH_SOCK|workspace-write|socket|journal|read-only/);
+    await expect(page.locator(`[data-check=${id}]`)).toContainText(/hash|process group|SSH_AUTH_SOCK|workspace-write|socket|journal|read-only/);
   }
-  await expect(page.locator('.host-banner')).not.toContainText('approvals not protected');
-  await expect(page.locator('.host-banner')).toContainText('6 of 12 session checks verified');
+  await expect(page.locator('.host-banner')).toContainText('approvals not protected');
+  await expect(page.locator('.host-banner')).toContainText('config, containment, credentials, writes, identity, boundary, gaps not verified');
+  await expect(page.locator('.host-banner')).not.toContainText('session checks verified');
 });
 
 test('a failed sandbox echo shows failed and blocks the next prompt', async ({ page }) => {

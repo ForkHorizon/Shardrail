@@ -164,8 +164,8 @@ test('checklist rows follow the latest daemon evidence and a missing row stays n
   }
   assert.equal(checks.some((item) => /protected/i.test(item.status)), false);
   const failedBanner = hostBanner(checks, true);
-  assert.match(failedBanner, /approvals not protected/);
-  assert.match(failedBanner, /5 of 12 session checks verified/);
+  assert.match(failedBanner, /^approvals not protected\./);
+  assert.doesNotMatch(failedBanner, /\d+ of \d+/);
   assert.match(failedBanner, /sandbox failed/);
   assert.match(failedBanner, /containment, credentials, writes, identity, boundary, gaps not verified/);
   const ready = sessionChecks([
@@ -173,9 +173,13 @@ test('checklist rows follow the latest daemon evidence and a missing row stays n
     checkEvent(14, 'sandbox', 'verified', 'thread/start sandbox echo', 'workspace-write', 1_700_000_000_200),
   ], 'session-a');
   const banner = hostBanner(ready, true);
-  assert.doesNotMatch(banner, /approvals not protected/);
-  assert.match(banner, /6 of 12 session checks verified/);
+  assert.match(banner, /^approvals not protected\./);
+  assert.doesNotMatch(banner, /\d+ of \d+/);
   assert.match(banner, /containment, credentials, writes, identity, boundary, gaps not verified/);
+  const allVerified = hostBanner(ready.map((item) => ({ ...item, status: 'verified' as const })), true);
+  assert.match(allVerified, /^approvals not protected\./);
+  assert.match(allVerified, /Host protection is not established/);
+  assert.doesNotMatch(allVerified, /\d+ of \d+/);
   const other = sessionChecks(events, 'session-b');
   assert.equal(other.every((item) => item.status === 'not verified' && item.source === 'no daemon evidence'), true);
   assert.match(hostBanner(other, true), /^approvals not protected\. Sandbox, approval routing/);

@@ -188,6 +188,11 @@ test('the live script gates on the env and resets only through the guard', () =>
   assert.match(source, /codexHomePathHits\(/);
   assert.match(source, /mcpServer\/startupStatus\/updated/);
   assert.match(source, /rev-parse', '--git-common-dir'/);
+  assert.match(source, /missing session check item in live run/);
+  assert.match(source, /expected 12 checklist items/);
+  assert.match(source, /banner dropped approvals not protected/);
+  assert.match(source, /banner adds checklist rows into one verdict/);
+  assert.doesNotMatch(source, /banner still says approvals are not protected while/);
   assert.doesNotMatch(source, /\/Users\/daliys/);
   const guardAt = source.indexOf('assertRepoIdentity(');
   const resetAt = source.indexOf("'reset', '--hard'");
