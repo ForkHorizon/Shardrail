@@ -200,6 +200,9 @@ test('allow once stays pending until a second confirmation and the journal, and 
   await expect(page.locator('#session-prompt')).toHaveValue('offline draft');
   await expect(blocked.getByRole('button', { name: 'Deny' })).toBeDisabled();
   await expect(blocked.getByRole('button', { name: 'Allow once' })).toBeDisabled();
+  await expect(blocked.getByText('Disconnected — responses can’t be sent until the daemon reconnects.')).toBeVisible();
+  await expect(blocked.locator('.approval-actions button').first()).toHaveAttribute('data-disabled', 'true');
+  await expect(blocked.locator('.approval-actions button').first()).toHaveCSS('cursor', 'not-allowed');
   await expect(blocked).not.toContainText(/\ballowed\b/, { useInnerText: true });
   await startDaemon();
   await page.getByRole('button', { name: 'Reconnect' }).click();

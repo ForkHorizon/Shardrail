@@ -47,7 +47,7 @@
 .untrusted-content.clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
 .untrusted-content p { margin-block: var(--space-1); }
 .description-empty { margin: 0; color: var(--color-muted); font-size: var(--text-sm); }
-.description-toggle { min-height: 36px !important; margin-block-start: var(--space-1); padding-inline: 0 !important; color: var(--color-untrusted) !important; background: transparent !important; border-color: transparent !important; font-size: var(--text-xs); }
+.description-toggle { min-height: 44px !important; margin-block-start: var(--space-1); padding-inline: 0 !important; color: var(--color-untrusted) !important; background: transparent !important; border-color: transparent !important; font-size: var(--text-xs); }
 .checklist-section, .prompt, .approvals { display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
 .approvals { scroll-margin-block-start: var(--space-3); }
 .checklist-heading, .approval-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
@@ -83,6 +83,8 @@
 .approval-actions > button { min-height: 44px; }
 .approval-actions .button-danger { color: var(--color-danger-deny) !important; background: color-mix(in oklch, var(--color-danger-deny) 9%, var(--color-surface)) !important; border-color: var(--color-danger-deny) !important; }
 .approval-actions .button-allow { border-color: var(--color-text) !important; }
+.approval-actions > button[data-disabled], .approval-actions > button[aria-disabled='true'] { opacity: .7; color: var(--color-muted) !important; background: var(--color-surface) !important; border-color: var(--color-border) !important; cursor: not-allowed; }
+.approval-offline-note { padding: var(--space-2) var(--space-3); color: var(--color-muted) !important; background: var(--color-surface); border-inline-start: 3px solid var(--color-muted); font-size: var(--text-sm); }
 .allow-confirm-note { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); color: var(--color-approval-wait) !important; background: var(--color-bg); border: 1px solid var(--color-approval-wait); border-radius: var(--radius-sm); }
 .prompt { gap: var(--space-2); }
 .prompt label { font-weight: 600; }
