@@ -28,14 +28,19 @@ export async function confirmPairing(state: PairingState, api: PairingApi, now: 
   if (state.kind !== 'confirming') return state;
   const currentTime = () => typeof now === 'function' ? now() : now;
   if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
+  let current: PairingInfo;
   try {
-    const current = await api.inspect();
-    if (current.daemonPublicKey !== state.info.daemonPublicKey) return { kind: 'mismatch', info: current };
-    if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
+    current = await api.inspect();
+  } catch {
+    return { kind: 'error', message: 'Could not read daemon identity. Check that the daemon is available, then retry.', info: state.info };
+  }
+  if (current.daemonPublicKey !== state.info.daemonPublicKey) return { kind: 'mismatch', info: current };
+  if (currentTime() >= state.expiresAt) return { kind: 'expired', info: state.info };
+  try {
     const clientId = await api.pair(current.daemonPublicKey, enrollmentCode, acknowledgeFallback);
     return stateFromInfo({ ...current, clientId, pinnedPublicKey: current.daemonPublicKey });
   } catch {
-    return { kind: 'error', message: 'Pairing failed. Check that the daemon is available, then retry.', info: state.info };
+    return { kind: 'error', message: 'Enrollment failed. Check the one-time code, daemon connection, and browser key acknowledgement, then retry.', info: state.info };
   }
 }
 

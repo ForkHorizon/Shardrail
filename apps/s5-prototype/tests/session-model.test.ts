@@ -122,6 +122,10 @@ test('coalesces chunk text and summarizes activity while preserving raw payloads
   assert.equal(transcriptItems([event(6, 'session-a', 'unfamiliar_event', { keep: true })])[0]?.presentation, 'raw');
 });
 
+test('keeps session check events in the checklist instead of repeating them in activity', () => {
+  assert.deepEqual(transcriptItems([event(1, 'session-a', 'session_check_result', { check: 'sandbox' })]), []);
+});
+
 test('activity timestamps reject non-finite values', () => {
   assert.equal(activityTimestamp(Number.NaN), null);
   assert.equal(activityTimestamp(Number.POSITIVE_INFINITY), null);
@@ -137,7 +141,7 @@ test('the verification checklist stays not verified and does not claim a single 
   assert.equal(summary.checks.some((item) => item.status === 'verified' || /protected/i.test(item.status)), false);
   assert.equal(summary.checks[0]?.lastChecked, null);
   assert.equal(summary.checks.every((item) => item.source === 'no daemon evidence'), true);
-  assert.equal(hostBanner(summary.checks, false), 'approvals not protected. No session is selected.');
+  assert.equal(hostBanner(summary.checks, false), 'approvals not protected. Sandbox, approval routing, containment, and the other session checks are not verified. No session is selected.');
   assert.match(hostBanner(summary.checks, true), /approvals not protected/);
 });
 
@@ -269,7 +273,7 @@ test('a confirmed approval leaves the in-flight set and a later disconnect does 
   const lost = reduceApprovalFlight(sent, { type: 'disconnect' });
   assert.equal(lost.inFlight.size, 0);
   assert.match(lost.error ?? '', /not confirmed/);
-  assert.match(reduceApprovalFlight(sent, { type: 'blocked' }).error ?? '', /not allowed/);
+  assert.match(reduceApprovalFlight(sent, { type: 'blocked' }).error ?? '', /response was not sent/);
   assert.equal(reduceApprovalFlight(sent, { type: 'journal', kind: 'agent_message_chunk', approvalId: 'approval-1' }), sent);
 });
 

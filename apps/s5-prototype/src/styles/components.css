@@ -11,13 +11,14 @@
 .react-aria-Select [data-slot='trigger'] { display: flex; justify-content: space-between; width: 100%; text-align: start; }
 .react-aria-Popover { z-index: var(--z-popover); max-width: min(90vw, 28rem); padding: var(--space-1); overflow: auto; color: var(--color-text); background: var(--color-raised); border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: var(--shadow-popover); }
 .react-aria-ListBox { display: grid; gap: 2px; }
-.react-aria-ListBoxItem { min-height: 40px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); cursor: pointer; }
+.react-aria-ListBoxItem { min-height: 44px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); cursor: pointer; }
 .react-aria-ListBoxItem[data-focused], .react-aria-ListBoxItem[data-selected] { background: color-mix(in oklch, var(--color-accent) 14%, var(--color-surface)); }
-.host-banner, .inline-alert { padding: var(--space-3) var(--space-4); color: var(--color-warning); background: color-mix(in oklch, var(--color-warning) 12%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-warning) 45%, var(--color-border)); border-radius: var(--radius-md); }
+.host-banner, .inline-alert { padding: var(--space-3) var(--space-4); color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-warning) 45%, var(--color-border)); border-radius: var(--radius-md); }
 .empty-state, .skeleton { padding: var(--space-4); color: var(--color-muted); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
 .icon { width: 1.25rem; height: 1.25rem; flex: none; }
 .status-pill { font-size: var(--text-xs); }
 .status-pill { display: inline-flex; align-items: center; min-height: 28px; padding-inline: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-pill); color: var(--color-muted); background: var(--color-surface); }
+.status-pill { flex: none; white-space: nowrap; }
 .status-warning { color: var(--color-warning); border-color: currentColor; }
 .status-danger { color: var(--color-danger-deny); border-color: currentColor; }
 .status-success { color: var(--color-success); border-color: currentColor; }

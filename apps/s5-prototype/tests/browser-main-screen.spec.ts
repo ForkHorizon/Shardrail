@@ -88,13 +88,13 @@ async function createSession() {
 
 test('lists a paired session, streams it, denies once, and reconnects without duplicates', async ({ page }) => {
   await pair(page);
-  await expect(page.getByRole('listbox', { name: 'Sessions' }).or(page.getByText('No sessions yet.'))).toBeVisible();
+  await expect(page.locator('.workspace')).toBeVisible();
   const sessionId = await createSession();
   const option = page.getByRole('option', { name: new RegExp(sessionId) });
   await expect(option).toBeVisible();
   await expect(option).toContainText(/agent unknown|fake-acp/);
   await option.focus();
-  await expect(page.getByRole('heading', { name: `Events for ${sessionId}` })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('heading', { name: `Events for ${sessionId.slice(0, 8)}` })).toBeVisible({ timeout: 10_000 });
   await expect(page.locator('.session-facts')).toContainText('fake-acp');
   await expect(page.locator('.session-facts')).toContainText('open');
   await expect(page.locator('[data-check]')).toHaveCount(12);
@@ -110,6 +110,11 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await expect(approvalEvent).toContainText('"approval_id"');
   await expect(approvalEvent).toContainText('"options"');
   await approvalEvent.getByRole('button', { name: 'Raw event' }).click();
+  const untrustedDescription = page.locator('.approval-card .untrusted');
+  await expect(untrustedDescription.getByRole('button', { name: 'Agent’s description · untrusted' })).toBeVisible();
+  await expect(untrustedDescription.getByText('Run fixture command')).toBeHidden();
+  await untrustedDescription.getByRole('button', { name: 'Agent’s description · untrusted' }).click();
+  await expect(untrustedDescription.getByText('Run fixture command')).toBeVisible();
   await approvalLink.click();
   await expect(page.locator(await approvalLink.getAttribute('href') ?? '')).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -153,7 +158,7 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   const nextOption = page.getByRole('option', { name: new RegExp(nextSessionId) });
   await expect(nextOption).toBeVisible();
   await nextOption.focus();
-  await expect(page.getByRole('heading', { name: `Events for ${nextSessionId}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Events for ${nextSessionId.slice(0, 8)}` })).toBeVisible();
   await expect(page.locator('.transcript .event[data-kind=agent_message_chunk] .body').getByText('fake streamed response 0')).toHaveCount(1);
   await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('heading', { name: /Events for / })).toBeVisible();
@@ -171,15 +176,22 @@ test('allow once stays pending until a second confirmation and the journal, and 
   await expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible();
   const allow = page.getByRole('button', { name: 'Allow once' });
   await expect(allow).toBeEnabled();
+  await allow.focus();
+  await page.keyboard.press('Enter');
+  await expect(allow).toBeVisible();
+  await expect(approval.getByRole('note')).toHaveCount(0);
   await allow.click();
-  await expect(approval).toContainText('pending');
+  const warning = approval.getByRole('note');
+  await expect(warning).toBeVisible();
+  expect(await warning.evaluate((node) => { const rect = node.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight; })).toBe(true);
+  await expect(approval.locator('.approval-state')).toHaveText(/Pending/);
   await expect(approval).not.toContainText(/\ballowed\b/, { useInnerText: true });
   await page.getByRole('button', { name: 'Confirm allow once' }).click();
   await expect(approval).toContainText(/\ballowed\b/, { timeout: 15_000, useInnerText: true });
 
   const blockedId = await createSession();
   await page.getByRole('option', { name: new RegExp(blockedId) }).focus();
-  await expect(page.getByRole('heading', { name: `Events for ${blockedId}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Events for ${blockedId.slice(0, 8)}` })).toBeVisible();
   const blocked = page.getByRole('article', { name: /Approval/ });
   await expect(blocked.getByRole('button', { name: 'Allow once' })).toBeEnabled();
   await stopDaemon(state.daemonPid);
@@ -188,14 +200,13 @@ test('allow once stays pending until a second confirmation and the journal, and 
   await expect(page.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
   await expect(page.locator('.blocked-reason')).toContainText('Your draft stays here');
   await expect(page.locator('#session-prompt')).toHaveValue('offline draft');
-  await blocked.getByRole('button', { name: 'Allow once' }).click();
-  await blocked.getByRole('button', { name: 'Confirm allow once' }).click();
-  await expect(page.getByRole('alert')).toContainText(/not allowed|not confirmed/);
+  await expect(blocked.getByRole('button', { name: 'Deny' })).toBeDisabled();
+  await expect(blocked.getByRole('button', { name: 'Allow once' })).toBeDisabled();
   await expect(blocked).not.toContainText(/\ballowed\b/, { useInnerText: true });
   await startDaemon();
   await page.getByRole('button', { name: 'Reconnect' }).click();
   await expect(page.getByText('Connected · browser WebSocket')).toBeVisible({ timeout: 15_000 });
-  await expect(blocked).toContainText(/withdrawn/, { timeout: 15_000 });
+  await expect(blocked.locator('.approval-state')).toHaveText(/Withdrawn/);
   await expect(blocked).not.toContainText(/\ballowed\b/, { useInnerText: true });
   await expect(blocked.getByRole('button', { name: 'Allow once' })).toHaveCount(0);
   await expect(blocked.getByRole('button', { name: 'Confirm allow once' })).toHaveCount(0);
@@ -268,10 +279,10 @@ test('a prompt draft stays on its session and survives a rejected send', async (
   const sessionA = await createSession();
   const sessionB = await createSession();
   await page.getByRole('option', { name: new RegExp(sessionA) }).focus();
-  await expect(page.getByRole('heading', { name: `Events for ${sessionA}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Events for ${sessionA.slice(0, 8)}` })).toBeVisible();
   await page.locator('#session-prompt').fill('draft for session A');
   await page.getByRole('option', { name: new RegExp(sessionB) }).focus();
-  await expect(page.getByRole('heading', { name: `Events for ${sessionB}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Events for ${sessionB.slice(0, 8)}` })).toBeVisible();
   await expect(page.locator('#session-prompt')).toHaveValue('');
   await page.getByRole('option', { name: new RegExp(sessionA) }).focus();
   await expect(page.locator('#session-prompt')).toHaveValue('');
@@ -291,7 +302,7 @@ test('theme choice persists and the paired shell passes axe in both themes', asy
   await pair(page);
   const sessionId = await createSession();
   await page.getByRole('option', { name: new RegExp(sessionId) }).focus();
-  await expect(page.getByRole('heading', { name: `Events for ${sessionId}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Events for ${sessionId.slice(0, 8)}` })).toBeVisible();
   await expect(page.locator('html')).not.toHaveAttribute('data-theme', 'light');
   const initial = await page.locator('html').getAttribute('data-theme');
   const firstViolations = (await new AxeBuilder({ page }).setLegacyMode().analyze()).violations;

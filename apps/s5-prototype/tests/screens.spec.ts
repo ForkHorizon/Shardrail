@@ -63,7 +63,7 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
   ] as const;
   const themes = ['light', 'dark'] as const;
   const results: string[] = [];
-  const captures: { suffix: string; page: import('@playwright/test').Page; context: import('@playwright/test').BrowserContext; capture: (number: string, name: string, ready: () => Promise<unknown>) => Promise<void> }[] = [];
+  const captures: { suffix: string; size: 'desktop' | 'phone'; page: import('@playwright/test').Page; context: import('@playwright/test').BrowserContext; capture: (number: string, name: string, ready: () => Promise<unknown>) => Promise<void> }[] = [];
   for (const variant of variants) for (const colorScheme of themes) {
     const context = await browser.newContext({ viewport: variant.viewport, colorScheme });
     const page = await context.newPage();
@@ -77,7 +77,7 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
         results.push(`SKIP ${number}-${name}-${suffix}: ${String(error).split('\n')[0]}`);
       }
     };
-    captures.push({ suffix, page, context, capture });
+    captures.push({ suffix, size: variant.size, page, context, capture });
     try {
       await page.goto(state.baseUrl);
       await capture('01', 'pairing', () => expect(page.getByRole('heading', { name: 'Pair this browser' })).toBeVisible());
@@ -95,8 +95,7 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
       await page.getByRole('textbox', { name: 'One-time enrollment code' }).fill(code);
       await page.getByRole('button', { name: 'I verified this fingerprint — pair' }).click();
       await expect(page.getByRole('status', { name: 'Connected · browser WebSocket' })).toBeVisible();
-      await capture('03', 'sessions-empty', () => expect(page.getByText('No sessions yet.')).toBeVisible());
-      await capture('04', 'new-session', () => expect(page.getByRole('button', { name: 'New session' })).toBeVisible());
+      await capture('03', 'sessions-empty', () => expect(variant.size === 'phone' ? page.locator('.phone-empty-state') : page.locator('.empty-detail')).toContainText('No sessions yet.'));
     } catch (error) {
       results.push(`SKIP remaining ${suffix}: ${String(error).split('\n')[0]}`);
     }
@@ -104,7 +103,7 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
 
   try {
     const sessionId = await createSession();
-    for (const { suffix, page, capture } of captures) {
+    for (const { suffix, size, page, capture } of captures) {
       try {
         const sessionOption = page.getByRole('option', { name: new RegExp(sessionId) });
         await expect(sessionOption).toBeVisible({ timeout: 10_000 });
@@ -113,11 +112,17 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
           await expect(page.locator('.transcript')).toContainText(/fake streamed response/);
           await expect(page.locator('.transcript')).toContainText(/tool|command|file/i);
         });
-        await capture('06', 'approval-pending', () => expect(page.getByRole('button', { name: 'Allow once' }).first()).toBeVisible());
+        await capture('06', 'approval-pending', async () => {
+          await expect(page.getByRole('button', { name: 'Allow once' }).first()).toBeVisible();
+          if (size === 'phone') {
+            const actionBounds = await page.locator('.approval-actions button').evaluateAll((nodes) => nodes.map((node) => { const rect = node.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom }; }));
+            const viewportHeight = await page.evaluate(() => window.innerHeight);
+            if (actionBounds.some(({ top, bottom }) => top < 0 || bottom > viewportHeight)) throw new Error('pending approval actions are outside the phone viewport');
+          }
+        });
         await page.getByRole('button', { name: 'Allow once' }).first().click();
-        await page.locator('.approval-actions').evaluate((actions) => { actions.scrollIntoView({ block: 'end' }); if (innerWidth <= 720) { let parent = actions.parentElement; while (parent && parent.scrollHeight <= parent.clientHeight) parent = parent.parentElement; parent?.scrollBy(0, 16); } });
         await capture('07', 'approval-confirm', () => expect(page.getByRole('button', { name: 'Confirm allow once' }).first()).toBeVisible());
-        await page.getByRole('heading', { name: 'Verification checklist' }).evaluate((heading) => heading.scrollIntoView({ block: 'center' }));
+        await page.getByRole('heading', { name: 'Verification checklist' }).evaluate((heading) => heading.scrollIntoView({ block: 'start' }));
         await capture('08', 'checklist', () => expect(page.getByRole('heading', { name: 'Verification checklist' })).toBeVisible());
       } catch (error) {
         results.push(`SKIP remaining session screens ${suffix}: ${String(error).split('\n')[0]}`);
@@ -125,11 +130,13 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
     }
     try { process.kill(state.daemonPid, 'SIGTERM'); } catch { /* already stopped */ }
     for (const { page, capture } of captures) {
+      await page.locator('.session-detail').evaluate((detail) => { detail.scrollTop = 0; });
       await capture('09', 'offline', () => expect(page.getByRole('status', { name: 'Reconnecting · browser WebSocket' })).toBeVisible({ timeout: 8_000 }));
       await capture('10', 'error', async () => {
         await page.locator('#session-prompt').fill('screenshot blocked prompt');
         await expect(page.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
         await expect(page.locator('.blocked-reason')).toContainText('Your draft stays here');
+        await page.getByRole('heading', { name: 'Prompt' }).evaluate((heading) => heading.scrollIntoView({ block: 'start' }));
       });
     }
     await startDaemon();

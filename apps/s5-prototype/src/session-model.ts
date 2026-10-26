@@ -128,7 +128,7 @@ export function sessionChecks(events: readonly JournalEvent[], sessionId: string
 export const VERIFICATION_CHECKS: readonly VerificationCheck[] = sessionChecks([], '');
 
 export function hostBanner(checks: readonly VerificationCheck[], sessionSelected: boolean) {
-  if (!sessionSelected) return 'approvals not protected. No session is selected.';
+  if (!sessionSelected) return `${UNVERIFIED_BANNER} No session is selected.`;
   const verified = checks.filter((item) => item.status === 'verified');
   if (verified.length === 0) return UNVERIFIED_BANNER;
   const failed = checks.filter((item) => item.status === 'failed').map((item) => item.id);
@@ -242,6 +242,7 @@ export function plainEventText(event: JournalEvent) {
 export function transcriptItems(events: readonly JournalEvent[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   for (const event of events) {
+    if (event.kind === 'session_check_result') continue;
     const text = agentText(event);
     const last = items.at(-1);
     if (text !== null && last?.kind === 'agent_message_chunk' && last.markdown !== null) {
@@ -334,7 +335,7 @@ export function promptClearApplies(acceptedSessionId: string | null, visibleSess
 }
 
 export function reduceApprovalFlight(state: ApprovalFlight, action: ApprovalFlightAction): ApprovalFlight {
-  if (action.type === 'blocked') return { inFlight: state.inFlight, error: 'Could not send the approval response. It was not allowed.' };
+  if (action.type === 'blocked') return { inFlight: state.inFlight, error: 'The approval response was not sent. Check the connection and try again.' };
   if (action.type === 'sent') {
     if (state.inFlight.has(action.approvalId) && state.error === null) return state;
     const inFlight = new Set(state.inFlight);
