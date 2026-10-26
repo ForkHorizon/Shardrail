@@ -185,6 +185,12 @@ test('checklist rows follow the latest daemon evidence and a missing row stays n
   assert.match(hostBanner(other, true), /^approvals not protected\. Sandbox, approval routing/);
 });
 
+test('a not-applicable checklist result stays explicit and does not count as verified', () => {
+  const checks = sessionChecks([checkEvent(1, 'mcp', 'not_applicable', 'static provider check', 'MCP is unavailable for this provider')], 'session-a');
+  assert.equal(checks.find((item) => item.id === 'mcp')?.status, 'n/a');
+  assert.equal(checklistSummary(checks).unverified, 11);
+});
+
 test('a config snapshot shows its source and a later drift fails the row', () => {
   const hash = 'ab'.repeat(32);
   const verified = checkEvent(

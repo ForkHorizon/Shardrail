@@ -126,8 +126,8 @@ test('capture the browser UI states at desktop and phone sizes in both themes', 
       await capture('09', 'offline', () => expect(page.getByText('Reconnecting · browser WebSocket')).toBeVisible({ timeout: 8_000 }));
       await capture('10', 'error', async () => {
         await page.locator('#session-prompt').fill('screenshot blocked prompt');
-        await page.getByRole('button', { name: 'Send prompt' }).click();
-        await expect(page.locator('.prompt').getByRole('alert')).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
+        await expect(page.locator('.blocked-reason')).toContainText('Your draft stays here');
       });
     }
     await startDaemon();

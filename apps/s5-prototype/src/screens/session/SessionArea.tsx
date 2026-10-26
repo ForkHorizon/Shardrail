@@ -8,8 +8,11 @@ import { InlineAlert } from '../../ui/InlineAlert';
 import { EmptyState } from '../../ui/EmptyState';
 import { Icon } from '../../ui/Icon';
 
-export function SessionArea({ sessionId, items, approvals, checklist, promptError, promptClear, approvalInFlight, approvalError, confirmingAllowId, onConfirmAllow, onResolve, onSendPrompt, onInterrupt }: {
+export function SessionArea({ sessionId, provider, status, connected, items, approvals, checklist, promptError, promptClear, approvalInFlight, approvalError, confirmingAllowId, onConfirmAllow, onResolve, onSendPrompt, onInterrupt }: {
   sessionId: string;
+  provider: string | null;
+  status: string;
+  connected: boolean;
   items: readonly TranscriptItem[];
   approvals: ReturnType<typeof approvalsForSession>;
   checklist: ReturnType<typeof checklistSummary>;
@@ -24,15 +27,18 @@ export function SessionArea({ sessionId, items, approvals, checklist, promptErro
   onInterrupt: (sessionId: string) => void;
 }) {
   return <section className="session-detail" aria-labelledby="events-heading">
-    <h2 id="events-heading">Events for {sessionId}</h2>
-    <SessionTranscript key={sessionId} sessionId={sessionId} items={items}/>
-    <PromptBox key={`prompt-${sessionId}-${promptClear && promptClearApplies(promptClear.sessionId, sessionId) ? promptClear.commandId : ''}`} sessionId={sessionId} error={promptError} onSend={onSendPrompt} onInterrupt={onInterrupt}/>
+    <header className="session-heading">
+      <div><p className="eyebrow">Session detail</p><h2 id="events-heading">Events for {sessionId}</h2></div>
+      <dl className="session-facts"><div><dt>Provider</dt><dd>{provider ?? 'Unknown provider'}</dd></div><div><dt>Status</dt><dd><span className="status-dot" aria-hidden="true"/>{status}</dd></div></dl>
+    </header>
+    <SessionTranscript key={sessionId} sessionId={sessionId} items={items} status={status}/>
+    <PromptBox key={`prompt-${sessionId}-${promptClear && promptClearApplies(promptClear.sessionId, sessionId) ? promptClear.commandId : ''}`} sessionId={sessionId} error={promptError} connected={connected} onSend={onSendPrompt} onInterrupt={onInterrupt}/>
     <VerificationChecklist checks={checklist.checks}/>
     <Approvals cards={approvals} checklist={checklist} inFlight={approvalInFlight} error={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={onConfirmAllow} onResolve={onResolve}/>
   </section>;
 }
 
-function SessionTranscript({ sessionId, items }: { sessionId: string; items: readonly TranscriptItem[] }) {
+function SessionTranscript({ sessionId, items, status }: { sessionId: string; items: readonly TranscriptItem[]; status: string }) {
   const parent = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
   // TanStack Virtual returns imperative methods that React Compiler cannot safely memoize.
@@ -46,6 +52,7 @@ function SessionTranscript({ sessionId, items }: { sessionId: string; items: rea
   }, [sessionId, items.length]);
   // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable transcript needs keyboard focus
   return <div ref={parent} className="transcript" role="region" aria-label="Session events" tabIndex={0} onScroll={() => { const el = parent.current; if (!el) return; followTail.current = isNearLiveTail(el.scrollHeight, el.scrollTop, el.clientHeight); }}>
+    <div className="transcript-heading"><h3>Activity</h3>{/running|active|in.progress/i.test(status) ? <span className="streaming-indicator"><span aria-hidden="true"/> Streaming</span> : null}</div>
     {items.length === 0 ? <EmptyState>No events yet.</EmptyState> : <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>{virtualItems.map((item) => {
       const event = items[item.index];
       return event ? <div key={event.key} data-index={item.index} ref={virtualizer.measureElement} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}><SessionEvent event={event}/></div> : null;
@@ -55,15 +62,16 @@ function SessionTranscript({ sessionId, items }: { sessionId: string; items: rea
 
 function SessionEvent({ event }: { event: TranscriptItem }) {
   const iso = activityTimestamp(event.occurredAtMs);
-  return <article className="event">
+  return <article className="event" data-kind={event.kind}>
     <div className="meta"><b>{event.kind}</b><span>{event.cursorLabel}</span>{iso ? <time dateTime={iso}>{new Date(event.occurredAtMs).toLocaleTimeString()}</time> : null}</div>
-    {event.markdown !== null ? <div className="body"><UntrustedMarkdown source={event.markdown}/></div> : <pre className="body">{event.plain}</pre>}
+    {event.markdown !== null ? <div className="body"><p className="untrusted-label">Agent message · untrusted</p><UntrustedMarkdown source={event.markdown}/></div> : <pre className="body">{event.plain}</pre>}
   </article>;
 }
 
-function PromptBox({ sessionId, error, onSend, onInterrupt }: {
+function PromptBox({ sessionId, error, connected, onSend, onInterrupt }: {
   sessionId: string;
   error: string | null;
+  connected: boolean;
   onSend: (sessionId: string, prompt: string) => void;
   onInterrupt: (sessionId: string) => void;
 }) {
@@ -71,24 +79,27 @@ function PromptBox({ sessionId, error, onSend, onInterrupt }: {
   return <section className="prompt" aria-labelledby="prompt-heading">
     <h2 id="prompt-heading">Prompt</h2>
     {error ? <InlineAlert>{error}</InlineAlert> : null}
-    <label htmlFor="session-prompt">Prompt</label>
-    <TextArea id="session-prompt" value={text} onChange={(event) => setText(event.currentTarget.value)}/>
+    <label htmlFor="session-prompt">Message to the agent</label>
+    <TextArea id="session-prompt" value={text} onChange={(event) => setText(event.currentTarget.value)} placeholder="Write a prompt…"/>
+    {text ? <details className="draft-preview"><summary>Draft preview</summary><pre>{text}</pre></details> : null}
     <div className="controls">
-      <Button isDisabled={text.trim() === ''} onPress={() => { const prompt = text.trim(); if (!prompt) return; onSend(sessionId, prompt); }}>Send prompt</Button>
-      <Button onPress={() => onInterrupt(sessionId)}>Interrupt</Button>
+      <Button isDisabled={!connected || text.trim() === ''} onPress={() => { const prompt = text.trim(); if (!prompt) return; onSend(sessionId, prompt); }}><Icon className="icon" name="send"/> Send prompt</Button>
+      <Button className="button-secondary" isDisabled={!connected} onPress={() => onInterrupt(sessionId)}><Icon className="icon" name="interrupt"/> Interrupt</Button>
     </div>
+    {!connected ? <p className="blocked-reason" role="status">Prompt and interrupt are unavailable while disconnected. Your draft stays here.</p> : null}
   </section>;
 }
 
 function VerificationChecklist({ checks }: { checks: readonly VerificationCheck[] }) {
   const unverified = checks.filter((item) => item.status === 'not verified').length;
+  const failed = checks.filter((item) => item.status === 'failed').length;
+  const verified = checks.filter((item) => item.status === 'verified').length;
   return <section className="checklist-section" aria-labelledby="checklist-heading">
-    <h2 id="checklist-heading" tabIndex={-1}><Icon className="icon" name="checklist"/> Verification checklist</h2>
-    <p>{unverified} not verified. Items are not combined into one verdict.</p>
+    <div className="checklist-heading"><div><h2 id="checklist-heading" tabIndex={-1}><Icon className="icon" name="checklist"/> Verification checklist</h2><p>{failed} failed · {unverified} not verified · {verified} verified. Items are not combined into one verdict.</p></div><span className="check-count">{checks.length} checks</span></div>
     <ul className="checklist">
       {checks.map((item) => <li key={item.id} data-check={item.id} data-status={item.status}>
-        <span>{item.label}</span>
-        <span>{item.status}</span>
+        <span className="check-label">{item.label}</span>
+        <span className={`check-status check-${item.status === 'n/a' ? 'not-applicable' : item.status.replaceAll(' ', '-')}`}><Icon className="icon" name={item.status === 'verified' ? 'verified' : item.status === 'failed' ? 'failed' : 'not-verified'}/>{item.status === 'n/a' ? 'not applicable' : item.status}</span>
         <span>{item.source}. {item.detail} Last checked: {item.lastChecked ?? 'never'}.</span>
       </li>)}
     </ul>
@@ -111,18 +122,20 @@ function Approvals({ cards, checklist, inFlight, error, confirmingAllowId, onCon
     {cards.map((card) => {
       const confirming = confirmingAllowId === card.approvalId && card.state === 'pending' && !card.actionDisclosed;
       const busy = inFlight.has(card.approvalId);
-      return <article key={card.approvalId} aria-label={`Approval ${card.approvalId}`}>
+      const stateLabel = ({ pending: 'Pending', responding: 'Sending response', responded_unacked: 'Response sent · awaiting acknowledgement', delivered_unconfirmed: 'Outcome unconfirmed', denied: 'Denied', allowed: 'Allowed once', expired: 'Expired', withdrawn: 'Withdrawn' } as Record<string, string>)[card.state] ?? card.state;
+      return <article key={card.approvalId} className={`approval-card approval-${card.state}`} aria-label={`Approval ${card.approvalId}`}>
+        <div className="approval-heading"><h3>Approval request</h3><span className={`approval-state state-${card.state}`}><Icon className="icon" name={card.state === 'denied' || card.state === 'expired' || card.state === 'withdrawn' ? 'deny' : card.state === 'allowed' ? 'verified' : 'pending'}/>{stateLabel}</span></div>
         {card.actionDisclosed ? <DisclosedAction card={card}/> : <p className="caution">action not disclosed by provider</p>}
         <p>Tool {card.toolKind}</p>
         <p>Sandbox: {card.sandbox ? revealHiddenCharacters(card.sandbox) : 'not disclosed'}</p>
         <p>Approval axis: once</p>
         {card.toolCallId ? <p>Tool call id <span className="session-id">{card.toolCallId}</span></p> : null}
-        <p>{card.state}{card.decision ? ` · ${card.decision}` : ''}</p>
+        <p className="approval-meta">{card.state}{card.decision ? ` · ${card.decision}` : ''}</p>
         <p>Checklist: {checklist.failed} failed, {checklist.unverified} not verified.</p>
         <Button onPress={() => document.getElementById('checklist-heading')?.focus()}>Open the full checklist</Button>
         {card.agentTitle || card.agentDescription ? <div className="untrusted"><b>Agent’s description · untrusted</b><UntrustedMarkdown source={[card.agentTitle, card.agentDescription].filter(Boolean).join('\n\n')}/></div> : null}
-        {card.state === 'pending' ? <div className="controls">
-          <Button className="button-danger" isDisabled={busy || !card.binding || !card.denyOnceOptionId} onPress={() => { if (card.binding && card.denyOnceOptionId) onResolve(card.approvalId, card.denyOnceOptionId, card.binding); }}>Deny</Button>
+        {card.state === 'pending' ? <div className="controls approval-actions">
+          <Button className="button-danger" isDisabled={busy || !card.binding || !card.denyOnceOptionId} onPress={() => { if (card.binding && card.denyOnceOptionId) onResolve(card.approvalId, card.denyOnceOptionId, card.binding); }}><Icon className="icon" name="deny"/> Deny</Button>
           <Button className="button-allow" isDisabled={busy || !card.binding || !card.allowOnceOptionId} onPress={() => {
             if (!card.binding || !card.allowOnceOptionId) return;
             if (!card.actionDisclosed && !confirming) { onConfirmAllow(card.approvalId); return; }
@@ -130,7 +143,7 @@ function Approvals({ cards, checklist, inFlight, error, confirmingAllowId, onCon
             onResolve(card.approvalId, card.allowOnceOptionId, card.binding);
           }}>{confirming ? 'Confirm allow once' : 'Allow once'}</Button>
         </div> : null}
-        {confirming ? <p role="note">Allow once sends this response even though the provider did not disclose the action. Choose Confirm allow once to send it, or Deny.</p> : null}
+        {confirming ? <p className="allow-confirm-note" role="note"><Icon className="icon" name="warning"/> Allow once sends this response even though the provider did not disclose the action. Choose Confirm allow once to send it, or Deny.</p> : null}
       </article>;
     })}
   </section>;

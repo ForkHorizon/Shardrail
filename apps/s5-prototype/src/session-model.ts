@@ -49,7 +49,7 @@ export type ApprovalBindingEcho = {
 export type VerificationCheck = {
   id: string;
   label: string;
-  status: 'verified' | 'not verified' | 'failed';
+  status: 'verified' | 'not verified' | 'failed' | 'n/a';
   source: string;
   detail: string;
   lastChecked: string | null;
@@ -111,7 +111,7 @@ export function sessionChecks(events: readonly JournalEvent[], sessionId: string
     if (!evidence || evidence.source.length === 0) {
       return { id: item.id, label: item.label, status: 'not verified' as const, source: NO_DAEMON_EVIDENCE, detail: 'The daemon has not journaled this check.', lastChecked: null };
     }
-    const status = evidence.status === 'verified' ? 'verified' as const : evidence.status === 'failed' ? 'failed' as const : 'not verified' as const;
+    const status = evidence.status === 'verified' ? 'verified' as const : evidence.status === 'failed' ? 'failed' as const : ['n/a', 'not_applicable', 'not applicable'].includes(evidence.status) ? 'n/a' as const : 'not verified' as const;
     const lastChecked = activityTimestamp(evidence.checkedAt);
     if (status === 'verified' && lastChecked === null) {
       return { id: item.id, label: item.label, status: 'not verified' as const, source: evidence.source, detail: evidence.detail, lastChecked: null };

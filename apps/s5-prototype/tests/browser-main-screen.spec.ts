@@ -95,6 +95,11 @@ test('lists a paired session, streams it, denies once, and reconnects without du
   await expect(option).toContainText(/agent unknown|fake-acp/);
   await option.focus();
   await expect(page.getByRole('heading', { name: `Events for ${sessionId}` })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.session-facts')).toContainText('fake-acp');
+  await expect(page.locator('.session-facts')).toContainText('open');
+  await expect(page.locator('[data-check]')).toHaveCount(12);
+  await expect(page.locator('.check-status .icon')).toHaveCount(12);
+  await expect(page.locator('.transcript')).toContainText('Agent message · untrusted');
   await expect(page.getByText('fake streamed response 0')).toHaveCount(1);
   const deny = page.getByRole('button', { name: 'Deny' });
   await expect(deny).toBeEnabled();
@@ -158,6 +163,10 @@ test('allow once stays pending until a second confirmation and the journal, and 
   await expect(blocked.getByRole('button', { name: 'Allow once' })).toBeEnabled();
   await stopDaemon(state.daemonPid);
   await expect(page.getByText('Reconnecting · browser WebSocket')).toBeVisible();
+  await page.locator('#session-prompt').fill('offline draft');
+  await expect(page.getByRole('button', { name: 'Send prompt' })).toBeDisabled();
+  await expect(page.locator('.blocked-reason')).toContainText('Your draft stays here');
+  await expect(page.locator('#session-prompt')).toHaveValue('offline draft');
   await blocked.getByRole('button', { name: 'Allow once' }).click();
   await blocked.getByRole('button', { name: 'Confirm allow once' }).click();
   await expect(page.getByRole('alert')).toContainText(/not allowed|not confirmed/);
@@ -246,6 +255,9 @@ test('a prompt draft stays on its session and survives a rejected send', async (
   await page.getByRole('option', { name: new RegExp(sessionA) }).focus();
   await expect(page.locator('#session-prompt')).toHaveValue('');
   await page.locator('#session-prompt').fill('keep this prompt');
+  await expect(page.getByText('Draft preview')).toBeVisible();
+  await page.getByText('Draft preview').click();
+  await expect(page.locator('.draft-preview pre')).toHaveText('keep this prompt');
   await page.getByRole('button', { name: 'Send prompt' }).click();
   await expect(page.locator('.prompt').getByRole('alert')).toContainText('codex session is not ready');
   await expect(page.locator('#session-prompt')).toHaveValue('keep this prompt');
