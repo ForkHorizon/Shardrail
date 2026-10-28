@@ -44,6 +44,7 @@
 | EV-30 | community C# ACP libraries (`acp-csharp`, `Acp.Net`) found by search | C# ACP client libraries exist; no official ACP C# SDK; quality not evaluated | Unverified (existence only) | 2026-10-18 |
 | EV-31 | <https://hermes-agent.nousresearch.com/docs/developer-guide/acp-internals> | Hermes routes only "dangerous terminal commands" through `session/request_permission`; file edits never request approval; `allow_session` scope | Verified | 2026-10-18 |
 | EV-32 | `planning/spikes/s9-lite-macos.md` (spike S9-lite run on macOS 27.0.1 arm64) | macOS: `proc_listpidspath(PROC_ALL_PIDS)` with inherited sentinel-fd discovers descendants across `setsid()` and double-fork orphan adoption by `launchd` (query ~170–230 ms); drops immediately on process death; active evasion via `closefrom(3)` before `setsid` completely bypasses both process-group and sentinel-fd containment | Verified | 2026-10-28 |
+| EV-33 | `planning/spikes/d67-hub-cloudflare.md` (spike D67/D69/D70 run on Node.js WebCrypto) | Cloudflare Workers + Durable Object Hub: outbound daemon connection binds machine DO without open inbound ports; browser and daemon establish end-to-end authenticated encryption (ECDH + AES-256-GCM); zero plaintext leakage at the Hub across all audit logs (D70 strictly verified); active tampering at the Hub fails AEAD tag verification (fails closed); daemon device revocation severs client socket with code 4003; crypto and relay overhead < 1 ms RTT | Verified | 2026-10-28 |
 
 ## 2. Original draft sources (accessed 2026-10-13 by the drafting agent, not re-read)
 

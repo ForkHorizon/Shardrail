@@ -141,3 +141,13 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
 - **Discovery & termination:** `proc_listpidspath(PROC_ALL_PIDS, 0, path, ...)` reliably discovers all descendant PIDs holding the sentinel path, and terminating the discovered PIDs (`SIGTERM` + `SIGKILL`) cleans up the entire process tree.
 - **Active evasion boundary:** Confirmed empirically that `fork → exit → setsid → closefrom(3) → sleep` closes the sentinel file descriptor, evading both process group and sentinel-fd tracking. This confirms the documented residual risk (D43, 06 §8, 15 C9) requiring macOS containment to remain explicitly best-effort.
 - **Query latency:** Benchmarked `proc_listpidspath(PROC_ALL_PIDS)` at ~170–230 ms per full-system vnode scan, establishing that sentinel discovery is suitable for on-demand termination sweeps and periodic health checks, but not high-frequency polling.
+
+### D67/D69/D70 Cloudflare Workers Hub candidate spike (2026-10-28)
+
+- Executed the authorized D67/D69/D70 Hub architecture spike (`spikes/d67-hub-cloudflare/run_hub_spike.mjs`, see `planning/spikes/d67-hub-cloudflare.md` and EV-33).
+- **Outbound daemon connection (D67):** Verified that the home/server daemon initiates an outbound WebSocket connection to an untrusted Cloudflare Worker + Durable Object keyed by opaque machine ID (`m_...`), eliminating incoming port forwarding, dynamic DNS, or UPnP.
+- **End-to-end encryption (D69):** Verified browser client and daemon perform ECDH key agreement over the Hub relay to derive 256-bit AES-GCM session keys; all commands, turn data, approvals, and tokens are encrypted before relaying.
+- **Strict D70 metadata boundary:** Audited all frames observed by the Hub across all test scenarios; confirmed zero plaintext leakage of machine names, agent IDs, commands, approvals, file paths, diffs, or credentials. Only opaque machine IDs and online/offline status frames are visible.
+- **Tampering defense:** Demonstrated that active Hub bit-flipping / payload alteration fails AEAD authentication tag verification, causing the recipient to fail closed.
+- **Device revocation:** Verified daemon revocation terminates the client session key and directs the Hub Durable Object to sever the client socket (`code: 4003 Client Revoked`).
+- **Benchmark:** Relaying 100 sequential encrypted frames demonstrated median round-trip overhead of 0.173 ms (p95: 0.326 ms), confirming negligible performance penalty for browser-side WebCrypto encryption.
