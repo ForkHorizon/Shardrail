@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import process from 'node:process';
 import test from 'node:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -95,15 +96,15 @@ test('benchmark rejects a packaged app older than its frontend source', () => {
 test('benchmark cleanup kills a process tree and confirms the root is gone', async () => {
   const pidFile = join(tmpdir(), `s5-cleanup-${process.pid}.pid`);
   const baselineFile = join(tmpdir(), `s5-cleanup-${process.pid}.baseline`);
-  const root = spawn('bash', ['-c', `sleep 60 & echo $! > '${pidFile}'; wait`], { stdio: 'ignore' });
+  const root = spawn('bash', ['-c', `sleep 5 & echo $! > '${pidFile}'; wait`], { stdio: 'ignore' });
   let unrelated: ReturnType<typeof spawn> | undefined;
   let webkit: ReturnType<typeof spawn> | undefined;
   try {
     const currentProcesses = spawnSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' }).stdout;
     const webkitBaseline = currentProcesses.split('\n').filter((line) => /com\.apple\.WebKit\.(WebContent|Networking|GPU)( |$)/.test(line)).map((line) => line.trim().split(/\s+/, 1)[0]).join('\n');
     writeFileSync(baselineFile, webkitBaseline);
-    unrelated = spawn(process.execPath, ['-e', "process.title='s5-ui';setTimeout(()=>{},60000)"], { stdio: 'ignore' });
-    webkit = spawn(process.execPath, ['-e', "process.title='com.apple.WebKit.WebContent';setTimeout(()=>{},60000)"], { stdio: 'ignore' });
+    unrelated = spawn(process.execPath, ['-e', "process.title='s5-ui';setTimeout(()=>{},30*1000)"], { stdio: 'ignore' });
+    webkit = spawn(process.execPath, ['-e', "process.title='com.apple.WebKit.WebContent';setTimeout(()=>{},30*1000)"], { stdio: 'ignore' });
     for (let attempt = 0; attempt < 100; attempt++) {
       const command = spawnSync('ps', ['-o', 'command=', '-p', String(webkit.pid)], { encoding: 'utf8' }).stdout;
       if (command.includes('com.apple.WebKit.WebContent')) break;
@@ -116,12 +117,12 @@ test('benchmark cleanup kills a process tree and confirms the root is gone', asy
     const result = spawnSync('bash', ['cleanup-bench-processes.sh', String(root.pid), baselineFile], { encoding: 'utf8', timeout: 10_000 });
     assert.equal(result.status, 0, result.stderr);
     await rootExited;
-    await new Promise<void>((resolveExit) => webkit!.once('exit', () => resolveExit()));
     for (const pid of [root.pid!, childPid]) {
       const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
       assert.ok(!state || state.startsWith('Z'), `process ${pid} is still running (${state})`);
     }
     assert.equal(spawnSync('kill', ['-0', String(unrelated.pid)]).status, 0, 'unrelated s5-ui process was killed');
+    assert.equal(spawnSync('kill', ['-0', String(webkit.pid)]).status, 0, 'unrelated WebKit helper was killed');
   } finally {
     root.kill('SIGKILL');
     unrelated?.kill('SIGKILL');

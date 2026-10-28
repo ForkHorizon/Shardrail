@@ -73,7 +73,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
         {selected ? <>
           <Button className="button-quiet mobile-back" onPress={() => setMobileDetail(false)}><Icon className="icon" name="back"/> Back to sessions</Button>
           <SessionArea sessionId={selected.id} provider={selected.agentKind} status={selected.status} connected={phase === 'connected'} items={items} approvals={approvals} checklist={checklist} promptError={promptError} promptClear={promptClear} approvalInFlight={approvalInFlight} approvalError={approvalError} confirmingAllowId={confirmingAllowId} onConfirmAllow={setConfirmingAllowId} onResolve={onResolveApproval} onSendPrompt={onSendPrompt} onInterrupt={onInterrupt}/>
-        </> : <section className="session-detail empty-detail" aria-labelledby="events-heading"><h2 id="events-heading">Sessions</h2><EmptyState><span className="empty-mark"><Icon name="workspace"/></span><strong>No sessions yet.</strong><span>Create a session to start monitoring local agent activity.</span></EmptyState></section>}
+        </> : <section className="session-detail empty-detail" aria-labelledby="events-heading"><h2 id="events-heading">Sessions</h2><EmptyState><span className="empty-mark"><Icon name="workspace"/></span><strong>{sessions.length === 0 ? 'No sessions yet.' : 'Select a session'}</strong><span>{sessions.length === 0 ? 'Create a session to start monitoring local agent activity.' : 'Choose a session from the list to view its activity, approvals, and verification checks.'}</span></EmptyState></section>}
       </div>
     </div>
   </main>;

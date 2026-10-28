@@ -45,7 +45,7 @@ function SessionTranscript({ sessionId, items, status }: { sessionId: string; it
   const followTail = useRef(true);
   // TanStack Virtual returns imperative methods that React Compiler cannot safely memoize.
   // eslint-disable-next-line react-hooks/incompatible-library
-  const virtualizer = useVirtualizer({ count: items.length, getScrollElement: () => parent.current, estimateSize: () => 72, overscan: 8, measureElement: (element) => element.getBoundingClientRect().height });
+  const virtualizer = useVirtualizer({ count: items.length, getScrollElement: () => parent.current, estimateSize: () => 72, overscan: 8, gap: 8, measureElement: (element) => element.getBoundingClientRect().height });
   const virtualizerRef = useRef(virtualizer);
   virtualizerRef.current = virtualizer;
   const virtualItems = virtualizer.getVirtualItems();
