@@ -1,3 +1,18 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-export default defineConfig({ plugins: [react({ babel: { plugins: [['babel-plugin-react-compiler', {}]] } })], clearScreen: false, server: { strictPort: true } });
+
+export default defineConfig({
+  plugins: [react({ babel: { plugins: [['babel-plugin-react-compiler', {}]] } })],
+  clearScreen: false,
+  server: { strictPort: true },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          aria: ['react-aria-components'],
+          markdown: ['react-markdown', 'rehype-sanitize'],
+        },
+      },
+    },
+  },
+});
