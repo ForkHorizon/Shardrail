@@ -1,10 +1,11 @@
 # 07 — Performance and Resource Budgets
+> 2026-10-23: D64 clarified to sample viewport-intersecting rows only; D65 sets the minimum measured-row gate to 0.5%. The W4-m night re-gate shows both Tauri and Swift miss 50 ms by many times and grow similarly with event count, pointing to daemon-to-UI delivery as the bottleneck. D49 retains Tauri + React; optimize delivery next. See the [W4-m result](../spikes/wt-coordinator/apps/s5-prototype/bench-results/w4m-reeval/b4.md).
 
-> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. **Every number here is a proposed acceptance budget, not a measurement.** Nothing has been measured yet. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): B16 split warm/cold, B11 a target, measurement load for a solo developer. 2026-10-19 (owner): U1 answered — reference machine is Daliys's own Mac.
+> Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. Budgets remain proposed acceptance limits; S5 provides partial measurements on the reference Mac (Daliys's MacBook Pro M5, 32 GB, macOS 27.0.1): B3 idle median is 113.7 MB / 180 MB (final re-run; ≈396 MB median under 50k×8 load), and B5 native matched 2,096/2,100 keystrokes by the first frame (max 17 ms); B5 budget per D58. W4-m's D64/D65-gated B4 re-gate misses the proposed target in every valid cell. See [S5 results](spikes/s5-ui.md), D49, D64 and D65. Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): B16 split warm/cold, B11 a target, measurement load for a solo developer. 2026-10-19 (owner): U1 answered — reference machine is Daliys's own Mac.
 
 ## 1. Where the cost is
 
-Memory is dominated by the WebView and the provider processes (Codex native binary and possibly its npm wrapper, Python for Hermes, Node + CLI per Claude session, Grok's binary). The daemon language matters less than not embedding Chromium and not keeping extra processes "just in case". Therefore: no Electron, no shared provider process until a spike allows it, no Hermes browser tools set up by Shardrail, and provider memory always reported in its own column, never hidden in the daemon budget. Model network latency is outside Shardrail's budgets.
+Memory is dominated by the WebView and the provider processes (Codex native binary and possibly its npm wrapper, Python only if Hermes is added in a later phase (not a Phase 1 dependency, D48), Node + CLI per Claude session, Grok's binary). The daemon language matters less than not embedding Chromium and not keeping extra processes "just in case". Therefore: no Electron, no shared provider process until a spike allows it, no Hermes browser tools set up by Shardrail, and provider memory always reported in its own column, never hidden in the daemon budget. Model network latency is outside Shardrail's budgets.
 
 ## 2. Budgets
 
@@ -14,9 +15,9 @@ Reference machine: Daliys's own current Apple Silicon Mac (U1, owner 2026-10-19)
 | --- | --- | --- | --- |
 | B1 | daemon RSS idle ≤ 40 MB after 60 s | `shardraild`, 0 sessions | process sample |
 | B2 | ≤ 15 MB per idle session projection in the daemon | daemon only | RSS difference |
-| B3 | ≤ 180 MB idle | **total physical footprint** of the app plus all `com.apple.WebKit.*` helper processes, empty transcript | `footprint` / Activity Monitor over the process tree |
-| B4 | p95 ≤ 50 ms from daemon receipt of an event to the painted frame | local, 1 active session | spans in daemon + frame mark; one host clock calibrated by round trip |
-| B5 | composer input fits a 16 ms frame with an empty turn | UI | input trace |
+| B3 | ≤ 180 MB idle; **S5 final: idle median 113.7 MB (max 115.0) of 180, pass; under 50k×8 load ≈396 MB median, reported separately (D61)** | **total physical footprint** of the app plus all `com.apple.WebKit.*` helper processes, empty transcript | `footprint` / Activity Monitor over the process tree; S5 measurement |
+| B4 | p95 ≤ 50 ms from daemon receipt to `performance.now()` at entry to the second rAF callback after commit, for rows whose layout interval intersects the viewport (D64); callback-latency proxy, not scanout. Minimum measured rows: `min(events, max(20, ceil(events × 0.005)))` (D65). **W4-m re-gate: at 5k, valid Tauri p95s 127–422 ms and Swift 175–368 ms; at 50k, valid Tauri 1-stream p95s 2,566–2,915 ms and Swift 1,723–3,604 ms. All miss 50 ms; Tauri 50k 4/8-stream cells have no valid per-row samples.** | local, 1 active session | daemon receipt timestamp mapped to the page clock; viewport-intersecting row callback mark; see D64, D65 and W4-m re-gate |
+| B5 | **≥ 95% of keystrokes visible in the next frame (first rAF within 16.67 ms), plus one physical-keyboard check (D58)**; S5 native: 2,096/2,100 (99.8%), raw max 17 ms | UI | input trace; S5 used synthetic input and recorded loaded samples separately |
 | B6 | cold start to ready window ≤ 1.5 s | shell + daemon listening | timestamps, no provider login |
 | B7 | session list visible ≤ 1 s after `kill -9` | daemon + SQLite | integration test |
 | B8 | over 8 h, daemon RSS ≤ 1.3× its 10-minute value (1 active + 2 idle sessions); 72 h soak: same, WAL ≤ 64 MiB, WebView footprint ≤ B3 + 150 MB | daemon, WebView | soak harness; provider leaks reported separately |

@@ -1,4 +1,5 @@
 # 01 — Product and Requirements
+> 2026-10-20 (owner): D49–D54 recorded — React retained on partial S5 evidence; journal opens atomically without following symlinks; daemon refuses network/synced data filesystems; Codex is first in P1a; tokio/clap/nix are allowed daemon dependencies; contracts remain generated with client helpers in `packages/client`.
 
 > Part of the Shardrail architecture plan. Status: **candidate, not owner-approved**. See [00-INDEX](00-INDEX.md). Revised 2026-10-18 after the independent review ([15](15-independent-review.md)): F7, F17 clarified; F23–F25 added. 2026-10-18 (owner): all code is written by AI coding agents (N13, D44). 2026-10-19 (owner): internal-use scope (D45). 2026-10-19 (owner): single-user scope (D46); N8 trivially met. 2026-10-19 (owner): N10 aligned with D47 (U21). 2026-10-19 (owner): Hermes not in Phase 1 (D48).
 

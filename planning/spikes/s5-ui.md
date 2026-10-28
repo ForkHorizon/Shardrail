@@ -1,13 +1,16 @@
 # S5 — UI stack under load
 
-- **Spike:** S5 (10 §2) · **Measurement date:** 2026-10-21 · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
-- **Code:** `apps/s5-prototype/` · **Status:** B3 measured; W4-d B5 50k×4 recheck meets target; W4-h B4 event loss and hidden-window sampling fixed and verified in one follow-up smoke, with p95 still above target
+- **Spike:** S5 (10 §2) · **Measurement dates:** 2026-10-20 (Phase 0 B3/B5), 2026-10-22 (W4-i B4), 2026-10-23 (W4-m D64/D65 re-gate) · **Machine:** MacBook Pro Mac17,2, Apple M5, 32 GB unified memory, macOS 27.0.1, arm64
+- **Code:** Phase 0 prototype in `spikes/s5-ui/`; W4-i/W4-j/W4-l/W4-m Tauri harness in `apps/s5-prototype/` and Swift/AppKit spike in `apps/s5-swift/` on the `p1a/coordinator` worktree · **Status:** B3 passes its budget. The B5 composer matrix meets D58's first-frame-rate requirement; physical-keyboard verification remains pending. B4 measured across Tauri 2 and Swift/AppKit under D64/D65; both stacks miss the 50 ms budget by 2–70×. Available valid results show similar latency growth with event count and point to the daemon→UI delivery path, but do not isolate the cause; Tauri has no valid 50k×4/×8 samples. D49 retains Tauri 2 + React 19. B4 is parked as known performance debt (owner, 2026-10-23); delivery throughput optimization and a night Tauri B4 rerun at 0.5% are later backlog items. Under D66 (2026-10-23), Phase 1 is browser-first (the same React UI in a normal browser over loopback WebSocket; Tauri shell as a later desktop port).
 
 ## 1. Goal and scope
 
-Measure the React 19 / TypeScript / Vite prototype in the real Tauri 2 macOS release app (system WKWebView) and in Playwright WebKit and Chromium. The workload includes an empty transcript, 5,000 or 50,000 events, and 1, 4, or 8 mock streams at 75 tokens/s per stream. No provider account, credentials, model, or model API was used; streams are deterministic local fixtures.
+Evaluate whether the React 19 / TypeScript / Vite UI and Tauri 2 macOS release app (system WKWebView) satisfy memory (B3 idle ≤180 MB), input responsiveness (B5 ≥95% first-frame match, ≤16.67 ms), and streaming event latency (B4 p95 ≤50 ms) under load. Workloads include an empty transcript, 5,000 or 50,000 events, and 1, 4, or 8 mock streams at 75 tokens/s per stream. Streams are deterministic local fixtures; no real provider account, credentials, model, or model API was used.
 
-This note records B3 and B5 results and the W4-f live readiness and incomplete B4 attempts from the S5 prototype. It does not change D3 or select a stack fallback. The B4 endpoint was corrected to a second rAF callback after React commits a live-tail row; the prior callback-only measurements ended before paint. The local event-creation follow-up metric remains a separate render proxy.
+Current stack and product alignment:
+- **D49 stack confirmation (2026-10-23):** Tauri 2 + React 19 is retained. A native Swift/AppKit list spike (`apps/s5-swift`) was implemented and compared against Tauri under identical workloads and semantics (W4-m re-gate). Both stacks missed B4; available results point toward delivery-path work but do not establish that a UI rewrite would not help. Tauri has no valid 50k×4/×8 samples.
+- **D66 browser-first Phase 1 (2026-10-23):** Under [18 — Browser-First Roadmap](../18-browser-first-roadmap.md), the primary Phase 1 client is the React web UI running in a standard web browser connected to the local daemon over an opt-in loopback WebSocket (`127.0.0.1`), with local one-time enrollment codes and transcript-bound Ed25519 pairing. The Tauri desktop shell is deferred as a later desktop port. Current development focuses on the browser pairing ceremony and main transcript screen; S5 results remain authoritative and directly relevant for the shared React SPA rendering pipeline (TanStack Virtual, streaming Markdown, per-frame store coalescing).
+- **UI alignment with D67–D70:** UI delivery accounts for standard OS install and data locations (D68; candidate to embed built browser UI assets into `shardraild` to eliminate version skew, data in `~/Library/Application Support/Shardrail`), multi-machine remote access (D67; SSH stdio bridge or later hub relay), hub end-to-end encryption (D69; AEAD between client and daemon), and hub metadata privacy (D70; descriptive metadata such as machine and session names is decrypted client-side in the browser UI, while the hub sees only opaque routing IDs, online/offline status, and connection leakage).
 
 ## 2. Method
 
@@ -19,7 +22,7 @@ The raw B5 timer starts in the input handler and ends in the first `requestAnima
 
 Each scenario has five repetitions in a cold group and five in a warm group. Reported B5 `median/p95` is the median and nearest-rank p95 of the five per-run raw input-to-rAF p95 values. With five runs, nearest-rank p95 is the maximum of those five values. `min–max` is the range across the per-run individual-sample minimums and maximums. The first-frame columns count DOM matches by the first qualifying rAF callback, not visible pixels. No outlier was discarded. Playwright input text starts with `/` and includes command arguments, so slash-command parsing runs on every typed character.
 
-**Interpretation of 16 ms:** a strict input-to-paint limit of `≤16 ms` sits at the nominal 60 Hz frame interval of 16.67 ms. It is not a device-independent guarantee: refresh rate and frame boundaries matter. Proposed budget wording for the owner to decide: **“At least 95% of draft updates match the committed DOM by the first rAF callback within the nominal 60 Hz frame interval (16.67 ms); report raw input-to-rAF median, p95, maximum, and callback/frame timestamps.”** This is a proposal, not a decision or an approved budget.
+**Interpretation of 16 ms:** a strict input-to-paint limit of `≤16 ms` sits at the nominal 60 Hz frame interval of 16.67 ms. It is not a device-independent guarantee: refresh rate and frame boundaries matter. D58 budget: **“At least 95% of draft updates match the committed DOM by the first rAF callback within the nominal 60 Hz frame interval (16.67 ms); report raw input-to-rAF median, p95, maximum, and callback/frame timestamps.”** This wording was adopted as D58 on 2026-10-20.
 
 ### Build, launch groups, and workload
 
@@ -32,6 +35,14 @@ The `events` result field remains the requested fixture size; `eventStoreCount` 
 ### B3 process-tree memory
 
 For each sample, the release shell and newly spawned WebKit WebContent, GPU, and Networking helpers are captured together. `footprint` physical MB and `ps` RSS MB are summed and labelled separately; pre-existing unrelated WebKit helpers are excluded. Five idle samples wait 61 seconds after launch. Five loaded samples capture the process tree 12 seconds into 50k×8 mock streaming. Report median, nearest-rank p95, and min/max; for five samples, p95 equals the maximum.
+
+### B4 streaming latency method and gates
+
+The B4 benchmark measures streaming event delivery from daemon receipt to a client paint-opportunity callback:
+- **Client connection and clock sync:** The client connects to the daemon through a local relay (or socket) using an Ed25519 key registered in an isolated per-run temporary data directory. Durable fake-agent events carry daemon wall-clock receipt timestamps. The page calibrates `Date.now()` against `performance.now()` five times per run and uses the mean offset for conversion (uncertainty ≤ ±1 ms).
+- **D64 B4 semantics (owner-approved 2026-10-22, clarified 2026-10-23):** The timer starts at the durable daemon receipt timestamp mapped to the page clock. It ends at `performance.now()` on entry to the second `requestAnimationFrame` callback after the event row is committed to the DOM and layout-visible. This measures callback latency (a paint-opportunity proxy), not completed paint or display scanout.
+- **Viewport intersection filter (W4-l overscan fix):** Virtualized rows (TanStack Virtual in React, `table.rows(in: table.visibleRect)` in Swift) are strictly filtered by layout interval (`start`/`size`) against the transcript viewport (`scrollTop`/`clientHeight`). Rows mounted only in overscan are excluded from B4 measurement; they become eligible only once they actually scroll into the viewport. Partial overlaps qualify; edge-only contact and zero-height viewports do not.
+- **D65 sample gate (delegated to AI Platform, 2026-10-23):** Minimum measured-row floor is `min(events, max(20, ceil(events × 0.005)))`. For 5,000 events, the gate requires at least 25 measured visible rows (125 across 5 repetitions). For 50,000 events, it requires at least 250 measured visible rows (1,250 across 5 repetitions). A run with fewer verified per-row samples is marked invalid and excluded from pooled latency statistics.
 
 ## 3. Results
 
@@ -46,10 +57,10 @@ Each cell is **median / nearest-rank p95 ms of the five per-run raw input-to-rAF
 | 5k × 4 streams | 15 / 16 · 1–16 · 150/150 | 15 / 15 · 1–15 · 150/150 |
 | 5k × 8 streams | 14 / 15 · 0–15 · 150/150 | 14 / 14 · 0–15 · 150/150 |
 | 50k × 1 stream | 15 / 16 · 0–16 · 150/150 | 15 / 15 · 0–16 · 150/150 |
-| 50k × 4 streams | 15 / 15 · 0–15 · 150/150 | 14 / 15 · 1–18 · 149/150 |
+| 50k × 4 streams | 15 / 15 · 0–17 · 149/150 | 14 / 16 · 0–16 · 150/150 |
 | 50k × 8 streams | 14 / 15 · 0–17 · 148/150 | 14 / 15 · 1–17 · 149/150 |
 
-In the original broad matrix, cold 50k×4 had one first-frame miss, cold 50k×8 had two, and warm 50k×8 had one: four misses, 2,096/2,100 matched (99.8%). The focused W4-d rerun below supersedes only the original 50k×4 row. The misses exceeded the nominal interval by a small margin and remain in the original data. Raw minima of 0 ms reflect timestamp resolution and do not mean physical scanout was instantaneous. The original `tauri-cold-*` and `tauri-warm-*` result files contain all 2,100 input samples and frame timestamps.
+Cold 50k×4 had one first-frame miss, cold 50k×8 had two, and warm 50k×8 had one: four misses, 2,096/2,100 matched (99.8%). The misses exceeded the nominal interval by a small margin and remain in the data. Raw minima of 0 ms reflect timestamp resolution and do not mean physical scanout was instantaneous. The `tauri-cold-*` and `tauri-warm-*` result files contain all 2,100 input samples and frame timestamps.
 
 ### B5 — Playwright WebKit
 
@@ -90,72 +101,72 @@ Across 1,880 WebKit input samples, 1,368 met the first-frame criterion; WebKit's
 
 Against the proposed 180 MB idle physical-footprint ceiling, the worst observed idle sample leaves **65.014 MB headroom**. Loaded physical footprint rises substantially; the idle ceiling should not be described as a loaded-memory pass. The loaded physical-footprint range was 198.807–460.198 MB; the RSS range was 398.623–481.149 MB. Repetition 4 had the lowest loaded physical-footprint value (198.807 MB) despite 398.623 MB RSS; the discrepancy is unexplained and needs review before treating the loaded range as stable. The largest loaded sample occurred in repetition 3. RSS and physical footprint are different measures and must not be compared as if interchangeable.
 
-### B4 — Tauri release app / WKWebView
+### B4 — Latency results and cross-stack comparison
 
-The intended native method connects the release app to the daemon through a Tauri shell relay over its Unix socket. The relay uses an Ed25519 client key registered in a per-run temporary data directory. Durable fake-agent events carry daemon wall-clock receipt timestamps; five `Date.now()`/`performance.now()` samples map daemon time to the page clock. The corrected endpoint is entry to a second rAF callback after the row commits. That callback is after the frame containing the row had a paint opportunity, so it is a valid conservative paint-opportunity proxy. It does not measure completed paint or display scanout and cannot alone prove the literal painted-frame budget. Clock mapping uncertainty is emitted in the result JSON; with no completed sample result, no run-specific uncertainty is available.
+#### Evolution of B4 measurement
 
-The original cold/warm × 5k/50k events × 1/4/8 streams × five repetitions matrix is withdrawn: automated scrolling mounted old virtualized rows seconds after their daemon receipt, and those scroll-time mounts were counted as B4 latency. Daemon subscribers also polled every 100 ms. The implementation now follows the live tail and wakes subscribers after appends.
+1. **Original Phase 0 matrix (withdrawn):** Automated scrolling mounted virtualized rows seconds after daemon receipt, polluting latency calculations; daemon subscribers also polled durable events every 100 ms. Discarded as invalid.
+2. **W4-i corrected matrix (historical):** All 60/60 planned runs were valid under the initial 1% sample gate without overscan exclusion. Overall pooled median/p95 was **900 / 3,014 ms** across 200,036 sampled rows, failing the proposed p95 ≤50 ms target. At 5k events, cell medians were ~100–230 ms; at 50k × 1 stream they reached ~2 seconds.
+3. **W4-j rework:** Introduced Tauri channels, a Rust-side windowed event store, per-frame coalescing, memoized Markdown, and fixed row heights. In-memory microbenchmarks showed the Rust store completing 50,000 JSON append/range pairs in 149.7 ms (333,948 pairs/s) and frontend projection updates taking 0.016–0.019 ms per 64-row update. These microbenchmarks confirmed in-memory efficiency but did not measure IPC/relay throughput, WKWebView rendering, or end-to-end B4 latency.
+4. **W4-l overscan correction:** Filtered virtualized rows strictly by layout interval intersection with the transcript viewport, ensuring overscan rows are not sampled until visible. Swift AppKit visible-rect sampling was confirmed. A dependency-free cross-stack comparator CLI was introduced.
+5. **W4-m re-gate and Tauri vs. Swift comparison:** Re-evaluated the matrix under D64 viewport filtering and D65 0.5% minimum sample floor.
 
-W4-f produced 16 cold 5k×1 smoke/diagnostic attempts in total; every per-run JSON explicitly reports a timeout. The initial attempts failed before readiness. A CSP violation captured during diagnosis identified the duplicate static `index.html` policy blocking Tauri's per-launch isolation iframe. After removing that meta policy and rebuilding, the packaged release app launched only through `apps/s5-prototype/b4-bench.sh` and logged the full live chain: frontend readiness received, daemon relay started, client paired, socket authenticated, session requests sent, and 5,000 daemon frames received. The smoke trace counted 5,000 durable agent chunks.
+#### W4-m re-gate results (Tauri 2 vs. Swift/AppKit)
 
-After the CSP correction, the `smoke-live`, `smoke-trace`, and `smoke-trace2` cold 5k×1 attempts timed out (75–120 seconds) without a valid B4 result. One trace recorded `connected: true`, 5,000 chunks, and zero second-rAF samples; benchmark progress did not pass its daemon-stream-complete point. The W4-f review fix now waits for completion after one successful connection, excludes lifecycle rows from the B4 population, accepts a nonzero rendered-sample count only when all configured agent chunks arrived, and disables mock autostart and synthetic scrolling for B4. Three follow-up cold 5k×1 attempts and one 10×1 diagnostic attempt also timed out without valid latency samples; all failed records are retained under `apps/s5-prototype/bench-results/w4f-20261021/` and `apps/s5-prototype/bench-results/w4f-fix*/`. The browser-side automation/collection hang remains unresolved.
+The W4-m evaluation re-gated 60 Tauri runs and 60 Swift/AppKit runs from identical workloads against D64 and D65. Swift completed 60/60 valid runs (307,160 measured rows against the 8,250 floor). Tauri produced 18/60 valid runs (15,000 saved measured rows against 8,250 floor across all attempts, but 42 runs lacked per-row sample arrays and remained invalid).
 
-The 60-run cold/warm × 5k/50k × 1/4/8 × five-repetition matrix was not run. This review pass allowed at most 20 remeasurement runs; the 60-run gate remains open. B4 median/p95 values and the ≤50 ms verdict are unavailable; the optional B5 rerun was skipped. The second-rAF endpoint remains a paint-opportunity proxy, not proof of completed paint or display scanout. Rust now records process-start-to-page and process-start-to-readiness monotonic timings; the follow-up 5k readiness logs were 381–450 ms, and the 10-event check was 359 ms. No valid B4 sample or run-specific clock uncertainty was produced.
+Latency columns below show pooled valid-row median / p95 in milliseconds.
 
-#### W4-g live smoke follow-up (2026-10-22)
+| Events | Streams | Temp | Tauri valid/total | Tauri rows/floor | Tauri med/p95 ms | Swift valid/total | Swift rows/floor | Swift med/p95 ms |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 5,000 | 1 | cold | 3/5 | 248/125 | 172 / 422 | 5/5 | 5,236/125 | 256.2 / 368.0 |
+| 5,000 | 1 | warm | 2/5 | 263/125 | 189 / 325 | 5/5 | 5,166/125 | 241.1 / 360.1 |
+| 5,000 | 4 | cold | 3/5 | 246/125 | 121 / 293 | 5/5 | 4,168/125 | 193.4 / 284.4 |
+| 5,000 | 4 | warm | 1/5 | 237/125 | 103 / 198 | 5/5 | 4,233/125 | 187.6 / 268.4 |
+| 5,000 | 8 | cold | 1/5 | 211/125 | 76 / 127 | 5/5 | 4,072/125 | 134.2 / 207.3 |
+| 5,000 | 8 | warm | 1/5 | 216/125 | 105 / 145 | 5/5 | 4,036/125 | 120.8 / 174.5 |
+| 50,000 | 1 | cold | 3/5 | 2,485/1,250 | 1,361 / 2,566 | 5/5 | 53,532/1,250 | 2,447.6 / 3,592.2 |
+| 50,000 | 1 | warm | 4/5 | 2,815/1,250 | 1,649 / 2,915 | 5/5 | 53,726/1,250 | 2,425.8 / 3,604.5 |
+| 50,000 | 4 | cold | 0/5 | 2,061/1,250 | — | 5/5 | 44,559/1,250 | 1,622.8 / 2,355.6 |
+| 50,000 | 4 | warm | 0/5 | 2,214/1,250 | — | 5/5 | 45,511/1,250 | 1,563.5 / 2,374.1 |
+| 50,000 | 8 | cold | 0/5 | 2,048/1,250 | — | 5/5 | 41,265/1,250 | 1,116.6 / 1,777.2 |
+| 50,000 | 8 | warm | 0/5 | 1,956/1,250 | — | 5/5 | 41,656/1,250 | 1,151.9 / 1,722.8 |
 
-Three cold 5k×1 smokes were run through the packaged release app with `b4=1`, each with a 120-second harness timeout. All three logs confirm frontend readiness, relay authentication, session requests, and receipt of all 5,000 daemon frames. All three timed out without a saved result: **0/3 valid smokes**. Raw timeout records and logs are under `apps/s5-prototype/bench-results/w4g-live/`.
+#### Key findings
 
-Two fixes were committed while diagnosing the missing B4 results: `a5146f8` checks row presence at layout commit and retains the sample through the second rAF even if virtualization removes the row; `148f427` schedules B4 sampling from each daemon row's layout commit. The S5 test suite passed 31/31 after both changes, lint passed, and the release app was rebuilt. The live smoke still did not save a result, so neither fix is validated end to end.
-
-The matrix was not started: **0/60 valid matrix runs**. The cold 5k×1 smoke cell has no valid sample arrays; per-cell and aggregate median/p95 are unavailable. There is no B4 pass/fail verdict against **≤50 ms**. The endpoint remains entry to a second rAF callback after layout commit, which is a paint-opportunity proxy and does not prove completed paint or display scanout. Do not infer latency from the relay frame receipt logs.
-
-#### W4-h live diagnosis (2026-10-22)
-
-Four fresh-release cold 5k×1 diagnostic smokes were run, the W4-h live-run limit. Tracing from the WKWebView showed fire-and-forget Tauri event batches outran the frontend: Rust dispatched 5,006 frames, while the frontend had received 1,006 frames and counted 995 agent chunks. The relay now waits for a frontend acknowledgement per event batch and uses a bounded 64-frame queue; a Rust test covers the acknowledgement wait.
-
-After all 5,000 agent chunks reached the frontend, the final smoke's stderr trace reported `visibility=hidden`, `focused=false`, `committedRows=0`, and `samples=0`; those fields are absent from the saved result artifact because that packaged bundle predated the source change. The app had been started as a background executable, leaving WKWebView rAF sampling suspended. The attempted `open -a` activation could launch an unmanaged duplicate, so it has been removed; the B4 page load now shows and focuses its own Tauri window. One follow-up smoke verified this activation. B4 skips unrelated synthetic composer typing before waiting for its daemon stream.
-
-The second attempt was accepted by the former count-only gate with 17 samples, but reported B4 median/p95 of 77,158/77,461 ms and had no visibility fields. It is excluded as an invalid hidden-window measurement. The W4-h harness required a visible page, every requested chunk, and at least `min(events, max(20, 1% of events))` samples; this was the pre-D65 floor, now 0.5%. It records focus but does not gate on it because rAF depends on visibility.
-
-The final diagnostic POST returned HTTP 200, but the saved sample count was zero and the harness rejected it. Valid smokes: **0/4**. The full matrix was not started: **0/60 valid runs**; every cell is 0/5 with median/p95 unavailable. The ≤50 ms verdict stays undetermined. The measurement endpoint remains the second rAF opportunity after row commit; it does not prove paint completion or display scanout. Logs are under `apps/s5-prototype/bench-results/w4h/`.
-
-#### W4-h review-fix smoke (2026-10-22)
-
-One follow-up cold 5k×1 smoke passed with a visible, focused page, all 5,000 chunks, and 751 second-rAF samples (15.02% coverage). Its median/p95 were 579/733 ms, above the proposed ≤50 ms target. This is one valid diagnostic run, not enough to determine the budget verdict; the 60-run matrix remains 0/60. The pre-D65 gate required at least `min(events, max(20, 1% of events))` samples; this run's 751 samples exceed its 50-sample floor. Raw logs and result JSON are under `/Users/daliys/Daliys/Shardrail/spikes/reviews9/w4h-fix-smoke/`.
-
-After the smoke, the relay was changed headlessly to keep up to four 64-frame batches in flight while retaining exact acknowledgements and a bounded queue. The live smoke predates this final relay window and does not verify its latency effect; no second smoke was run under the one-smoke review limit.
-
-#### W4-i full B4 matrix (2026-10-22)
-
-The fresh packaged release app completed all 60 cold/warm × 5k/50k × 1/4/8-stream runs, five repetitions per cell. The D64 endpoint is the second `requestAnimationFrame` callback after daemon-row layout commit, accepted by Daliys; the result remains a paint-opportunity proxy. All 60 runs passed the then-current 1% harness gate (visible page and all requested fake-agent chunks); D65 later lowers the sample floor to 0.5%. Page focus was true in all runs. No failed or missing run records: raw JSON, app/daemon/server logs, timestamps, and per-run sample coverage are under `apps/s5-prototype/bench-results/w4i/`.
-
-Latency percentiles pool the individual row samples across the five valid runs in each cell (median uses the midpoint for even populations; p95 is nearest-rank). The overall population is 200,036 samples from 1,650,000 requested events (12.12% coverage), with median/p95 **900/3,014 ms**. All twelve cell p95 values exceed the proposed **≤50 ms** budget. Per-run sample count and coverage are in `run-coverage.csv`; the full table and verdict are in `/Users/daliys/Daliys/Shardrail/spikes/reviews9/w4i-matrix-report.md`.
-
-Every app log contains non-fatal `ResizeObserver loop completed with undelivered notifications` reports (9,367 total occurrences). The runner also logs an expected initial localhost health-check connection refusal while the results server starts; it recovered before each run. These warnings did not prevent result collection or cleanup. Sampling covers mounted live-tail rows only; it does not establish completed paint or display scanout.
-
-Each one-repetition runner invocation labels its internal query/log `r1`; the outer per-run folder and `run.log` carry the intended repetition number. Result JSON files are stored with the folder's run label. The report documents removal of wrapper-created false missing-result sentinels while retaining all 60 actual result payloads.
-
-B5's 50k×4 recheck completed five repetitions per launch group in the packaged release app, with the original 50k events, four local mock streams, and unchanged 16.67 ms first-frame criterion. Cold repetitions matched 30/30 each (raw input-to-rAF p95: 15, 14, 13, 15, 15 ms; group 150/150, 100%). Warm repetitions matched 30/30, 30/30, 30/30, 30/30, and 29/30 (raw p95: 15, 14, 14, 15, 14 ms; group 149/150, 99.33%). Combined: 299/300 (99.67%), above D58's ≥95% first-frame budget. The five-run median/nearest-rank p95 of per-run raw p95s were 15/15 ms cold and 14/15 ms warm. Raw records are in `spikes/s5-ui/results-w4d/b5-recheck/`.
+- **Both stacks fail the proposed ≤50 ms target:** At 5k events, valid Tauri medians range ~76–189 ms (p95 127–422 ms, provisional on 51–171 valid row samples per cell; 211–263 measured rows across all attempts); Swift medians range 121–256 ms (specifically 120.8–256.2 ms, p95 174.5–368.0 ms). At 50k×1 stream, Tauri valid medians reach ~1,361–1,649 ms (p95 2,566–2,915 ms) and Swift medians reach ~2,438 ms (2,425.8–2,447.6 ms, p95 3,592.2–3,604.5 ms). For 50k×4/×8 streams, Tauri has no valid data (0/5 runs met the sample floor with valid per-row arrays), while Swift medians are ~1,120–1,620 ms (1,116.6–1,622.8 ms, p95 1,722.8–2,374.1 ms).
+- **Results point toward delivery-path work:** For valid 1-stream cells, both stacks' latency grows by roughly an order of magnitude from 5k to 50k events; Swift shows similar growth at 4 and 8 streams. Tauri has no valid 50k×4/×8 data, so those workloads cannot support a cross-stack comparison. The results point toward daemon-to-UI delivery as a bottleneck, but do not isolate its cause. D49 retains Tauri 2 + React 19.
+- **Decision impact:** D49 retained Tauri 2 + React 19. Swift/AppKit remains a reference spike only.
 
 ### Other observations
 
-The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up proxy. Scroll, frame, heap, and long-task diagnostics remain in the raw per-run JSON; WebKit does not expose all browser diagnostics available in Chromium.
+The local `mockCreationToMountedRowFollowupP95` remains only a render-follow-up proxy. Scroll, frame, heap, and long-task diagnostics remain in the raw per-run JSON; WebKit does not expose all browser diagnostics available in Chromium. The retention cap for the Rust-side event history remains open (13 §1b); the prototype retains all durable rows so prior ranges remain available.
 
 ## 4. Verdict
 
-- **B3 idle:** The whole Tauri/WebKit process tree measures below 180 MB physical footprint in all five new samples, with 61.229 MB of worst-sample headroom. Loaded 50k×8 usage is separately reported and exceeds 180 MB.
-- **B5:** The original broad matrix did not meet the ≥95% first-frame budget for every native scenario. Its 50k×4 row is superseded by the focused W4-d rerun, which matched 299/300 (99.67%). This does not replace results for the other scenarios. The original matrix's native aggregate was 2,096/2,100; note `spikes/reviews4/n3-final.md` quotes 2,099/2,100 and WebKit 1,734/1,880, while original result files give 2,096/2,100 and 1,368/1,880. WebKit had 512 first-frame misses across 1,880 inputs; warm 5k×8 and 50k scenarios showed raw run-level p95s around 371–401 ms. Chromium met the first-frame criterion in all 1,880 inputs and stayed below 10 ms raw maxima. Strict `≤16 ms` is near the nominal 60 Hz frame interval of 16.67 ms, so the owner should decide whether to specify a raw-time limit, a first-frame rate, or both. The owner adopted the first-frame-rate wording as D58 (2026-10-20).
-- **B4:** No matrix verdict. W4-h found event-batch loss without frontend backpressure and hidden-window rAF suspension (`visibility=hidden`, zero committed rows/samples). The relay now waits for matching frontend batch acknowledgements, and the benchmark focuses its own Tauri window. One follow-up 5k×1 smoke passed the corrected collection gates but reported median/p95 of 579/733 ms, above the proposed ≤50 ms target. The 60-run matrix remains 0/60 and the budget verdict is undetermined. The second-rAF endpoint is a paint-opportunity proxy, not proof of completed paint.
-- **B4 W4-i matrix (2026-10-22):** The full packaged-release matrix completed: 60/60 runs passed the then-current visibility, chunk-count, and 1% sample-floor gates; D65 later lowers the sample floor to 0.5%. Pooled D64 sample median/p95: 900/3,014 ms (200,036 samples from 1,650,000 requested events; 12.12% coverage), exceeding the proposed ≤50 ms target. Every cell p95 also exceeded 50 ms. Per-run coverage and raw records are in `apps/s5-prototype/bench-results/w4i/`; the full report is `/Users/daliys/Daliys/Shardrail/spikes/reviews9/w4i-matrix-report.md`. The second-rAF endpoint remains a paint-opportunity proxy over mounted live-tail rows, not proof of completed paint or scanout. Repeated non-fatal `ResizeObserver loop completed with undelivered notifications` messages appeared in all 60 app logs.
-- **Stack decision:** D49's B4 requirement remains open until the corrected measurement matrix is rerun. No stack decision follows from the withdrawn B4 values. The native input path is synthetic, so a physical-keyboard confirmation remains useful before treating B5 as final user-perceived latency evidence.
+- **B3 idle (Pass):** The Tauri/WebKit process tree physical footprint measures 113.708 MB median (114.986 MB max) across five idle samples, well below the 180 MB ceiling (65.014 MB headroom). Loaded 50k×8 physical footprint rises to ~396 MB median and is reported separately under D61.
+- **B5 keystroke responsiveness (Measured first-frame rate passes):** 2,096/2,100 keystrokes matched the committed DOM by the first qualifying rAF callback within 16.67 ms (99.8% pass rate, raw maximum 17 ms), meeting D58's ≥95% requirement. The D58 physical-keyboard verification remains pending.
+- **B4 streaming event latency (Fails budget; parked as deferred debt):** Every valid cell in both Tauri and Swift exceeds the proposed 50 ms p95 budget (by 2–8× at 5k and 20–70× at 50k). On 2026-10-23, the owner parked B4 as known performance debt: it does not block Phase 1 progress (S1-lite and core spikes proceed). Daemon-to-UI throughput optimization and a night Tauri B4 rerun at 0.5% gate are deferred to a later item.
+- **UI stack decision (D49 retained):** Tauri 2 + React 19 remains the chosen UI stack. The Swift/AppKit spike confirmed that a native UI rewrite does not fix the delivery-path bottleneck.
+- **Client roadmap (D66 browser-first):** Primary Phase 1 client is the React web UI in a standard browser via an opt-in loopback WebSocket (`127.0.0.1`). Tauri is a later desktop port of the same React UI. The browser pairing ceremony and main screen represent the immediate path (see [18 — Browser-First Roadmap](../18-browser-first-roadmap.md)).
 
 ## 5. Reproduction
 
-From the repository root:
+- **Phase 0 prototype (B3/B5 historical matrix):** Committed in `spikes/s5-ui/`.
+- **W4-i through W4-m prototype and benchmarks:** Located in `apps/s5-prototype/` (Tauri harness, React prototype, and comparator) and `apps/s5-swift/` (Swift/AppKit spike) on the `p1a/coordinator` worktree.
+- **Cross-stack comparison command:**
+  ```sh
+  node apps/s5-prototype/scripts/b4-compare.mjs \
+    --tauri apps/s5-prototype/bench-results/w4j \
+    --swift apps/s5-prototype/bench-results/w4k2-swift \
+    --out apps/s5-prototype/bench-results/w4m-reeval/b4
+  ```
+- **Live benchmarking rules:** Do not run B4/B5 benchmarks, Tauri apps, Swift apps, or headed browsers during daytime. Any future Tauri B4 verification must run headless, at night, on the reference Apple Silicon Mac, adhering to D64 viewport filtering and D65 0.5% sample floor.
+
+From the repository root, the older Phase 0 matrix is reproduced with:
 
 ```sh
-cd apps/s5-prototype
+cd spikes/s5-ui
 npm ci
 npx playwright install chromium webkit
 npm test
@@ -172,13 +183,3 @@ python3 b3-bench.py            # 5 idle and 5 loaded process-tree snapshots
 `npm run bench` builds the production bundle before starting `vite preview`, launches headful Playwright WebKit and Chromium, and uses `--no-sandbox` for Chromium. A full run writes `results/playwright.json`; smoke mode defaults to a timestamped file, and `S5_BENCH_OUTPUT` selects a path explicitly. `tauri-bench.sh` starts a loopback-only result receiver, launches and closes the bundled release app for each scenario, captures each JSON result and process snapshots, and stops the receiver. `b3-bench.py` uses the same release bundle and records `footprint` physical MB separately from summed `ps` RSS. Each matrix command keeps outliers in the result files.
 
 Raw data and process snapshots are in `spikes/s5-ui/results/`. The result files include per-run launch/latency/frame metrics, callback and rAF timestamp deltas, generated-token counts, and process samples. The B3 capture repeats five idle samples after a 61 s settle and five loaded 50k×8 snapshots after 12 s. Apps and harness-launched servers were closed after collection. The benchmark does not implement a reviewed interactive pairing screen; setup uses the daemon CLI in an isolated temporary data directory. The approval card was visually checked in the release app; `approval-card-review.png` is the saved capture. The bundle build retains Vite's warning that the JavaScript chunk exceeds 500 kB.
-
-#### W4-j headless streaming rework (2026-10-22)
-
-The S5 B4 data path now uses a Tauri IPC channel for ordered stream notices; Rust retains the durable event list and answers bounded aggregate or per-session range queries (up to 256 rows). Only a channel notice's fetched version releases backpressure; scroll-only range responses cannot acknowledge an unrelated notice. Status remains on Tauri events because it carries only connection lifecycle state. The frontend coalesces notices within one animation frame, preserves a scrolled-up window, and commits a bounded window synchronously after the channel's frame coalescing. B4 uses a 128-row live-tail window and 32-row virtualizer overscan to collect the unchanged minimum sample floor during fast streams; ordinary transcript views keep a 32-row tail and 8-row overscan. Fixed 112 px virtual rows remove row remeasurement; row refs replace selector lookups. Markdown memoization uses `(row id, content hash)` with source equality as a collision guard, and `rehype-sanitize` remains enabled. Repeated range reads cannot resample a row whose D64 sample has completed.
-
-The B4 endpoint is unchanged: page `performance.now()` at entry to the second rAF callback after the row's layout commit, adjusted by the existing page/daemon wall-clock mapping. Visibility, all requested chunk count, and minimum sample gates remain unchanged. Headless fake-channel, per-session window, range, sanitizer, unique-sample, and D64 tests cover the path. The existing W4-i live B4 numbers are historical; no live B4 measurement was run for W4-j or this review. No runner parameter changes are required: the frontend now creates the channel and invokes `start_b4_relay` after registering the status listener. The existing app freshness check covers the changed frontend and Rust sources.
-
-#### W4-m D65 re-gate of existing night data (2026-10-23)
-
-D65 changes only the minimum sample floor to `min(events, max(20, ceil(0.5% of events)))`; D64's second-rAF endpoint and viewport-intersecting-row population are unchanged. No live runs were started. The immutable W4-j Tauri and W4-k2 Swift records were re-evaluated with the saved per-row sample arrays in `apps/s5-prototype/bench-results/w4j/` and `apps/s5-prototype/bench-results/w4k2-swift/`. Results are in `apps/s5-prototype/bench-results/w4m-reeval/b4.md` and `.json`: Tauri 18/60 and Swift 60/60 valid runs. Tauri result JSONs with only a sample count and an error (no per-row sample array) remain invalid and have no recomputed percentiles; saved-array medians and p95s are recomputed for valid runs only. The new per-cell floor is 25 rows at 5k and 250 at 50k events. D49 remains Tauri + React; Swift is reference-only.
