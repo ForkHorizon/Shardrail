@@ -1578,9 +1578,23 @@ mod browser_listener_tests {
         ));
         for bad in [
             request("/ws", &["127.0.0.1:4411.evil"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["evil.127.0.0.1:4411"], &["http://127.0.0.1:4411"]),
+            request(
+                "/ws",
+                &["127.0.0.1.attacker.test:4411"],
+                &["http://127.0.0.1:4411"],
+            ),
             request("/ws", &["localhost:4411"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["127.1:4411"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["0x7f000001:4411"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["2130706433:4411"], &["http://127.0.0.1:4411"]),
+            request("/ws", &["127.0.0.1"], &["http://127.0.0.1:4411"]),
+            request("/ws", &[], &["http://127.0.0.1:4411"]),
             request("/ws", &["127.0.0.1:4411"], &[]),
+            request("/ws", &["127.0.0.1:4411"], &["null"]),
             request("/ws", &["127.0.0.1:4411"], &["http://evil.test"]),
+            request("/ws", &["127.0.0.1:4411"], &["http://127.0.0.1:9999"]),
+            request("/ws", &["127.0.0.1:9999"], &["http://127.0.0.1:4411"]),
             request(
                 "/ws?token=x",
                 &["127.0.0.1:4411"],
@@ -1794,6 +1808,67 @@ mod browser_listener_tests {
             .unwrap();
         assert!(response.starts_with(b"HTTP/1.1 403"));
         assert!(server.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejected_host_origin_security_matrix_never_upgrades() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let port = address.port();
+        let cases = [
+            (
+                format!("127.0.0.1:{port}.evil"),
+                format!("http://127.0.0.1:{port}"),
+            ),
+            (format!("127.0.0.1:{port}"), "null".to_owned()),
+            (
+                format!("127.0.0.1:{port}"),
+                format!("http://127.0.0.1:{}", port.wrapping_add(1).max(1)),
+            ),
+            ("localhost".to_owned(), format!("http://127.0.0.1:{port}")),
+            (
+                format!("0x7f000001:{port}"),
+                format!("http://127.0.0.1:{port}"),
+            ),
+        ];
+        let case_count = cases.len();
+        let server = tokio::spawn(async move {
+            for _ in 0..case_count {
+                let (stream, _) = listener.accept().await.unwrap();
+                let result = accept_browser_websocket(stream, port).await;
+                assert!(result.is_err());
+            }
+        });
+        for (host, origin) in &cases {
+            let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+            client
+                .write_all(
+                    format!(
+                        "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+                .await
+                .expect("rejected connection should close")
+                .unwrap();
+            assert!(
+                response.starts_with(b"HTTP/1.1 403"),
+                "expected 403 for Host={host} Origin={origin}, got {}",
+                String::from_utf8_lossy(&response)
+            );
+            assert!(
+                !response
+                    .windows(b"101".len())
+                    .any(|window| window == b"101"),
+                "rejected request must not upgrade: {}",
+                String::from_utf8_lossy(&response)
+            );
+        }
+        server.await.unwrap();
     }
 }
 
