@@ -43,6 +43,7 @@
 | EV-29 | <https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp> and its CHANGELOG | renamed from `@zed-industries/claude-agent-acp` at 0.24.0; 0.93.0 published 2026-10-16; author Zed Industries; depends on `@anthropic-ai/claude-agent-sdk`; very frequent releases | Verified | 2026-10-18 |
 | EV-30 | community C# ACP libraries (`acp-csharp`, `Acp.Net`) found by search | C# ACP client libraries exist; no official ACP C# SDK; quality not evaluated | Unverified (existence only) | 2026-10-18 |
 | EV-31 | <https://hermes-agent.nousresearch.com/docs/developer-guide/acp-internals> | Hermes routes only "dangerous terminal commands" through `session/request_permission`; file edits never request approval; `allow_session` scope | Verified | 2026-10-18 |
+| EV-32 | `planning/spikes/s9-lite-macos.md` (spike S9-lite run on macOS 27.0.1 arm64) | macOS: `proc_listpidspath(PROC_ALL_PIDS)` with inherited sentinel-fd discovers descendants across `setsid()` and double-fork orphan adoption by `launchd` (query ~170–230 ms); drops immediately on process death; active evasion via `closefrom(3)` before `setsid` completely bypasses both process-group and sentinel-fd containment | Verified | 2026-10-28 |
 
 ## 2. Original draft sources (accessed 2026-10-13 by the drafting agent, not re-read)
 

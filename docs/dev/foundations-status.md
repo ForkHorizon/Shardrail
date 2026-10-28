@@ -117,3 +117,27 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
 ### W11-a config hash snapshots (2026-10-26)
 
 - The `config` checklist row is `verified` from a SHA-256 of the effective Codex approval config. The session child `config/read` (cwd, after the per-run `-c` overrides) is the source. The hash is taken at session start, before every `turn/start`, and at session end. Drift, a failed read, a timeout, or an unparsable body fails the row, skips `turn/start`, kills the child, and refuses later turns. The match is the digest. The journal names the canonical groups that changed, or `unknown` when the digest differs and no group can be named, and does not store MCP env, headers, tokens, or API keys. An invalid read names the first canonical group that failed (`features`, `extensions.hooks`, …) and no value. The live 0.160.0 shape is accepted: feature values may be bool or null, hooks are event lists plus `state` id → `enabled`, and null `skills`, `connectors`, `sandbox_workspace_write`, and `apps._default` are accepted. `trusted_hash` is not hashed. Unknown top-level keys are not hashed. `default_permissions` is hashed because it selects the sandbox profile when `sandbox_mode` is null. `features.hooks=false` stays a feature bool and does not rewrite hook state. The host banner still says “approvals not protected”. Fake ACP stays `not_verified`. See [approval-protection.md](approval-protection.md).
+
+### W12 Frontend redesign (2026-10-27)
+
+- Redesigned the primary web UI (`apps/s5-prototype`) into two coordinated areas:
+  - **Entry area (`w12/area-entry`):** handles client pairing, enrollment with optional `--allow-session-create` capability, session switcher, workdir selection for New Session, and connection state transitions (connecting, pairing required, disconnected, re-authenticating).
+  - **Session area (`w12/area-session`):** virtualized transcript, multi-step turn activity cards, structured diffs, command/file approvals with single-use Allow Once / Deny, composer with turn interrupts, honest host protection banner (“approvals not protected”), and the 12-row per-session verification checklist.
+- Unified shell layout with responsive mobile/desktop drawer views, high-contrast light/dark themes, and axe-core accessibility compliance across both Chromium and WebKit.
+- Fully verified via 67 unit tests, 6 B4 benchmarks, 14 Vitest specs, and 30 Playwright end-to-end tests across Chromium and WebKit browsers.
+
+### Browser Host/Origin security matrix hardening (2026-10-28)
+
+- Expanded test coverage and validation logic in `crates/shardraild/src/main.rs` against the Browser Security Matrix (18 §1, D66–D70):
+  - **DNS rebinding:** Rejection of lookalike and subdomain rebinding Host headers (e.g. `127.0.0.1:{port}.evil`, `localhost.attacker.com`, hex IP forms `0x7f000001`).
+  - **Port mismatch:** Rejection of mismatched Host port vs actual listener port and mismatched Origin port vs Host port.
+  - **Origin restrictions:** Strict rejection of `Origin: null` and unauthorized external cross-origin attempts.
+  - **Single-use enrollment:** Verification that used or expired enrollment codes cannot be replayed, and failed enrollment attempts throttle after 5 retries.
+
+### S9-lite macOS sentinel-fd containment spike (2026-10-28)
+
+- Executed the authorized S9-lite spike on live macOS Darwin kernel (`spikes/s9-lite-macos/run_s9_lite_spike.py` on macOS 27.0.1 arm64, see `planning/spikes/s9-lite-macos.md` and EV-32).
+- **Inheritance & detachment:** Verified that an inherited sentinel file descriptor (open without `FD_CLOEXEC`) is retained across `fork()`/`exec()`, survives `setsid()` session detachment, and survives double-fork daemonization (orphan adoption by `launchd` PID 1).
+- **Discovery & termination:** `proc_listpidspath(PROC_ALL_PIDS, 0, path, ...)` reliably discovers all descendant PIDs holding the sentinel path, and terminating the discovered PIDs (`SIGTERM` + `SIGKILL`) cleans up the entire process tree.
+- **Active evasion boundary:** Confirmed empirically that `fork → exit → setsid → closefrom(3) → sleep` closes the sentinel file descriptor, evading both process group and sentinel-fd tracking. This confirms the documented residual risk (D43, 06 §8, 15 C9) requiring macOS containment to remain explicitly best-effort.
+- **Query latency:** Benchmarked `proc_listpidspath(PROC_ALL_PIDS)` at ~170–230 ms per full-system vnode scan, establishing that sentinel discovery is suitable for on-demand termination sweeps and periodic health checks, but not high-frequency polling.
