@@ -11,3 +11,4 @@ node_modules/
 /apps/s5-prototype/results*/
 .build/
 /apps/s5-prototype/test-results/
+screenshots/
