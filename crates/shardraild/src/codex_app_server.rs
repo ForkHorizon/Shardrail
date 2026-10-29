@@ -3906,6 +3906,7 @@ mod tests {
                 Arc::new(tokio::sync::Mutex::new(coordinator)),
             )])),
             codex: None,
+            grok: None,
             session_workdirs: Vec::new(),
             codex_status: tokio::sync::Mutex::new(HashMap::new()),
             turn_commands: tokio::sync::Mutex::new(HashMap::new()),

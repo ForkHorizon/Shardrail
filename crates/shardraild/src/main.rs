@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
-use tokio::process::{ChildStdin, Command as TokioCommand};
+use tokio::process::{Child as TokioChild, ChildStdin, Command as TokioCommand};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::tungstenite::Message;
@@ -78,6 +78,15 @@ struct Args {
     /// Session workdir allowlist entry. Repeatable. Canonicalized at startup.
     #[arg(long, value_name = "DIR")]
     session_workdir: Vec<PathBuf>,
+    /// Grok CLI used as `grok agent stdio` for one child process per session.
+    #[arg(long, value_name = "PATH")]
+    grok_agent_path: Option<PathBuf>,
+    /// Grok sandbox profile (default: workspace).
+    #[arg(long, default_value = "workspace")]
+    grok_sandbox: String,
+    /// Working directory for Grok agent sessions. Adds the default allowlist entry.
+    #[arg(long, value_name = "DIR")]
+    grok_workdir: Option<PathBuf>,
     /// Working directory for Codex threads. Adds the default allowlist entry.
     #[arg(long, value_name = "DIR")]
     codex_workdir: Option<PathBuf>,
@@ -391,11 +400,16 @@ fn sanitize_label(label: &str) -> String {
         .collect()
 }
 
-async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
-    if let Err(error) = run_fake_acp_inner(Arc::clone(&daemon), path, session_id).await {
+async fn finalize_acp_session(
+    daemon: &Arc<Daemon>,
+    session_id: Uuid,
+    provider_name: &str,
+    error: Option<&io::Error>,
+) {
+    if let Some(error) = error {
         daemon_log::log(
             "WARN",
-            "fake_acp",
+            provider_name,
             &format!("session {session_id} ended: {:?}", error.kind()),
         );
         if let Some(coordinator) = daemon.sessions.lock().await.get(&session_id).cloned() {
@@ -404,13 +418,13 @@ async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
                 wall_clock_ms(),
                 shardrail_session_core::TurnOutcome::Interrupted,
                 false,
-                json!({"source":"fake-acp","error":"provider_failed"}),
+                json!({"source": provider_name, "error": "provider_failed"}),
                 || Ok(()),
             );
             let _ = coordinator.transition(
                 wall_clock_ms(),
                 "process_exited",
-                json!({"source":"fake-acp","error":"provider_failed"}),
+                json!({"source": provider_name, "error": "provider_failed"}),
                 || Ok(()),
             );
         }
@@ -435,6 +449,11 @@ async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
         .send_modify(|generation| *generation += 1);
 }
 
+async fn run_fake_acp(daemon: Arc<Daemon>, path: PathBuf, session_id: Uuid) {
+    let result = run_fake_acp_inner(Arc::clone(&daemon), path, session_id).await;
+    finalize_acp_session(&daemon, session_id, "fake-acp", result.as_ref().err()).await;
+}
+
 async fn run_fake_acp_inner(
     daemon: Arc<Daemon>,
     path: PathBuf,
@@ -447,20 +466,68 @@ async fn run_fake_acp_inner(
     if daemon.fake_acp_disconnect_after_permission {
         command.env("SHARDRAIL_FAKE_ACP_DISCONNECT_AFTER_PERMISSION", "1");
     }
-    let mut child = command
+    let child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
+    session_checks::journal_checks(&daemon, session_id, &session_checks::fake_acp_checks())
+        .await
+        .map_err(io::Error::other)?;
+    run_acp_session_inner(daemon, child, session_id, "fake-acp").await
+}
+
+async fn run_grok(daemon: Arc<Daemon>, config: GrokConfig, session_id: Uuid) {
+    let result = run_grok_inner(Arc::clone(&daemon), config, session_id).await;
+    finalize_acp_session(&daemon, session_id, "grok", result.as_ref().err()).await;
+}
+
+async fn run_grok_inner(
+    daemon: Arc<Daemon>,
+    config: GrokConfig,
+    session_id: Uuid,
+) -> io::Result<()> {
+    let mut command = TokioCommand::new(&config.program);
+    command
+        .args([
+            "agent",
+            "stdio",
+            "--sandbox",
+            &config.sandbox,
+            "--no-auto-update",
+        ])
+        .current_dir(&config.workdir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .env("GROK_DISABLE_AUTOUPDATER", "1");
+    let child = command.spawn()?;
+    session_checks::journal_checks(
+        &daemon,
+        session_id,
+        &session_checks::grok_checks(&config.sandbox),
+    )
+    .await
+    .map_err(io::Error::other)?;
+    run_acp_session_inner(daemon, child, session_id, "grok").await
+}
+
+async fn run_acp_session_inner(
+    daemon: Arc<Daemon>,
+    mut child: TokioChild,
+    session_id: Uuid,
+    provider_name: &str,
+) -> io::Result<()> {
     let input = child
         .stdin
         .take()
-        .ok_or_else(|| io::Error::other("fake ACP stdin unavailable"))?;
+        .ok_or_else(|| io::Error::other("ACP agent stdin unavailable"))?;
     let output = child
         .stdout
         .take()
-        .ok_or_else(|| io::Error::other("fake ACP stdout unavailable"))?;
+        .ok_or_else(|| io::Error::other("ACP agent stdout unavailable"))?;
     let mut input = input;
     let mut output = BufReader::new(output);
     let coordinator = daemon
@@ -475,7 +542,7 @@ async fn run_fake_acp_inner(
         .transition(
             wall_clock_ms(),
             "process_started",
-            json!({"provider":"fake-acp"}),
+            json!({"provider": provider_name}),
             || Ok(()),
         )
         .map_err(io::Error::other)?;
@@ -483,7 +550,7 @@ async fn run_fake_acp_inner(
         .transition(
             wall_clock_ms(),
             "turn_started",
-            json!({"source":"fake-acp"}),
+            json!({"source": provider_name}),
             || Ok(()),
         )
         .map_err(io::Error::other)?;
@@ -494,12 +561,33 @@ async fn run_fake_acp_inner(
         .lock()
         .await
         .insert(session_id, turn_id.clone());
-    session_checks::journal_checks(&daemon, session_id, &session_checks::fake_acp_checks())
-        .await
-        .map_err(io::Error::other)?;
-    send_agent_request(&mut input, 1, "initialize", json!({"protocolVersion":1})).await?;
-    let _ = read_agent_line(&mut output).await?;
-    send_agent_request(&mut input, 2, "session/new", json!({"cwd":"/tmp"})).await?;
+    // D35: ACP client is dual-stack: it requests protocolVersion: 2 and accepts a v1 selection.
+    // D7: The ACP client never declares fs/* or terminal/* capabilities.
+    send_agent_request(
+        &mut input,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": 2,
+            "clientInfo": {
+                "name": "shardrail",
+                "version": "0.1.0"
+            },
+            "capabilities": {
+                "loadSession": false
+            }
+        }),
+    )
+    .await?;
+    let init_line = read_agent_line(&mut output).await?;
+    let init_frame: serde_json::Value =
+        serde_json::from_str(&init_line).map_err(io::Error::other)?;
+    let negotiated_version = init_frame
+        .get("result")
+        .and_then(|r| r.get("protocolVersion"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    send_agent_request(&mut input, 2, "session/new", json!({"cwd": "/tmp"})).await?;
     let _ = read_agent_line(&mut output).await?;
     send_agent_request(
         &mut input,
@@ -508,10 +596,48 @@ async fn run_fake_acp_inner(
         json!({"sessionId":"fake-session-1","prompt":[]}),
     )
     .await?;
-    // shortcut: the fake ACP fixture emits one permission request per prompt; loop when fixture coverage adds multiple requests.
     let permission = loop {
         let frame: serde_json::Value =
             serde_json::from_str(&read_agent_line(&mut output).await?).map_err(io::Error::other)?;
+        if frame.get("id").is_some() && frame.get("method").is_some() {
+            if frame["method"] == "session/request_permission" {
+                break frame;
+            }
+            let refusal = json!({
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "error": {
+                    "code": -32601,
+                    "message": "Method not found"
+                }
+            });
+            write_agent(&mut input, &refusal).await?;
+            let mut journal = daemon.journal.lock().await;
+            let journal_epoch = journal.journal_epoch().map_err(io::Error::other)?;
+            let host_id = journal.host_id().map_err(io::Error::other)?;
+            journal
+                .append_event(&DurableEvent {
+                    event_id: 0,
+                    journal_epoch,
+                    host_id,
+                    session_id,
+                    schema_version: 1,
+                    kind: "provider_request_refused".into(),
+                    occurred_at_ms: wall_clock_ms(),
+                    provider_ref: frame["id"].as_str().map(str::to_owned),
+                    causation: None,
+                    redaction_flags: Vec::new(),
+                    payload: json!({
+                        "method": frame["method"],
+                        "refusal_reason": "unsupported_provider_request",
+                    }),
+                })
+                .map_err(io::Error::other)?;
+            daemon
+                .event_generation
+                .send_modify(|generation| *generation += 1);
+            continue;
+        }
         if frame["method"] == "session/request_permission" {
             break frame;
         }
@@ -702,7 +828,66 @@ async fn run_fake_acp_inner(
             let frame: serde_json::Value =
                 serde_json::from_str(&read_agent_line(&mut output).await?)
                     .map_err(io::Error::other)?;
-            if frame["id"] == 3 {
+            if frame.get("id").is_some() && frame.get("method").is_some() {
+                let refusal = json!({
+                    "jsonrpc": "2.0",
+                    "id": frame["id"],
+                    "error": {
+                        "code": -32601,
+                        "message": "Method not found"
+                    }
+                });
+                write_agent(&mut input, &refusal).await?;
+                continue;
+            }
+            if frame["method"] == "session/update" {
+                let params = &frame["params"];
+                let update = &params["update"];
+                {
+                    let mut journal = daemon.journal.lock().await;
+                    let journal_epoch = journal.journal_epoch().map_err(io::Error::other)?;
+                    let host_id = journal.host_id().map_err(io::Error::other)?;
+                    journal
+                        .append_event(&DurableEvent {
+                            event_id: 0,
+                            journal_epoch,
+                            host_id,
+                            session_id,
+                            schema_version: 1,
+                            kind: update["sessionUpdate"]
+                                .as_str()
+                                .unwrap_or("agent_update")
+                                .to_owned(),
+                            occurred_at_ms: wall_clock_ms(),
+                            provider_ref: params["sessionId"].as_str().map(str::to_owned),
+                            causation: None,
+                            redaction_flags: Vec::new(),
+                            payload: update.clone(),
+                        })
+                        .map_err(io::Error::other)?;
+                }
+                daemon
+                    .event_generation
+                    .send_modify(|generation| *generation += 1);
+
+                if negotiated_version >= 2
+                    && update["sessionUpdate"] == "state_update"
+                    && update["state"] == "idle"
+                {
+                    let coordinator = daemon
+                        .sessions
+                        .lock()
+                        .await
+                        .get(&session_id)
+                        .cloned()
+                        .ok_or_else(|| io::Error::other("session coordinator unavailable"))?;
+                    let mut coordinator = coordinator.lock().await;
+                    coordinator
+                        .acknowledge_approval(approval_id, wall_clock_ms())
+                        .map_err(io::Error::other)?;
+                    break;
+                }
+            } else if frame["id"] == 3 {
                 let coordinator = daemon
                     .sessions
                     .lock()
@@ -714,7 +899,9 @@ async fn run_fake_acp_inner(
                 coordinator
                     .acknowledge_approval(approval_id, wall_clock_ms())
                     .map_err(io::Error::other)?;
-                break;
+                if negotiated_version < 2 {
+                    break;
+                }
             }
         }
         daemon
@@ -742,7 +929,7 @@ async fn run_fake_acp_inner(
                 shardrail_session_core::TurnOutcome::Interrupted
             },
             false,
-            json!({"source":"fake-acp"}),
+            json!({"source": provider_name}),
             || Ok(()),
         )
         .map_err(io::Error::other)?;
@@ -750,7 +937,7 @@ async fn run_fake_acp_inner(
         .transition(
             wall_clock_ms(),
             "process_exited",
-            json!({"source":"fake-acp"}),
+            json!({"source": provider_name}),
             || Ok(()),
         )
         .map_err(io::Error::other)?;
@@ -1249,12 +1436,20 @@ pub(crate) struct Daemon {
     pub(crate) approvals: Mutex<HashMap<Uuid, DaemonApproval>>,
     pub(crate) sessions: Mutex<HashMap<Uuid, Arc<Mutex<Coordinator>>>>,
     pub(crate) codex: Option<codex_app_server::CodexConfig>,
+    pub(crate) grok: Option<GrokConfig>,
     pub(crate) session_workdirs: Vec<session_workdir::AllowedWorkdir>,
     pub(crate) codex_status: Mutex<HashMap<Uuid, codex_app_server::CodexStatus>>,
     pub(crate) turn_commands:
         Mutex<HashMap<Uuid, mpsc::UnboundedSender<codex_app_server::SessionCommand>>>,
     /// Provider turn id of the turn that is open for each session.
     pub(crate) session_turns: Mutex<HashMap<Uuid, String>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GrokConfig {
+    pub(crate) program: PathBuf,
+    pub(crate) sandbox: String,
+    pub(crate) workdir: PathBuf,
 }
 
 pub(crate) struct DaemonApproval {
@@ -1277,10 +1472,18 @@ fn codex_config(
     args: &Args,
     allowlist: &[session_workdir::AllowedWorkdir],
 ) -> Result<Option<codex_app_server::CodexConfig>, io::Error> {
-    if args.fake_acp_path.is_some() && args.codex_app_server.is_some() {
+    let providers_count = [
+        args.fake_acp_path.is_some(),
+        args.codex_app_server.is_some(),
+        args.grok_agent_path.is_some(),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
+    if providers_count > 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "choose either --fake-acp-path or --codex-app-server",
+            "choose only one of --fake-acp-path, --codex-app-server, or --grok-agent-path",
         ));
     }
     if args.codex_app_server.is_none() && !args.codex_config.is_empty() {
@@ -1312,6 +1515,41 @@ fn codex_config(
         extra: args.codex_config.clone(),
         directory: None,
         replace_after_pin: args.test_replace_workdir_after_pin,
+    }))
+}
+
+fn grok_config(
+    args: &Args,
+    allowlist: &[session_workdir::AllowedWorkdir],
+) -> Result<Option<GrokConfig>, io::Error> {
+    let Some(program) = args.grok_agent_path.clone() else {
+        return Ok(None);
+    };
+    let workdir = if let Some(dir) = args.grok_workdir.clone() {
+        let validated = session_workdir::validate_session_workdir(&dir)?;
+        if !allowlist.iter().any(|allowed| {
+            allowed.path == validated.path
+                || (allowed.dev == validated.dev && allowed.ino == validated.ino)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--grok-workdir must match an allowlisted --session-workdir",
+            ));
+        }
+        validated.path
+    } else if let Some(entry) = allowlist.first() {
+        entry.path.clone()
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--grok-agent-path requires --grok-workdir or --session-workdir",
+        ));
+    };
+    let sandbox = args.grok_sandbox.clone();
+    Ok(Some(GrokConfig {
+        program,
+        sandbox,
+        workdir,
     }))
 }
 
@@ -1350,6 +1588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &args.session_workdir,
             )?;
             let codex = codex_config(&args, &session_workdirs)?;
+            let grok = grok_config(&args, &session_workdirs)?;
             daemon_log::init(daemon_log::configured_dir(args.log_dir, args.no_file_log));
             run(
                 path,
@@ -1363,6 +1602,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assets_dir: args.browser_assets_dir,
                 },
                 codex,
+                grok,
                 session_workdirs,
                 args.exit_with_stdin,
             )
@@ -1374,7 +1614,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "Codex config is one more startup input beside the existing daemon options"
+    reason = "Codex and Grok configs are startup inputs beside the existing daemon options"
 )]
 async fn run(
     path: PathBuf,
@@ -1385,6 +1625,7 @@ async fn run(
     test_write_ahead_delay_ms: u64,
     browser: BrowserListenerOptions,
     codex: Option<codex_app_server::CodexConfig>,
+    grok: Option<GrokConfig>,
     session_workdirs: Vec<session_workdir::AllowedWorkdir>,
     exit_with_stdin: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1426,6 +1667,7 @@ async fn run(
         approvals: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
         codex,
+        grok,
         session_workdirs: session_workdirs.clone(),
         codex_status: Mutex::new(HashMap::new()),
         turn_commands: Mutex::new(HashMap::new()),
@@ -3255,20 +3497,28 @@ async fn handle_session_create(
         return Ok(());
     }
     let workdir = match choice {
-        WorkdirChoice::Unset if daemon.codex.is_some() => {
+        WorkdirChoice::Unset if daemon.codex.is_some() || daemon.grok.is_some() => {
             return reject_session_create(
                 daemon,
                 client,
                 outbound,
                 request.command_id,
                 None,
-                "codex",
-                "codex is not configured",
+                if daemon.codex.is_some() {
+                    "codex"
+                } else {
+                    "grok"
+                },
+                if daemon.codex.is_some() {
+                    "codex is not configured"
+                } else {
+                    "grok is not configured"
+                },
             )
             .await;
         }
         WorkdirChoice::Unset => None,
-        WorkdirChoice::Path(pinned) if daemon.codex.is_none() => {
+        WorkdirChoice::Path(pinned) if daemon.codex.is_none() && daemon.grok.is_none() => {
             let text = pinned.path.display().to_string();
             return reject_session_create(
                 daemon,
@@ -3381,10 +3631,12 @@ async fn handle_session_create(
     )
     .await?;
     push_events(outbound, daemon, cursor).await?;
-    if daemon.codex.is_none()
-        && let Some(path) = daemon.fake_acp_path.clone()
-    {
-        tokio::spawn(run_fake_acp(Arc::clone(daemon), path, session_id));
+    if daemon.codex.is_none() {
+        if let Some(path) = daemon.fake_acp_path.clone() {
+            tokio::spawn(run_fake_acp(Arc::clone(daemon), path, session_id));
+        } else if let Some(grok) = daemon.grok.clone() {
+            tokio::spawn(run_grok(Arc::clone(daemon), grok, session_id));
+        }
     }
     Ok(())
 }

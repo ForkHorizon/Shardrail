@@ -118,6 +118,49 @@ pub(crate) fn fake_acp_checks() -> Vec<CheckDraft> {
     checks
 }
 
+pub(crate) fn grok_checks(sandbox_label: &str) -> Vec<CheckDraft> {
+    let mut checks = vec![
+        row(
+            "sandbox",
+            SessionCheckStatus::Verified,
+            "grok agent stdio",
+            &format!("grok started with explicit sandbox profile: {sandbox_label}"),
+        ),
+        row(
+            "bypass",
+            SessionCheckStatus::Verified,
+            "grok agent stdio",
+            "Auto-update suppressed with --no-auto-update and GROK_DISABLE_AUTOUPDATER=1.",
+        ),
+        row(
+            "routing",
+            SessionCheckStatus::Verified,
+            "ACP adapter",
+            "Approvals routed via ACP session/request_permission; unknown requests refused.",
+        ),
+        row(
+            "config",
+            SessionCheckStatus::NotVerified,
+            "grok agent stdio",
+            "Grok configuration in ~/.grok is not isolated.",
+        ),
+        row(
+            "widening",
+            SessionCheckStatus::NotVerified,
+            "ACP adapter",
+            "ACP permission options classified (once/widening/boundary-breaking).",
+        ),
+        row(
+            "mcp",
+            SessionCheckStatus::NotVerified,
+            "grok agent stdio",
+            "Grok MCP servers not managed by Shardrail.",
+        ),
+    ];
+    checks.extend(unverified_rest());
+    checks
+}
+
 pub(crate) fn codex_ready_checks(sandbox_label: &str) -> Vec<CheckDraft> {
     let mut checks = vec![
         row(

@@ -151,3 +151,13 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
 - **Tampering defense:** Demonstrated that active Hub bit-flipping / payload alteration fails AEAD authentication tag verification, causing the recipient to fail closed.
 - **Device revocation:** Verified daemon revocation terminates the client session key and directs the Hub Durable Object to sever the client socket (`code: 4003 Client Revoked`).
 - **Benchmark:** Relaying 100 sequential encrypted frames demonstrated median round-trip overhead of 0.173 ms (p95: 0.326 ms), confirming negligible performance penalty for browser-side WebCrypto encryption.
+
+### Phase 1b: Grok ACP adapter and protocol harness (2026-10-29)
+
+- Implemented Grok ACP adapter support in `crates/shardraild` (E1.13, T1.15, EV-34):
+  - Added CLI options `--grok-agent-path`, `--grok-sandbox`, and `--grok-workdir` with strict mutual provider exclusion (refuses multiple configured providers).
+  - Added `GrokConfig` and `run_grok` lifecycle management, launching `grok agent stdio --sandbox <profile> --no-auto-update` with `GROK_DISABLE_AUTOUPDATER=1`.
+  - Integrated `session_checks::grok_checks`: evaluates sandbox isolation, auto-update suppression, and approval routing to SQLite journal as `session_check_result` events.
+  - Extended ACP harness (`crates/fake-acp`) with version negotiation (v1/v2 dual-stack, D35), forbidden client capability refusal (`fs`, `terminal`, D7), prompt acknowledgements, and structured notifications (T1.2b).
+  - Handled ACP `session/request_permission` flow with durable approval journaling and client resolution (`approval_resolved`).
+  - Verified via integration test suite `crates/shardraild/tests/grok.rs` covering lifecycle, multi-turn updates, approvals, and error handling.
