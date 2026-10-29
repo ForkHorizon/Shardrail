@@ -23,6 +23,9 @@ export {
   daemonFingerprint,
   enrollBrowser,
   inspectBrowserIdentity,
+  discoverRelayMachines,
+  inspectBrowserIdentityRelay,
+  enrollBrowserRelay,
 } from "./browser.ts";
 export type {
   BrowserClient,
@@ -30,6 +33,7 @@ export type {
   BrowserKeyRecord,
   BrowserKeyStore,
   BrowserRelayClientOptions,
+  RelayMachineInfo,
 } from "./browser.ts";
 
 export type ClientOptions = {

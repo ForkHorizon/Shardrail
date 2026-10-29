@@ -195,3 +195,81 @@ async fn test_relay_revocation_control() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     assert_eq!(runtime.status("m_rev_machine").clients, 0);
 }
+
+#[tokio::test]
+async fn test_relay_machine_discovery() {
+    let runtime = RelayRuntime::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}");
+
+    let rt = runtime.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let rt_conn = rt.clone();
+            tokio::spawn(async move {
+                let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _ = rt_conn.handle_websocket(ws).await;
+            });
+        }
+    });
+
+    // 1. Daemon connects with machine "machine-alpha"
+    let (mut daemon_ws, _) = connect_async(&ws_url).await.unwrap();
+    daemon_ws
+        .send(Message::Text(
+            json!({
+                "type": "hello",
+                "role": "daemon",
+                "machine_id": "machine-alpha",
+                "client_id": "daemon-1"
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    // 2. Browser connects for discovery (empty machine_id)
+    let (mut browser_ws, _) = connect_async(&ws_url).await.unwrap();
+    browser_ws
+        .send(Message::Text(
+            json!({
+                "type": "hello",
+                "role": "browser",
+                "machine_id": "",
+                "client_id": "browser-disc"
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let disc_frame = browser_ws.next().await.unwrap().unwrap();
+    let disc_val: serde_json::Value =
+        serde_json::from_str(&disc_frame.into_text().unwrap()).unwrap();
+    assert_eq!(disc_val["type"], "machines");
+    let machines = disc_val["machines"].as_array().unwrap();
+    assert_eq!(machines.len(), 1);
+    assert_eq!(machines[0]["machine_id"], "machine-alpha");
+    assert_eq!(machines[0]["online"], true);
+
+    // 3. Browser asks for machines dynamically
+    browser_ws
+        .send(Message::Text(
+            json!({ "type": "list_machines" }).to_string().into(),
+        ))
+        .await
+        .unwrap();
+
+    let list_frame = browser_ws.next().await.unwrap().unwrap();
+    let list_val: serde_json::Value =
+        serde_json::from_str(&list_frame.into_text().unwrap()).unwrap();
+    assert_eq!(list_val["type"], "machines");
+    let machines_req = list_val["machines"].as_array().unwrap();
+    assert_eq!(machines_req.len(), 1);
+    assert_eq!(machines_req[0]["machine_id"], "machine-alpha");
+}

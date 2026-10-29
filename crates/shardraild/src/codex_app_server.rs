@@ -3913,6 +3913,8 @@ mod tests {
             session_turns: tokio::sync::Mutex::new(HashMap::new()),
             workspace_leases: crate::workspace_lease::WorkspaceLeaseManager::new(),
             drain: crate::drain::DrainCoordinator::new(),
+            allow_web_enroll: false,
+            web_enroll_token: None,
         });
         let (writer, _writer_rx) = mpsc::unbounded_channel();
         let (approval_tx, _approval_rx) = mpsc::unbounded_channel();

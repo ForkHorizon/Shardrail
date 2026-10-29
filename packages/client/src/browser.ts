@@ -408,3 +408,219 @@ export async function inspectBrowserIdentity(url: string, WebSocketImpl: typeof 
 export async function daemonFingerprint(publicKey: string, cryptoProvider: Crypto = crypto) {
   return hex(new Uint8Array(await cryptoProvider.subtle.digest("SHA-256", unhex(publicKey))));
 }
+
+export type RelayMachineInfo = {
+  machine_id: string;
+  online: boolean;
+  clients: number;
+};
+
+export async function discoverRelayMachines(
+  relayUrl: string,
+  WebSocketImpl: typeof WebSocket = WebSocket,
+  timeoutMs = 5000,
+): Promise<RelayMachineInfo[]> {
+  const socket = new WebSocketImpl(relayUrl);
+  return new Promise<RelayMachineInfo[]>((resolve, reject) => {
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      socket.close();
+      reject(new Error("discoverRelayMachines timeout"));
+    }, timeoutMs);
+
+    const finish = (err?: Error, list?: RelayMachineInfo[]) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      socket.close();
+      if (err) reject(err);
+      else resolve(list ?? []);
+    };
+
+    socket.onerror = () => finish(new Error("relay WebSocket failed"));
+    socket.onclose = () => finish(new Error("relay WebSocket closed"));
+    socket.onopen = () => {
+      socket.send(
+        JSON.stringify({
+          type: "hello",
+          role: "browser",
+          machine_id: "",
+          client_id: "browser-disc-" + Math.random().toString(36).slice(2),
+        }),
+      );
+    };
+    socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(String(event.data)) as {
+          type?: string;
+          machines?: RelayMachineInfo[];
+        };
+        if (msg.type === "machines" && Array.isArray(msg.machines)) {
+          finish(undefined, msg.machines);
+        }
+      } catch (err) {
+        finish(err instanceof Error ? err : new Error(String(err)));
+      }
+    };
+  });
+}
+
+export async function inspectBrowserIdentityRelay(
+  relayUrl: string,
+  machineId: string,
+  WebSocketImpl: typeof WebSocket = WebSocket,
+  timeoutMs = 10000,
+): Promise<string> {
+  const socket = new WebSocketImpl(relayUrl);
+  const clientId = "inspect-" + Math.random().toString(36).slice(2);
+  return new Promise<string>((resolve, reject) => {
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      socket.close();
+      reject(new Error("inspectBrowserIdentityRelay timeout"));
+    }, timeoutMs);
+
+    const finish = (err?: Error, hostKey?: string) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      socket.close();
+      if (err) reject(err);
+      else resolve(hostKey!);
+    };
+
+    socket.onerror = () => finish(new Error("relay WebSocket failed"));
+    socket.onclose = () => finish(new Error("relay WebSocket closed before identity response"));
+
+    socket.onopen = () => {
+      socket.send(
+        JSON.stringify({
+          type: "hello",
+          role: "browser",
+          machine_id: machineId,
+          client_id: clientId,
+        }),
+      );
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(String(event.data)) as {
+          type?: string;
+          online?: boolean;
+          machine_id?: string;
+          payload?: unknown;
+        };
+        if (msg.type === "status") {
+          if (!msg.online) {
+            return finish(new Error("remote machine is offline"));
+          }
+          socket.send(
+            JSON.stringify({
+              type: "relay",
+              machine_id: machineId,
+              client_id: clientId,
+              payload: { kind: "identity" },
+            }),
+          );
+          return;
+        }
+
+        if (msg.type === "relay" && msg.machine_id === machineId) {
+          const payload = typeof msg.payload === "string" ? JSON.parse(msg.payload) : msg.payload;
+          if (payload && typeof payload === "object" && payload.kind === "identity" && payload.host_public_key) {
+            finish(undefined, String(payload.host_public_key));
+          } else {
+            finish(new Error(payload?.error ?? "daemon identity unavailable"));
+          }
+        }
+      } catch (err) {
+        finish(err instanceof Error ? err : new Error(String(err)));
+      }
+    };
+  });
+}
+
+export async function enrollBrowserRelay(
+  relayUrl: string,
+  machineId: string,
+  code: string,
+  publicKey: string,
+  WebSocketImpl: typeof WebSocket = WebSocket,
+  timeoutMs = 10000,
+): Promise<{ clientId: string; hostPublicKey: string }> {
+  const socket = new WebSocketImpl(relayUrl);
+  const clientId = "enroll-" + Math.random().toString(36).slice(2);
+  return new Promise<{ clientId: string; hostPublicKey: string }>((resolve, reject) => {
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      socket.close();
+      reject(new Error("enrollBrowserRelay timeout"));
+    }, timeoutMs);
+
+    const finish = (err?: Error, result?: { clientId: string; hostPublicKey: string }) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      socket.close();
+      if (err) reject(err);
+      else resolve(result!);
+    };
+
+    socket.onerror = () => finish(new Error("relay WebSocket failed"));
+    socket.onclose = () => finish(new Error("relay WebSocket closed before enrollment response"));
+
+    socket.onopen = () => {
+      socket.send(
+        JSON.stringify({
+          type: "hello",
+          role: "browser",
+          machine_id: machineId,
+          client_id: clientId,
+        }),
+      );
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(String(event.data)) as {
+          type?: string;
+          online?: boolean;
+          machine_id?: string;
+          payload?: unknown;
+        };
+        if (msg.type === "status") {
+          if (!msg.online) {
+            return finish(new Error("remote machine is offline"));
+          }
+          socket.send(
+            JSON.stringify({
+              type: "relay",
+              machine_id: machineId,
+              client_id: clientId,
+              payload: { kind: "enroll", code, public_key: publicKey },
+            }),
+          );
+          return;
+        }
+
+        if (msg.type === "relay" && msg.machine_id === machineId) {
+          const payload = typeof msg.payload === "string" ? JSON.parse(msg.payload) : msg.payload;
+          if (payload && typeof payload === "object" && payload.kind === "enrolled" && payload.client_id && payload.host_public_key) {
+            finish(undefined, { clientId: String(payload.client_id), hostPublicKey: String(payload.host_public_key) });
+          } else {
+            finish(new Error(payload?.error ?? "enrollment failed"));
+          }
+        }
+      } catch (err) {
+        finish(err instanceof Error ? err : new Error(String(err)));
+      }
+    };
+  });
+}

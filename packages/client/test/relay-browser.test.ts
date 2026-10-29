@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import * as ed from "@noble/ed25519";
-import { connectBrowserRelay, type BrowserKeyRecord } from "../src/browser.ts";
+import {
+  connectBrowserRelay,
+  discoverRelayMachines,
+  inspectBrowserIdentityRelay,
+  enrollBrowserRelay,
+  type BrowserKeyRecord,
+} from "../src/browser.ts";
 
 const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 const unhex = (value: string) => Uint8Array.from(value.match(/../g)!, (pair) => Number.parseInt(pair, 16));
@@ -24,6 +30,7 @@ class MockWebSocket {
   static instances: MockWebSocket[] = [];
   url: string;
   onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
   onerror: ((err: unknown) => void) | null = null;
   onclose: (() => void) | null = null;
   listeners: Record<string, ((event: { data: string }) => void)[]> = {};
@@ -35,6 +42,8 @@ class MockWebSocket {
     MockWebSocket.instances.push(this);
     queueMicrotask(() => {
       this.onopen?.();
+      const openHandlers = this.listeners["open"] || [];
+      for (const h of openHandlers) h({} as any);
     });
   }
 
@@ -56,6 +65,7 @@ class MockWebSocket {
 
   emitMessage(data: unknown) {
     const text = typeof data === "string" ? data : JSON.stringify(data);
+    this.onmessage?.({ data: text });
     const msgHandlers = this.listeners["message"] || [];
     for (const h of msgHandlers) h({ data: text });
   }
@@ -251,4 +261,123 @@ test("connectBrowserRelay successfully tunnels handshake and streams frames", as
   assert.match((errorRaised as Error).message, /remote machine went offline/);
 
   client.close();
+});
+
+test("discoverRelayMachines receives machine list from relay", async () => {
+  const discoverPromise = discoverRelayMachines(
+    "ws://mock-relay/ws",
+    MockWebSocket as any,
+  );
+
+  await new Promise((r) => setTimeout(r, 10));
+  const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!;
+  assert.equal(socket.sent.length, 1);
+  const hello = JSON.parse(socket.sent[0]!);
+  assert.equal(hello.type, "hello");
+  assert.equal(hello.role, "browser");
+  assert.equal(hello.machine_id, "");
+
+  socket.emitMessage({
+    type: "machines",
+    machines: [
+      { machine_id: "box-1", online: true, clients: 0 },
+      { machine_id: "box-2", online: false, clients: 1 },
+    ],
+  });
+
+  const machines = await discoverPromise;
+  assert.equal(machines.length, 2);
+  assert.equal(machines[0]!.machine_id, "box-1");
+  assert.equal(machines[0]!.online, true);
+  assert.equal(machines[1]!.machine_id, "box-2");
+  assert.equal(machines[1]!.online, false);
+});
+
+test("inspectBrowserIdentityRelay requests and receives host public key over relay", async () => {
+  const inspectPromise = inspectBrowserIdentityRelay(
+    "ws://mock-relay/ws",
+    "target-box",
+    MockWebSocket as any,
+  );
+
+  await new Promise((r) => setTimeout(r, 10));
+  const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!;
+  assert.equal(socket.sent.length, 1);
+  const hello = JSON.parse(socket.sent[0]!);
+  assert.equal(hello.machine_id, "target-box");
+
+  // Relay signals online
+  socket.emitMessage({
+    type: "status",
+    machine_id: "target-box",
+    online: true,
+  });
+
+  await new Promise((r) => setTimeout(r, 10));
+  // Client sends relay frame with identity request
+  assert.equal(socket.sent.length, 2);
+  const relayFrame = JSON.parse(socket.sent[1]!);
+  assert.equal(relayFrame.type, "relay");
+  assert.equal(relayFrame.machine_id, "target-box");
+  assert.deepEqual(relayFrame.payload, { kind: "identity" });
+
+  // Daemon responds with identity payload
+  socket.emitMessage({
+    type: "relay",
+    machine_id: "target-box",
+    payload: {
+      kind: "identity",
+      host_public_key: "abc123daemonkey",
+    },
+  });
+
+  const hostKey = await inspectPromise;
+  assert.equal(hostKey, "abc123daemonkey");
+});
+
+test("enrollBrowserRelay requests enrollment and receives client id over relay", async () => {
+  const enrollPromise = enrollBrowserRelay(
+    "ws://mock-relay/ws",
+    "target-box",
+    "test-code-or-blank",
+    "clientpubkey789",
+    MockWebSocket as any,
+  );
+
+  await new Promise((r) => setTimeout(r, 10));
+  const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!;
+  assert.equal(socket.sent.length, 1);
+
+  // Relay signals online
+  socket.emitMessage({
+    type: "status",
+    machine_id: "target-box",
+    online: true,
+  });
+
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(socket.sent.length, 2);
+  const enrollRelayFrame = JSON.parse(socket.sent[1]!);
+  assert.equal(enrollRelayFrame.type, "relay");
+  assert.equal(enrollRelayFrame.machine_id, "target-box");
+  assert.deepEqual(enrollRelayFrame.payload, {
+    kind: "enroll",
+    code: "test-code-or-blank",
+    public_key: "clientpubkey789",
+  });
+
+  // Daemon responds with enrolled payload
+  socket.emitMessage({
+    type: "relay",
+    machine_id: "target-box",
+    payload: {
+      kind: "enrolled",
+      client_id: "enrolled-client-id-456",
+      host_public_key: "abc123daemonkey",
+    },
+  });
+
+  const res = await enrollPromise;
+  assert.equal(res.clientId, "enrolled-client-id-456");
+  assert.equal(res.hostPublicKey, "abc123daemonkey");
 });

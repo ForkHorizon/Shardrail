@@ -41,7 +41,9 @@ pub struct ConnectionHello {
     #[serde(default = "default_hello_type")]
     pub r#type: String,
     pub role: String,
+    #[serde(default)]
     pub machine_id: String,
+    #[serde(default)]
     pub client_id: String,
     #[serde(default)]
     pub token: Option<String>,
@@ -155,14 +157,26 @@ impl RelayRuntime {
         let status = self.status(machine_id);
         let _ = self.status_tx.send(status.clone());
 
-        // When daemon connects, inform all connected browsers for this machine
+        // When daemon connects, inform connected browsers for this machine, and discovery browsers
         if role == ConnectionRole::Daemon {
             let status_msg =
                 Message::Text(serde_json::to_string(&status).unwrap_or_default().into());
+            let machines_msg = Message::Text(
+                serde_json::to_string(&serde_json::json!({
+                    "type": "machines",
+                    "machines": self.list_machines(),
+                }))
+                .unwrap_or_default()
+                .into(),
+            );
             let routes = self.routes.lock().unwrap();
             for ((r, m, _), conn) in routes.iter() {
-                if *r == ConnectionRole::Browser && m == machine_id {
-                    let _ = conn.tx.send(status_msg.clone());
+                if *r == ConnectionRole::Browser {
+                    if m == machine_id {
+                        let _ = conn.tx.send(status_msg.clone());
+                    } else if m.is_empty() {
+                        let _ = conn.tx.send(machines_msg.clone());
+                    }
                 }
             }
         }
@@ -176,17 +190,58 @@ impl RelayRuntime {
         let status = self.status(machine_id);
         let _ = self.status_tx.send(status.clone());
 
-        // When daemon disconnects, inform connected browsers that it is offline
+        // When daemon disconnects, inform connected browsers that it is offline, and discovery browsers
         if role == ConnectionRole::Daemon {
             let status_msg =
                 Message::Text(serde_json::to_string(&status).unwrap_or_default().into());
+            let machines_msg = Message::Text(
+                serde_json::to_string(&serde_json::json!({
+                    "type": "machines",
+                    "machines": self.list_machines(),
+                }))
+                .unwrap_or_default()
+                .into(),
+            );
             let routes = self.routes.lock().unwrap();
             for ((r, m, _), conn) in routes.iter() {
-                if *r == ConnectionRole::Browser && m == machine_id {
-                    let _ = conn.tx.send(status_msg.clone());
+                if *r == ConnectionRole::Browser {
+                    if m == machine_id {
+                        let _ = conn.tx.send(status_msg.clone());
+                    } else if m.is_empty() {
+                        let _ = conn.tx.send(machines_msg.clone());
+                    }
                 }
             }
         }
+    }
+
+    #[must_use]
+    pub fn list_machines(&self) -> Vec<RelayStatus> {
+        let routes = self.routes.lock().unwrap();
+        let mut machine_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (_, m, _) in routes.keys() {
+            if !m.is_empty() {
+                machine_ids.insert(m.clone());
+            }
+        }
+        machine_ids
+            .into_iter()
+            .map(|id| {
+                let online = routes
+                    .values()
+                    .any(|conn| conn.machine_id == id && conn.role == ConnectionRole::Daemon);
+                let clients = routes
+                    .values()
+                    .filter(|conn| conn.machine_id == id && conn.role == ConnectionRole::Browser)
+                    .count();
+                RelayStatus {
+                    r#type: "status".to_string(),
+                    machine_id: id,
+                    online,
+                    clients,
+                }
+            })
+            .collect()
     }
 
     #[must_use]
@@ -302,13 +357,26 @@ impl RelayRuntime {
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        self.register_connection(role, &hello.machine_id, &hello.client_id, tx);
+        self.register_connection(role, &hello.machine_id, &hello.client_id, tx.clone());
 
         // If a browser connects, send initial status
         if role == ConnectionRole::Browser {
-            let status = self.status(&hello.machine_id);
-            let status_json = serde_json::to_string(&status).unwrap_or_default();
-            ws_write.send(Message::Text(status_json.into())).await?;
+            if hello.machine_id.is_empty() {
+                let machines = self.list_machines();
+                let msg = serde_json::json!({
+                    "type": "machines",
+                    "machines": machines,
+                });
+                ws_write
+                    .send(Message::Text(
+                        serde_json::to_string(&msg).unwrap_or_default().into(),
+                    ))
+                    .await?;
+            } else {
+                let status = self.status(&hello.machine_id);
+                let status_json = serde_json::to_string(&status).unwrap_or_default();
+                ws_write.send(Message::Text(status_json.into())).await?;
+            }
         }
 
         let mut writer = ws_write;
@@ -327,6 +395,30 @@ impl RelayRuntime {
                         break;
                     }
                     if let Message::Text(ref text) = msg {
+                        // Check for browser machine discovery request
+                        if role == ConnectionRole::Browser {
+                            let is_list =
+                                serde_json::from_str::<Value>(text).ok().and_then(|val| {
+                                    if val.get("type").and_then(Value::as_str)
+                                        == Some("list_machines")
+                                    {
+                                        Some(())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if is_list.is_some() {
+                                let machines = self.list_machines();
+                                let reply = serde_json::json!({
+                                    "type": "machines",
+                                    "machines": machines,
+                                });
+                                let _ = tx.send(Message::Text(
+                                    serde_json::to_string(&reply).unwrap_or_default().into(),
+                                ));
+                                continue;
+                            }
+                        }
                         // Check for daemon control command (e.g. revoke_client)
                         if role == ConnectionRole::Daemon {
                             let is_revoke =

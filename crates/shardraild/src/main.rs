@@ -120,6 +120,12 @@ struct Args {
     /// Optional authorization token required by the relay.
     #[arg(long, requires = "relay_url", value_name = "TOKEN")]
     relay_auth_token: Option<String>,
+    /// Allow browser web enrollment directly without requiring an offline enrollment code command.
+    #[arg(long)]
+    allow_web_enroll: bool,
+    /// Optional authorization token required for web enrollment.
+    #[arg(long, requires = "allow_web_enroll", value_name = "TOKEN")]
+    web_enroll_token: Option<String>,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
 }
@@ -1587,7 +1593,7 @@ struct Enrollment {
     allow_session_create: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct EnrollmentRequest {
     kind: String,
     code: String,
@@ -1618,6 +1624,8 @@ pub(crate) struct Daemon {
     #[allow(dead_code)]
     pub(crate) workspace_leases: workspace_lease::WorkspaceLeaseManager,
     pub(crate) drain: drain::DrainCoordinator,
+    pub(crate) allow_web_enroll: bool,
+    pub(crate) web_enroll_token: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1786,6 +1794,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 grok,
                 session_workdirs,
                 args.exit_with_stdin,
+                args.allow_web_enroll,
+                args.web_enroll_token,
             )
             .await?
         }
@@ -1810,6 +1820,8 @@ async fn run(
     grok: Option<GrokConfig>,
     session_workdirs: Vec<session_workdir::AllowedWorkdir>,
     exit_with_stdin: bool,
+    allow_web_enroll: bool,
+    web_enroll_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Startup order is kept in this function so the listener cannot precede recovery.
     refuse_synced_path(&path)?;
@@ -1857,6 +1869,8 @@ async fn run(
         session_turns: Mutex::new(HashMap::new()),
         workspace_leases: workspace_lease::WorkspaceLeaseManager::new(),
         drain: drain::DrainCoordinator::new(),
+        allow_web_enroll,
+        web_enroll_token,
     });
     codex_app_server::install_shutdown_kill();
     daemon_log::log("INFO", "daemon", &startup_message(&socket, host_id, epoch));
@@ -2880,7 +2894,17 @@ fn save_enrollment(path: &Path, enrollment: &Enrollment) -> io::Result<()> {
     sync_directory(path)
 }
 
+#[allow(dead_code)]
 fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serde_json::Value> {
+    redeem_enrollment_with_options(path, request, false, None)
+}
+
+fn redeem_enrollment_with_options(
+    path: &Path,
+    request: EnrollmentRequest,
+    allow_web_enroll: bool,
+    web_enroll_token: Option<&str>,
+) -> io::Result<serde_json::Value> {
     let reject = |message: &str| Ok(json!({"kind":"error","error":message}));
     if request.kind != "enroll" {
         return reject("invalid enrollment request");
@@ -2890,26 +2914,42 @@ fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serd
     let directory = fs::File::open(path)?;
     let _registry_lock = lock_client_registry(&directory)?;
     let enrollment_path = path.join("browser-enrollment.json");
-    let mut enrollment: Enrollment = match fs::read(&enrollment_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+    let (label, allow_session_create) = match fs::read(&enrollment_path) {
+        Ok(bytes) => {
+            let mut enrollment: Enrollment =
+                serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            let hash = encode_hex(&Sha256::digest(request.code.as_bytes()));
+            if enrollment.expires_at_ms <= wall_clock_ms() as u128 {
+                fs::remove_file(enrollment_path)?;
+                return reject("enrollment expired");
+            }
+            if enrollment.failed_attempts >= 5 {
+                return reject("enrollment throttled");
+            }
+            if request.code.len() != 64 || hash != enrollment.code_hash {
+                enrollment.failed_attempts += 1;
+                save_enrollment(path, &enrollment)?;
+                return reject("invalid enrollment code");
+            }
+            // Consume first so a crash can lose an enrollment, but can never register its key twice.
+            fs::remove_file(enrollment_path)?;
+            sync_directory(path)?;
+            (enrollment.label, enrollment.allow_session_create)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return reject("enrollment unavailable");
+            if allow_web_enroll {
+                if let Some(expected_token) = web_enroll_token
+                    && request.code != expected_token
+                {
+                    return reject("invalid web enrollment token");
+                }
+                ("web-browser".into(), true)
+            } else {
+                return reject("enrollment unavailable");
+            }
         }
         Err(error) => return Err(error),
     };
-    let hash = encode_hex(&Sha256::digest(request.code.as_bytes()));
-    if enrollment.expires_at_ms <= wall_clock_ms() as u128 {
-        fs::remove_file(enrollment_path)?;
-        return reject("enrollment expired");
-    }
-    if enrollment.failed_attempts >= 5 {
-        return reject("enrollment throttled");
-    }
-    if request.code.len() != 64 || hash != enrollment.code_hash {
-        enrollment.failed_attempts += 1;
-        save_enrollment(path, &enrollment)?;
-        return reject("invalid enrollment code");
-    }
     let public_key = match decode_hex(&request.public_key).and_then(|bytes| {
         let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "public key must be 32 bytes")
@@ -2920,17 +2960,14 @@ fn redeem_enrollment(path: &Path, request: EnrollmentRequest) -> io::Result<serd
         Ok(key) => key,
         Err(_) => return reject("invalid browser public key"),
     };
-    // Consume first so a crash can lose an enrollment, but can never register its key twice.
-    fs::remove_file(enrollment_path)?;
-    sync_directory(path)?;
     let mut clients = load_authorized_clients(path)?;
     let id = Uuid::now_v7();
     clients.clients.push(AuthorizedClient {
         client_id: id,
         public_key,
-        label: enrollment.label,
+        label,
         scope: ClientScope::Limited,
-        allow_session_create: enrollment.allow_session_create,
+        allow_session_create,
         allow_approvals: true,
     });
     save_authorized_clients(path, &clients)?;
@@ -3285,7 +3322,12 @@ async fn serve_client(stream: UnixStream, daemon: Arc<Daemon>) -> io::Result<()>
         });
     if frame_kind.as_deref() == Some("enroll") {
         let request: EnrollmentRequest = serde_json::from_str(&line).map_err(io::Error::other)?;
-        let reply = redeem_enrollment(daemon.data.directory_path(), request)?;
+        let reply = redeem_enrollment_with_options(
+            daemon.data.directory_path(),
+            request,
+            daemon.allow_web_enroll,
+            daemon.web_enroll_token.as_deref(),
+        )?;
         finish_with_json(outbound, &mut abort_writer, &reply).await?;
         return Ok(());
     }
@@ -4330,6 +4372,41 @@ mod tests {
                 ["error"],
             "enrollment throttled"
         );
+    }
+
+    #[test]
+    fn web_enrollment_allows_without_code_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_fd, path) = open_private_data_directory(directory.path()).unwrap();
+        let signing_key = SigningKey::from_bytes(&[0xab; 32]);
+        let key = encode_hex(&signing_key.verifying_key().to_bytes());
+        let request = enrollment_request("any-token".into(), key.clone());
+
+        let res_disabled =
+            redeem_enrollment_with_options(&path, request.clone(), false, None).unwrap();
+        assert_eq!(res_disabled["kind"], "error");
+
+        let res_enabled =
+            redeem_enrollment_with_options(&path, request.clone(), true, None).unwrap();
+        assert_eq!(res_enabled["kind"], "enrolled");
+
+        let res_token_bad = redeem_enrollment_with_options(
+            &path,
+            enrollment_request("wrong".into(), key.clone()),
+            true,
+            Some("secret123"),
+        )
+        .unwrap();
+        assert_eq!(res_token_bad["kind"], "error");
+
+        let res_token_good = redeem_enrollment_with_options(
+            &path,
+            enrollment_request("secret123".into(), key),
+            true,
+            Some("secret123"),
+        )
+        .unwrap();
+        assert_eq!(res_token_good["kind"], "enrolled");
     }
 
     #[test]

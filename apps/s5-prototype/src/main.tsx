@@ -12,8 +12,8 @@ import { draftPreview, minimumB4Samples, shouldWaitForDaemonStream, waitForB4Sam
 import { UntrustedMarkdown } from './UntrustedMarkdown';
 import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from './streaming-view';
 import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo, type PairingState } from './pairing';
-import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
-import { connectBrowser, connectBrowserRelay, openBrowserKeyStore } from '@shardrail/client/browser';
+import { activeMachineId, browserPairingApi, browserWebSocketUrl, defaultRelayUrl, isRelayEnvironment, setActiveMachineId } from './browser-pairing';
+import { connectBrowser, connectBrowserRelay, discoverRelayMachines, openBrowserKeyStore } from '@shardrail/client/browser';
 import { createBrowserSession, createFlightOnControl, createFlightOnSessionCreated, isKeyChangedError, noteCreateSent, sessionWorkdirs, type BrowserSession, type ConnectionPhase, type CreateFlight, type CreateFlightResult } from './browser-session';
 import { approvalIdFromPayload, clearPromptOnAccept, controlFailureTarget, reduceApprovalFlight, type ApprovalBindingEcho, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
 import { MainScreen } from './MainScreen';
@@ -127,6 +127,9 @@ function Transcript({ onInput, ready, requestRange }: { onInput: () => void; rea
 }
 function App() {
   const query = useMemo(() => new URLSearchParams(location.search), []), count = Math.max(0, Number(query.get('events') ?? 5000)), streams = Number(query.get('streams') ?? 4), durationMs = Number(query.get('duration') ?? 15000), autostart = query.has('events') && query.get('autostart') !== '0', autobench = query.has('autobench'), runId = query.get('run') ?? `${count}-${streams}`, [ready, setReady] = useState(false), [draft, setDraft] = useState(''), [running, setRunning] = useState(false), [benchStatus, setBenchStatus] = useState(''), [transportStatus, setTransportStatus] = useState('Disconnected'), [pairing, setPairing] = useState<PairingState>({ kind: 'loading' }), [pairingBusy, setPairingBusy] = useState(false), [enrollmentCode, setEnrollmentCode] = useState(''), [fallbackAcknowledged, setFallbackAcknowledged] = useState(false), [reconnect, setReconnect] = useState(0), [connectionPhase, setConnectionPhase] = useState<ConnectionPhase>('connecting'), [approvalInFlight, setApprovalInFlight] = useState<ReadonlySet<string>>(() => new Set()), [approvalError, setApprovalError] = useState<string | null>(null), [promptError, setPromptError] = useState<string | null>(null);
+  const isRelay = isRelayEnvironment();
+  const [currentMachineId, setCurrentMachineId] = useState<string | null>(() => activeMachineId());
+  const [availableMachines, setAvailableMachines] = useState<{ machine_id: string; online: boolean }[]>([]);
   const browserSession = useRef<BrowserSession | null>(null);
   const approvalFlightRef = useRef<ApprovalFlight>({ inFlight: new Set(), error: null });
   const pendingPromptRef = useRef<{ commandId: string; sessionId: string } | null>(null);
@@ -150,8 +153,54 @@ function App() {
   useEffect(() => { reset(browserMain ? 0 : count, streams, !b4Enabled && !browserMain); setDaemonAgentCount(streams); setReady(true); }, [count, streams]);
   useEffect(() => {
     if (b4Enabled) return;
-    void pairingApi.inspect().then((info) => setPairing(stateFromInfo(info))).catch(() => setPairing({ kind: 'error', message: 'Could not read daemon identity. Check that the daemon is installed and retry.' }));
+    void pairingApi.inspect().then((info) => setPairing(stateFromInfo(info))).catch((err) => {
+      const msg = err instanceof Error ? err.message : 'Could not read daemon identity. Check that the daemon is installed and retry.';
+      setPairing({ kind: 'error', message: msg });
+    });
   }, []);
+  useEffect(() => {
+    if (b4Enabled || !isRelay || pairing.kind === 'paired') return;
+    let cancelled = false;
+    const relayUrl = defaultRelayUrl();
+    const pollMachines = async () => {
+      try {
+        const machines = await discoverRelayMachines(relayUrl);
+        if (cancelled) return;
+        setAvailableMachines(machines);
+        const online = machines.filter((m) => m.online);
+        if (online.length > 0) {
+          const chosen = (currentMachineId && online.some((m) => m.machine_id === currentMachineId))
+            ? currentMachineId
+            : online[0]!.machine_id;
+          if (chosen !== currentMachineId) {
+            setActiveMachineId(chosen);
+            setCurrentMachineId(chosen);
+          }
+          if (pairing.kind === 'error' || pairing.kind === 'loading') {
+            void pairingApi.inspect()
+              .then((next) => { if (!cancelled) setPairing(stateFromInfo(next)); })
+              .catch((err) => {
+                if (!cancelled) setPairing({ kind: 'error', message: err instanceof Error ? err.message : 'Could not read daemon identity.' });
+              });
+          }
+        } else {
+          if (pairing.kind === 'loading' || pairing.kind === 'error') {
+            setPairing({ kind: 'error', message: 'Waiting for machine daemon to connect to relay...' });
+          }
+        }
+      } catch {
+        if (!cancelled && (pairing.kind === 'loading' || pairing.kind === 'error')) {
+          setPairing({ kind: 'error', message: 'Waiting for relay connection...' });
+        }
+      }
+    };
+    void pollMachines();
+    const interval = setInterval(pollMachines, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [b4Enabled, isRelay, pairing.kind, currentMachineId]);
   useEffect(() => {
     if (pairing.kind !== 'confirming') return;
     const timer = window.setTimeout(() => setPairing({ kind: 'expired', info: pairing.info }), Math.max(0, pairing.expiresAt - performance.now()));
@@ -185,11 +234,11 @@ function App() {
             setCreatedSessionId(null);
           }
         };
-        const relayParam = query.get('relay');
-        const machineParam = query.get('machine');
+        const relayUrl = isRelay ? defaultRelayUrl() : query.get('relay');
+        const machineId = isRelay ? (currentMachineId ?? activeMachineId()) : query.get('machine');
         const session = createBrowserSession({
-          connect: relayParam && machineParam
-            ? (opts) => connectBrowserRelay({ relayUrl: relayParam, machineId: machineParam, identity: opts.identity, cursor: opts.cursor, journalEpoch: opts.journalEpoch })
+          connect: relayUrl && machineId
+            ? (opts) => connectBrowserRelay({ relayUrl, machineId, identity: opts.identity, cursor: opts.cursor, journalEpoch: opts.journalEpoch })
             : connectBrowser,
           url: browserWebSocketUrl(),
           identity,
@@ -472,8 +521,46 @@ function App() {
   if (!b4Enabled && pairing.kind !== 'paired') {
     const info = 'info' in pairing ? pairing.info : undefined;
     const verify = () => { if (info) { setFallbackAcknowledged(false); setPairing(beginConfirmation(info)); } };
-    const refresh = () => { setPairing({ kind: 'loading' }); void pairingApi.inspect().then((next) => setPairing(stateFromInfo(next))).catch(() => setPairing({ kind: 'error', message: 'Could not read daemon identity. Check that the daemon is available and retry.' })); };
-    return <PairingScreen state={pairing} browserMode={browserMode} busy={pairingBusy} enrollmentCode={enrollmentCode} fallbackAcknowledged={fallbackAcknowledged} onCode={setEnrollmentCode} onAcknowledge={setFallbackAcknowledged} onReview={verify} onRetry={refresh} onPair={() => { setPairingBusy(true); void confirmPairing(pairing, pairingApi, undefined, enrollmentCode, fallbackAcknowledged).then(setPairing).finally(() => setPairingBusy(false)); }} onCancel={() => { setEnrollmentCode(''); setFallbackAcknowledged(false); if (info) setPairing(stateFromInfo(info)); }}/>
+    const refresh = () => {
+      setPairing({ kind: 'loading' });
+      void pairingApi.inspect().then((next) => setPairing(stateFromInfo(next))).catch((err) => {
+        setPairing({ kind: 'error', message: err instanceof Error ? err.message : 'Could not read daemon identity. Check that the daemon is available and retry.' });
+      });
+    };
+    const handleSelectMachine = (machineId: string) => {
+      setActiveMachineId(machineId);
+      setCurrentMachineId(machineId);
+      setPairing({ kind: 'loading' });
+      void pairingApi.inspect()
+        .then((next) => setPairing(stateFromInfo(next)))
+        .catch((err) => setPairing({ kind: 'error', message: err instanceof Error ? err.message : 'Could not read daemon identity.' }));
+    };
+    return (
+      <PairingScreen
+        state={pairing}
+        browserMode={browserMode}
+        busy={pairingBusy}
+        enrollmentCode={enrollmentCode}
+        fallbackAcknowledged={fallbackAcknowledged}
+        onCode={setEnrollmentCode}
+        onAcknowledge={setFallbackAcknowledged}
+        onReview={verify}
+        onRetry={refresh}
+        onPair={() => {
+          setPairingBusy(true);
+          void confirmPairing(pairing, pairingApi, undefined, enrollmentCode, fallbackAcknowledged).then(setPairing).finally(() => setPairingBusy(false));
+        }}
+        onCancel={() => {
+          setEnrollmentCode('');
+          setFallbackAcknowledged(false);
+          if (info) setPairing(stateFromInfo(info));
+        }}
+        isRelay={isRelay}
+        machineId={currentMachineId}
+        availableMachines={availableMachines}
+        onSelectMachine={handleSelectMachine}
+      />
+    );
   }
   if (browserMain && pairing.kind === 'paired') {
     const resolveApproval = (approvalId: string, optionId: string, binding: ApprovalBindingEcho) => {
