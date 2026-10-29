@@ -179,3 +179,12 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
   - **Process Containment Helper (M9, D43, S9-lite)**: Implemented macOS sentinel file-descriptor tracking (`ProcessContainment`) using unlinked sentinel files and fallback process group termination for child containment.
   - **Drain-then-Upgrade Coordinator (D39)**: Implemented `DrainCoordinator` enforcing graceful shutdown periods, tracking active session blockers, and rejecting new sessions during drainage.
   - **Gate G2 Validation (E1.17)**: Verified all 196 workspace Rust tests, Tauri prototype tests, TypeScript client tests, cargo deny, and schema drift checks without regressions.
+
+### Phase 2: Remote & Multi-Machine Relay Transport (E2.2, T2.1, 2026-10-29)
+
+- Implemented self-hosted Blind WebSocket Relay architecture (E2.2, T2.1, D67, D69, D70) replacing third-party Cloudflare dependencies:
+  - **Relay Server (`crates/relay`)**: Built `shardrail_relay` library and `shardrail-relay` executable providing in-memory blind routing keyed by `machine_id` and `client_id`, with bearer token authentication (`--auth-token`), machine online/offline status notifications, and strict payload isolation.
+  - **Outbound Daemon Dialer (`crates/shardraild/src/relay_dialer.rs`)**: Integrated `--relay-url`, `--relay-machine-id`, and `--relay-auth-token` CLI flags in `shardraild`. The daemon establishes an outbound-only WebSocket tunnel (D67) to the relay, reconnects automatically with exponential backoff, and transparently multiplexes frames between remote browser clients and the local Unix domain socket.
+  - **Browser Relay Client (`@shardrail/client`)**: Implemented `connectBrowserRelay` in `packages/client/src/browser.ts`, wrapping client frames and unmasking relay envelopes while managing remote machine availability status. Supported `?relay=...&machine=...` query parameters in the web console (`apps/s5-prototype/src/main.tsx`).
+  - **Production Deployment Assets (`deploy/`)**: Authored `deploy/shardrail-relay.service` (hardened systemd unit), `deploy/nginx-shardrail.conf` (Nginx reverse proxy with TLS Let's Encrypt and WebSocket upgrade mapping), and `deploy/README.md` for deployment on user's ForkHorizon VPS (`143.14.22.61`).
+  - **Verification**: Verified with 6 integration tests in `crates/relay/tests/relay_integration.rs`, end-to-end daemon tunnel test in `crates/shardraild/tests/relay_tunnel.rs`, browser relay test suite in `packages/client/test/relay-browser.test.ts`, and full repository checks.

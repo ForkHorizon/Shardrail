@@ -1055,6 +1055,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardrail_relay"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "shardraild"
 version = "0.1.0"
 dependencies = [
@@ -1070,6 +1084,7 @@ dependencies = [
  "shardrail-journal",
  "shardrail-protocol",
  "shardrail-session-core",
+ "shardrail_relay",
  "tempfile",
  "thiserror",
  "tokio",

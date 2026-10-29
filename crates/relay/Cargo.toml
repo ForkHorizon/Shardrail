@@ -1,0 +1,29 @@
+[package]
+name = "shardrail_relay"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Proprietary"
+
+[[bin]]
+name = "shardrail-relay"
+path = "src/main.rs"
+
+[lib]
+name = "shardrail_relay"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true, optional = false }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
+tokio-tungstenite = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

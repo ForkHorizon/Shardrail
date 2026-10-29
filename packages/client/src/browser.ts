@@ -104,10 +104,10 @@ export async function signBrowserTranscript(record: BrowserKeyRecord, message: U
 export type BrowserClientOptions = {
   url: string;
   identity: BrowserKeyRecord;
-  cursor?: number;
-  journalEpoch?: string;
-  WebSocketImpl?: typeof WebSocket;
-  cryptoProvider?: Crypto;
+  cursor?: number | undefined;
+  journalEpoch?: string | undefined;
+  WebSocketImpl?: typeof WebSocket | undefined;
+  cryptoProvider?: Crypto | undefined;
 };
 
 export type BrowserClient = {
@@ -158,38 +158,46 @@ function socketFrames(socket: WebSocket) {
   };
 }
 
-/** Opens the existing authenticated protocol-v1 handshake over a same-origin loopback WebSocket. */
-export async function connectBrowser(options: BrowserClientOptions): Promise<BrowserClient> {
-  const socket = new (options.WebSocketImpl ?? WebSocket)(options.url);
-  const frames = socketFrames(socket);
-  const next = frames.next;
-  await new Promise<void>((resolve, reject) => {
-    socket.onopen = () => resolve();
-    socket.onerror = () => reject(new Error("could not open daemon WebSocket"));
-    socket.onclose = () => reject(new Error("daemon WebSocket closed before opening"));
-  });
-  const send = (frame: unknown) => socket.send(JSON.stringify(frame));
+interface ProtocolChannel {
+  send(frame: unknown): void;
+  next(): Promise<string>;
+  onError(listener: (error: Error) => void): () => void;
+  close(): void;
+  reconnect(cursor: number, journalEpoch: string): Promise<BrowserClient>;
+}
+
+async function runBrowserSession(
+  channel: ProtocolChannel,
+  options: {
+    identity: BrowserKeyRecord;
+    cursor?: number | undefined;
+    journalEpoch?: string | undefined;
+    cryptoProvider?: Crypto | undefined;
+  },
+): Promise<BrowserClient> {
+  const send = channel.send;
+  const next = channel.next;
   const nonce = crypto.getRandomValues(new Uint8Array(32));
   const clientNonce = hex(nonce);
   send({ min_version: 1, max_version: 1, client_id: options.identity.clientId, public_key: options.identity.publicKey, nonce: clientNonce, resume_after: options.cursor ?? 0, journal_epoch: options.journalEpoch ?? null });
   const host = JSON.parse(await next()) as ServerHello | { error: string };
-  if ("error" in host) { socket.close(); throw new Error(String(host.error)); }
-  if (host.protocol_version !== 1) { socket.close(); throw new Error("unsupported daemon protocol version"); }
-  if (host.public_key !== options.identity.hostPublicKey) { socket.close(); throw new Error("daemon host key changed; pairing is blocked"); }
+  if ("error" in host) { channel.close(); throw new Error(String(host.error)); }
+  if (host.protocol_version !== 1) { channel.close(); throw new Error("unsupported daemon protocol version"); }
+  if (host.public_key !== options.identity.hostPublicKey) { channel.close(); throw new Error("daemon host key changed; pairing is blocked"); }
   const message = transcript([1, 1, host.protocol_version], [clientNonce, host.nonce, options.identity.publicKey, host.public_key]);
   const digest = new Uint8Array(await (options.cryptoProvider ?? crypto).subtle.digest("SHA-256", Uint8Array.from(message)));
   const valid = await ed.verifyAsync(unhex(host.signature), digest, unhex(host.public_key));
-  if (!valid) { socket.close(); throw new Error("daemon handshake signature is invalid"); }
+  if (!valid) { channel.close(); throw new Error("daemon handshake signature is invalid"); }
   send({ kind: "authenticate", signature: hex(await signBrowserTranscript(options.identity, digest, options.cryptoProvider ?? crypto)) });
   const authenticated = JSON.parse(await next()) as DaemonFrame;
-  if (authenticated.kind !== "authenticated") { socket.close(); throw new Error(authenticated.kind === "error" ? authenticated.error : "daemon authentication failed"); }
+  if (authenticated.kind !== "authenticated") { channel.close(); throw new Error(authenticated.kind === "error" ? authenticated.error : "daemon authentication failed"); }
 
   const frameListeners = new Set<(frame: DaemonFrame) => void>();
   const errorListeners = new Set<(error: Error) => void>();
   const pendingFrames: DaemonFrame[] = [];
   let cursor = resumeCursor(options.cursor, host);
   let resumed = false;
-  frames.onError((error) => errorListeners.forEach((listener) => listener(error)));
+  channel.onError((error) => errorListeners.forEach((listener) => listener(error)));
   void (async () => {
     while (true) {
       try {
@@ -202,7 +210,7 @@ export async function connectBrowser(options: BrowserClientOptions): Promise<Bro
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
         errorListeners.forEach((listener) => listener(failure));
-        socket.close();
+        channel.close();
         return;
       }
     }
@@ -210,14 +218,158 @@ export async function connectBrowser(options: BrowserClientOptions): Promise<Bro
   const sendFrame = (frame: ClientFrame) => send(frame);
   return {
     host,
-    onFrame(listener) { frameListeners.add(listener); pendingFrames.splice(0).forEach(listener); if (!resumed) { resumed = true; socket.send(JSON.stringify({ kind: "resume", resume_after: cursor })); } return () => frameListeners.delete(listener); },
+    onFrame(listener) { frameListeners.add(listener); pendingFrames.splice(0).forEach(listener); if (!resumed) { resumed = true; send({ kind: "resume", resume_after: cursor }); } return () => frameListeners.delete(listener); },
     onError(listener) { errorListeners.add(listener); return () => errorListeners.delete(listener); },
-    reconnect() { return connectBrowser({ ...options, cursor, journalEpoch: host.journal_epoch }); },
+    reconnect() { return channel.reconnect(cursor, host.journal_epoch); },
     request(request) { sendFrame({ kind: "request", request }); },
     resolveApproval(request) { sendFrame({ kind: "approval_resolution", request }); },
     resume(nextCursor) { cursor = Math.max(0, nextCursor); sendFrame({ kind: "resume", resume_after: cursor }); },
-    close() { socket.close(); },
+    close() { channel.close(); },
   };
+}
+
+/** Opens the existing authenticated protocol-v1 handshake over a same-origin loopback WebSocket. */
+export async function connectBrowser(options: BrowserClientOptions): Promise<BrowserClient> {
+  const socket = new (options.WebSocketImpl ?? WebSocket)(options.url);
+  const frames = socketFrames(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.onopen = () => resolve();
+    socket.onerror = () => reject(new Error("could not open daemon WebSocket"));
+    socket.onclose = () => reject(new Error("daemon WebSocket closed before opening"));
+  });
+  const channel: ProtocolChannel = {
+    send: (frame: unknown) => socket.send(JSON.stringify(frame)),
+    next: frames.next,
+    onError: frames.onError,
+    close: () => socket.close(),
+    reconnect: (cursor, journalEpoch) => connectBrowser({ ...options, cursor, journalEpoch }),
+  };
+  return runBrowserSession(channel, options);
+}
+
+export type BrowserRelayClientOptions = {
+  relayUrl: string;
+  machineId: string;
+  identity: BrowserKeyRecord;
+  cursor?: number | undefined;
+  journalEpoch?: string | undefined;
+  WebSocketImpl?: typeof WebSocket | undefined;
+  cryptoProvider?: Crypto | undefined;
+};
+
+/** Opens the authenticated protocol-v1 session tunneled through a blind WebSocket relay. */
+export async function connectBrowserRelay(options: BrowserRelayClientOptions): Promise<BrowserClient> {
+  const socket = new (options.WebSocketImpl ?? WebSocket)(options.relayUrl);
+  const queued: string[] = [];
+  const waiting: { resolve: (value: string) => void; reject: (error: Error) => void }[] = [];
+  const listeners = new Set<(error: Error) => void>();
+  let failure: Error | undefined;
+
+  const fail = (error: Error) => {
+    if (failure) return;
+    failure = error;
+    waiting.splice(0).forEach(({ reject }) => reject(error));
+    listeners.forEach((listener) => listener(error));
+    socket.close();
+  };
+
+  let initialStatusResolved = false;
+  let statusResolver: (() => void) | undefined;
+  let statusRejecter: ((err: Error) => void) | undefined;
+  const statusPromise = new Promise<void>((resolve, reject) => {
+    statusResolver = resolve;
+    statusRejecter = reject;
+  });
+
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string" || event.data.length > 1_048_576) {
+      return fail(new Error("invalid or oversized relay frame"));
+    }
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
+      return fail(new Error("invalid JSON frame from relay"));
+    }
+
+    if (msg.type === "status") {
+      const online = Boolean(msg.online);
+      if (!initialStatusResolved) {
+        initialStatusResolved = true;
+        if (online) {
+          statusResolver?.();
+        } else {
+          statusRejecter?.(new Error("remote machine is offline"));
+          fail(new Error("remote machine is offline"));
+        }
+      } else if (!online) {
+        fail(new Error("remote machine went offline"));
+      }
+      return;
+    }
+
+    if (msg.type === "relay" && msg.machine_id === options.machineId) {
+      const payloadStr = typeof msg.payload === "string" ? msg.payload : JSON.stringify(msg.payload);
+      const waiter = waiting.shift();
+      if (waiter) waiter.resolve(payloadStr);
+      else if (queued.length < MAX_QUEUED_FRAMES) queued.push(payloadStr);
+      else fail(new Error("daemon replay buffer overflow; reconnect to resync from the last delivered cursor"));
+    }
+  });
+
+  socket.addEventListener("error", () => {
+    const err = new Error("relay WebSocket failed");
+    if (!initialStatusResolved) statusRejecter?.(err);
+    fail(err);
+  });
+  socket.addEventListener("close", () => {
+    const err = new Error("relay WebSocket closed");
+    if (!initialStatusResolved) statusRejecter?.(err);
+    fail(err);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    socket.onopen = () => resolve();
+    socket.onerror = () => reject(new Error("could not open relay WebSocket"));
+    socket.onclose = () => reject(new Error("relay WebSocket closed before opening"));
+  });
+
+  // Register with relay as browser client
+  socket.send(JSON.stringify({
+    type: "hello",
+    role: "browser",
+    machine_id: options.machineId,
+    client_id: options.identity.clientId,
+  }));
+
+  // Wait for machine status confirmation
+  await statusPromise;
+
+  const channel: ProtocolChannel = {
+    send: (frame: unknown) => {
+      socket.send(JSON.stringify({
+        type: "relay",
+        machine_id: options.machineId,
+        client_id: options.identity.clientId,
+        payload: frame,
+      }));
+    },
+    next: () => new Promise<string>((resolve, reject) => {
+      const value = queued.shift();
+      if (value !== undefined) resolve(value);
+      else if (failure) reject(failure);
+      else waiting.push({ resolve, reject });
+    }),
+    onError: (listener) => {
+      listeners.add(listener);
+      if (failure) listener(failure);
+      return () => listeners.delete(listener);
+    },
+    close: () => socket.close(),
+    reconnect: (cursor, journalEpoch) => connectBrowserRelay({ ...options, cursor, journalEpoch }),
+  };
+
+  return runBrowserSession(channel, options);
 }
 
 export async function enrollBrowser(url: string, code: string, publicKey: string, WebSocketImpl: typeof WebSocket = WebSocket) {

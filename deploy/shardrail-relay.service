@@ -1,0 +1,31 @@
+[Unit]
+Description=Shardrail Blind WebSocket Relay Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shardrail
+Group=shardrail
+EnvironmentFile=-/etc/default/shardrail-relay
+ExecStart=/usr/local/bin/shardrail-relay --listen ${SHARDRAIL_RELAY_LISTEN:-127.0.0.1:4000} ${SHARDRAIL_RELAY_EXTRA_ARGS}
+Restart=always
+RestartSec=3s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

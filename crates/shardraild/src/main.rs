@@ -45,6 +45,7 @@ mod config_snapshot;
 pub(crate) mod containment;
 mod daemon_log;
 pub(crate) mod drain;
+pub(crate) mod relay_dialer;
 pub(crate) mod safe_git;
 mod session_checks;
 mod session_workdir;
@@ -110,6 +111,15 @@ struct Args {
     /// Test hook: replace the pinned workdir path before the helper opens it.
     #[arg(long, hide = true)]
     test_replace_workdir_after_pin: bool,
+    /// WebSocket Relay URL to dial outbound (e.g. wss://relay.example.com or ws://127.0.0.1:8787).
+    #[arg(long, value_name = "URL")]
+    relay_url: Option<String>,
+    /// Opaque Machine ID to register at the relay (e.g. m_home_m1).
+    #[arg(long, requires = "relay_url", value_name = "MACHINE_ID")]
+    relay_machine_id: Option<String>,
+    /// Optional authorization token required by the relay.
+    #[arg(long, requires = "relay_url", value_name = "TOKEN")]
+    relay_auth_token: Option<String>,
     #[command(subcommand)]
     command: Option<DaemonCommand>,
 }
@@ -118,6 +128,13 @@ struct BrowserListenerOptions {
     address: Option<SocketAddr>,
     assets_dir: Option<PathBuf>,
     open: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RelayOptions {
+    url: Option<String>,
+    machine_id: Option<String>,
+    auth_token: Option<String>,
 }
 
 fn open_default_browser(url: &str) -> io::Result<()> {
@@ -1760,6 +1777,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assets_dir: resolve_browser_assets_dir(args.browser_assets_dir),
                     open: args.browser_open,
                 },
+                RelayOptions {
+                    url: args.relay_url,
+                    machine_id: args.relay_machine_id,
+                    auth_token: args.relay_auth_token,
+                },
                 codex,
                 grok,
                 session_workdirs,
@@ -1783,6 +1805,7 @@ async fn run(
     approval_timeout_secs: u64,
     test_write_ahead_delay_ms: u64,
     browser: BrowserListenerOptions,
+    relay: RelayOptions,
     codex: Option<codex_app_server::CodexConfig>,
     grok: Option<GrokConfig>,
     session_workdirs: Vec<session_workdir::AllowedWorkdir>,
@@ -1914,6 +1937,19 @@ async fn run(
             }
         });
     }
+    let (relay_shutdown_tx, relay_shutdown_rx) = watch::channel(());
+    if let (Some(relay_url), Some(machine_id)) = (relay.url, relay.machine_id) {
+        let dialer_opts = relay_dialer::RelayDialerOptions {
+            relay_url,
+            machine_id,
+            auth_token: relay.auth_token,
+            socket_path: socket.clone(),
+        };
+        tokio::spawn(relay_dialer::run_relay_dialer(
+            dialer_opts,
+            relay_shutdown_rx,
+        ));
+    }
     let parent_closed = async move {
         if !exit_with_stdin {
             std::future::pending::<()>().await;
@@ -1949,6 +1985,7 @@ async fn run(
             }
             _ = &mut parent_closed => {
                 daemon_log::log("INFO", "daemon", "parent stdin closed; stopping");
+                let _ = relay_shutdown_tx.send(());
                 codex_app_server::shutdown_sessions().await;
                 return Ok(());
             }

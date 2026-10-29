@@ -13,7 +13,7 @@ import { UntrustedMarkdown } from './UntrustedMarkdown';
 import { coalesceChannelFrame, liveTailWindowSize, rangeForWindow, sameMarkdownVersion, transcriptOverscan } from './streaming-view';
 import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo, type PairingState } from './pairing';
 import { browserPairingApi, browserWebSocketUrl } from './browser-pairing';
-import { connectBrowser, openBrowserKeyStore } from '@shardrail/client/browser';
+import { connectBrowser, connectBrowserRelay, openBrowserKeyStore } from '@shardrail/client/browser';
 import { createBrowserSession, createFlightOnControl, createFlightOnSessionCreated, isKeyChangedError, noteCreateSent, sessionWorkdirs, type BrowserSession, type ConnectionPhase, type CreateFlight, type CreateFlightResult } from './browser-session';
 import { approvalIdFromPayload, clearPromptOnAccept, controlFailureTarget, reduceApprovalFlight, type ApprovalBindingEcho, type ApprovalFlight, type ApprovalFlightAction } from './session-model';
 import { MainScreen } from './MainScreen';
@@ -185,8 +185,12 @@ function App() {
             setCreatedSessionId(null);
           }
         };
+        const relayParam = query.get('relay');
+        const machineParam = query.get('machine');
         const session = createBrowserSession({
-          connect: connectBrowser,
+          connect: relayParam && machineParam
+            ? (opts) => connectBrowserRelay({ relayUrl: relayParam, machineId: machineParam, identity: opts.identity, cursor: opts.cursor, journalEpoch: opts.journalEpoch })
+            : connectBrowser,
           url: browserWebSocketUrl(),
           identity,
           // A new page replays the journal so the session list is complete. In-page reconnect uses the high-water cursor.
@@ -304,7 +308,11 @@ function App() {
               journalEpoch = saved.journalEpoch;
             }
           } catch { /* Ignore corrupt cursor state and replay from the beginning. */ }
-          client = await connectBrowser({ url: browserWebSocketUrl(), identity, ...(cursor === undefined || journalEpoch === undefined ? {} : { cursor, journalEpoch }) });
+          const relayParam = query.get('relay');
+          const machineParam = query.get('machine');
+          client = relayParam && machineParam
+            ? await connectBrowserRelay({ relayUrl: relayParam, machineId: machineParam, identity, cursor, journalEpoch })
+            : await connectBrowser({ url: browserWebSocketUrl(), identity, cursor, journalEpoch });
           if (disposed) { client.close(); return; }
           client.onFrame((frame) => {
             if (frame.kind === 'durable_event') {

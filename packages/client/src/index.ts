@@ -15,6 +15,23 @@ export type {
   ServerHello,
 } from "@shardrail/contracts";
 
+export {
+  connectBrowser,
+  connectBrowserRelay,
+  createBrowserIdentity,
+  openBrowserKeyStore,
+  daemonFingerprint,
+  enrollBrowser,
+  inspectBrowserIdentity,
+} from "./browser.ts";
+export type {
+  BrowserClient,
+  BrowserClientOptions,
+  BrowserKeyRecord,
+  BrowserKeyStore,
+  BrowserRelayClientOptions,
+} from "./browser.ts";
+
 export type ClientOptions = {
   socketPath: string;
   clientId: string;
