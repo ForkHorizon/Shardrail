@@ -8,7 +8,7 @@ Type=simple
 User=shardrail
 Group=shardrail
 EnvironmentFile=-/etc/default/shardrail-relay
-ExecStart=/usr/local/bin/shardrail-relay --listen ${SHARDRAIL_RELAY_LISTEN:-127.0.0.1:4000} ${SHARDRAIL_RELAY_EXTRA_ARGS}
+ExecStart=/usr/local/bin/shardrail-relay --listen 127.0.0.1:4000
 Restart=always
 RestartSec=3s
 
