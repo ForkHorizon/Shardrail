@@ -20,7 +20,7 @@ nix = { version = "0.31", features = ["fs", "socket", "user", "signal"] }
 ed25519-dalek = "2"
 sha2 = "0.10"
 futures-util = "=0.3.31"
-tokio-tungstenite = "=0.30.0"
+tokio-tungstenite = { version = "=0.30.0", features = ["native-tls"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
