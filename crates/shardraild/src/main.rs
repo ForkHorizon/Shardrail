@@ -42,9 +42,13 @@ use uuid::Uuid;
 mod approval_binding;
 mod codex_app_server;
 mod config_snapshot;
+pub(crate) mod containment;
 mod daemon_log;
+pub(crate) mod drain;
+pub(crate) mod safe_git;
 mod session_checks;
 mod session_workdir;
+pub(crate) mod workspace_lease;
 
 const PROTOCOL_VERSION: u32 = 1;
 const CLIENT_QUEUE_CAPACITY: usize = 32;
@@ -1594,6 +1598,9 @@ pub(crate) struct Daemon {
         Mutex<HashMap<Uuid, mpsc::UnboundedSender<codex_app_server::SessionCommand>>>,
     /// Provider turn id of the turn that is open for each session.
     pub(crate) session_turns: Mutex<HashMap<Uuid, String>>,
+    #[allow(dead_code)]
+    pub(crate) workspace_leases: workspace_lease::WorkspaceLeaseManager,
+    pub(crate) drain: drain::DrainCoordinator,
 }
 
 #[derive(Clone, Debug)]
@@ -1825,6 +1832,8 @@ async fn run(
         codex_status: Mutex::new(HashMap::new()),
         turn_commands: Mutex::new(HashMap::new()),
         session_turns: Mutex::new(HashMap::new()),
+        workspace_leases: workspace_lease::WorkspaceLeaseManager::new(),
+        drain: drain::DrainCoordinator::new(),
     });
     codex_app_server::install_shutdown_kill();
     daemon_log::log("INFO", "daemon", &startup_message(&socket, host_id, epoch));
@@ -3840,6 +3849,18 @@ async fn handle_session_create(
     let workdir_text = workdir
         .as_ref()
         .map(|pinned| pinned.path.display().to_string());
+    if let Err(err) = daemon.drain.can_accept_new_session() {
+        return reject_session_create(
+            daemon,
+            client,
+            outbound,
+            request.command_id,
+            workdir_text.as_deref(),
+            "drain",
+            &err.to_string(),
+        )
+        .await;
+    }
     let session_id = Uuid::now_v7();
     let (event_id, receipt) = if let Some(mut config) = daemon.codex.clone() {
         let Some(pinned) = workdir else {

@@ -21,6 +21,8 @@ pub enum JournalError {
     InvalidApproval,
     #[error("journal epoch or host id mismatch")]
     EpochMismatch,
+    #[error("journal corrupted: {0}")]
+    Corrupted(String),
 }
 
 pub struct Journal(Connection);
@@ -1004,6 +1006,123 @@ impl Journal {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn purge_session(&mut self, session_id: Uuid) -> Result<(), JournalError> {
+        let session_id_str = session_id.to_string();
+        self.0.execute_batch("PRAGMA secure_delete = ON;")?;
+
+        let tx = self.0.transaction()?;
+        tx.execute_batch(
+            "DROP TRIGGER IF EXISTS approval_events_no_delete;
+             DROP TRIGGER IF EXISTS events_no_delete;",
+        )?;
+        tx.execute(
+            "DELETE FROM approval_events WHERE session_id = ?1",
+            [&session_id_str],
+        )?;
+        tx.execute(
+            "DELETE FROM approvals WHERE session_id = ?1",
+            [&session_id_str],
+        )?;
+        tx.execute(
+            "DELETE FROM event_receipts WHERE event_id IN (SELECT event_id FROM events WHERE session_id = ?1)",
+            [&session_id_str],
+        )?;
+        tx.execute(
+            "DELETE FROM events WHERE session_id = ?1",
+            [&session_id_str],
+        )?;
+        tx.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS approval_events_no_delete BEFORE DELETE ON approval_events BEGIN SELECT RAISE(ABORT, 'append-only'); END;
+             CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'append-only'); END;",
+        )?;
+        tx.commit()?;
+
+        let _ = self
+            .0
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
+        Ok(())
+    }
+
+    pub fn integrity_check(&self) -> Result<(), JournalError> {
+        let mut stmt = self.0.prepare_cached("PRAGMA integrity_check(1)")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            let result: String = row.get(0)?;
+            if result.eq_ignore_ascii_case("ok") {
+                Ok(())
+            } else {
+                Err(JournalError::Corrupted(result))
+            }
+        } else {
+            Err(JournalError::Corrupted(
+                "integrity check returned no rows".to_string(),
+            ))
+        }
+    }
+
+    pub fn salvage_export(&self, target_path: &Path) -> Result<usize, JournalError> {
+        let mut target_journal = Journal::open(target_path)?;
+        let target_epoch = target_journal.journal_epoch()?;
+        let target_host = target_journal.host_id()?;
+
+        let mut stmt = self.0.prepare(
+            "SELECT event_id, host_id, session_id, schema_version, kind, occurred_at_ms, provider_ref, causation, redaction_flags, payload FROM events ORDER BY event_id ASC"
+        )?;
+
+        let mut rows = stmt.query([])?;
+        let mut count = 0;
+        while let Ok(Some(row)) = rows.next() {
+            let session_id_str: String = match row.get(2) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let session_id = match Uuid::parse_str(&session_id_str) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let schema_version: u32 = match row.get(3) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kind: String = match row.get(4) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            let occurred_at_ms: i64 = match row.get(5) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let provider_ref: Option<String> = row.get(6).unwrap_or(None);
+            let causation: Option<String> = row.get(7).unwrap_or(None);
+            let flags_json: String = row.get(8).unwrap_or_else(|_| "[]".to_string());
+            let redaction_flags: Vec<String> =
+                serde_json::from_str(&flags_json).unwrap_or_default();
+            let payload_json: String = row.get(9).unwrap_or_else(|_| "{}".to_string());
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_json).unwrap_or(serde_json::Value::Null);
+
+            let event = DurableEvent {
+                event_id: 0,
+                journal_epoch: target_epoch,
+                host_id: target_host,
+                session_id,
+                schema_version,
+                kind,
+                occurred_at_ms,
+                provider_ref,
+                causation,
+                redaction_flags,
+                payload,
+            };
+
+            if target_journal.append_event(&event).is_ok() {
+                count += 1;
+            }
+        }
+
+        Ok(count)
     }
 
     #[cfg(feature = "test-utils")]
@@ -2011,6 +2130,113 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn purge_session_removes_all_events_and_approvals_with_secure_delete() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).unwrap();
+
+        let session1 = Uuid::now_v7();
+        let session2 = Uuid::now_v7();
+        let epoch = journal.journal_epoch().unwrap();
+        let host = journal.host_id().unwrap();
+
+        let event1 = DurableEvent {
+            event_id: 0,
+            journal_epoch: epoch,
+            host_id: host,
+            session_id: session1,
+            schema_version: 1,
+            kind: "test_event".into(),
+            occurred_at_ms: 100,
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload: serde_json::json!({"data": "session1"}),
+        };
+        let event2 = DurableEvent {
+            event_id: 0,
+            journal_epoch: epoch,
+            host_id: host,
+            session_id: session2,
+            schema_version: 1,
+            kind: "test_event".into(),
+            occurred_at_ms: 200,
+            provider_ref: None,
+            causation: None,
+            redaction_flags: Vec::new(),
+            payload: serde_json::json!({"data": "session2"}),
+        };
+
+        journal.append_event(&event1).unwrap();
+        journal.append_event(&event2).unwrap();
+
+        let mut approval = pending_approval(Uuid::now_v7());
+        approval.session_id = session1;
+        journal.create_pending_approval(&approval).unwrap();
+
+        assert_eq!(journal.events_for_session(session1).unwrap().len(), 2);
+        assert_eq!(journal.load_approvals(session1).unwrap().len(), 1);
+        assert_eq!(journal.events_for_session(session2).unwrap().len(), 1);
+
+        journal.purge_session(session1).unwrap();
+
+        assert_eq!(journal.events_for_session(session1).unwrap().len(), 0);
+        assert_eq!(journal.load_approvals(session1).unwrap().len(), 0);
+        assert_eq!(journal.events_for_session(session2).unwrap().len(), 1);
+
+        // Append-only protection remains active after purge
+        assert!(
+            journal
+                .0
+                .execute("DELETE FROM events WHERE 1=1", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn integrity_check_and_salvage_export() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("journal.db");
+        let mut journal = Journal::open(&path).unwrap();
+
+        assert!(journal.integrity_check().is_ok());
+
+        let session = Uuid::now_v7();
+        let epoch = journal.journal_epoch().unwrap();
+        let host = journal.host_id().unwrap();
+
+        for i in 1..=5 {
+            let event = DurableEvent {
+                event_id: 0,
+                journal_epoch: epoch,
+                host_id: host,
+                session_id: session,
+                schema_version: 1,
+                kind: format!("event_{i}"),
+                occurred_at_ms: 1000 + i,
+                provider_ref: None,
+                causation: None,
+                redaction_flags: Vec::new(),
+                payload: serde_json::json!({"index": i}),
+            };
+            journal.append_event(&event).unwrap();
+        }
+
+        let salvage_path = dir.path().join("salvaged.db");
+        let count = journal.salvage_export(&salvage_path).unwrap();
+        assert_eq!(count, 5);
+
+        let salvaged_journal = Journal::open(&salvage_path).unwrap();
+        assert!(salvaged_journal.integrity_check().is_ok());
+        let events = salvaged_journal.events_for_session(session).unwrap();
+        assert_eq!(events.len(), 5);
+        assert_ne!(
+            salvaged_journal.journal_epoch().unwrap(),
+            journal.journal_epoch().unwrap()
         );
     }
 }

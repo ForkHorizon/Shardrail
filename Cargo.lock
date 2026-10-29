@@ -1071,6 +1071,7 @@ dependencies = [
  "shardrail-protocol",
  "shardrail-session-core",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-tungstenite",
  "uuid",

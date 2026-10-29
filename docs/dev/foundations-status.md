@@ -169,3 +169,13 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
   - Added `--open-browser` flag to `scripts/dev-try.sh` and verified flag propagation and dry-run output in `scripts/dev-try.test.mjs`.
   - Implemented automatic browser assets discovery (`resolve_browser_assets_dir`) resolving standard OS install paths (`~/Library/Application Support/Shardrail/browser-assets` on macOS, XDG data on Linux, executable bundle directories, and developer workspace `apps/s5-prototype/dist`) when `--browser-assets-dir` is omitted, while preserving explicit `--browser-assets-dir` flag override.
   - Verified via unit test suite `browser_assets_dir_resolution_checks` covering override precedence, environment overrides, candidate executable paths, OS data directories, and developer fallbacks.
+
+### Phase 1e: Hardening & Workspace Service (Gate G2, 2026-10-29)
+
+- Implemented Phase 1e Hardening & Workspace Service (E1.9, E1.17, E1.18, M9, M11, D39, D40, D43, D47):
+  - **Journal Purge & Salvage (D40)**: Implemented `purge_session` with `PRAGMA secure_delete=FAST` and `VACUUM`, `integrity_check`, corrupted session recovery (`salvage_session`), and JSON archive export (`export_archive`) in `crates/journal`.
+  - **Workspace Write Lease Manager (M11, D47)**: Implemented `WorkspaceLeaseManager` for exclusive directory-level worktree write leasing with conflict detection, renewal, and release.
+  - **Safe Git Worker (M11, D47)**: Implemented isolated Git repository inspection (`SafeGitWorker`) parsing `.git/HEAD`, loose/packed refs, worktree state hashing, and neutralizing dangerous execution directives (`core.fsmonitor`, `core.hookspath`, `core.sshcommand`, `diff.*.command`, `filter.*`).
+  - **Process Containment Helper (M9, D43, S9-lite)**: Implemented macOS sentinel file-descriptor tracking (`ProcessContainment`) using unlinked sentinel files and fallback process group termination for child containment.
+  - **Drain-then-Upgrade Coordinator (D39)**: Implemented `DrainCoordinator` enforcing graceful shutdown periods, tracking active session blockers, and rejecting new sessions during drainage.
+  - **Gate G2 Validation (E1.17)**: Verified all 196 workspace Rust tests, Tauri prototype tests, TypeScript client tests, cargo deny, and schema drift checks without regressions.
