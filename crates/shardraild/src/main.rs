@@ -23,6 +23,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,6 +73,8 @@ struct Args {
     browser_listen: Option<SocketAddr>,
     #[arg(long, requires = "browser_listen")]
     browser_assets_dir: Option<PathBuf>,
+    #[arg(long)]
+    browser_open: bool,
     /// Codex CLI used as `codex app-server` for one child process per session.
     #[arg(long, value_name = "PATH")]
     codex_app_server: Option<PathBuf>,
@@ -110,6 +113,154 @@ struct Args {
 struct BrowserListenerOptions {
     address: Option<SocketAddr>,
     assets_dir: Option<PathBuf>,
+    open: bool,
+}
+
+fn open_default_browser(url: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = StdCommand::new("open").arg(url).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "open exited with status {status}"
+            )))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = StdCommand::new("xdg-open").arg(url).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "xdg-open exited with status {status}"
+            )))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = StdCommand::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "cmd /C start exited with status {status}"
+            )))
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "browser auto-open is not supported on this platform",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostPlatform {
+    Macos,
+    Linux,
+    Other,
+}
+
+fn current_platform() -> HostPlatform {
+    if cfg!(target_os = "macos") {
+        HostPlatform::Macos
+    } else if cfg!(target_os = "linux") {
+        HostPlatform::Linux
+    } else {
+        HostPlatform::Other
+    }
+}
+
+fn resolve_browser_assets_dir(override_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let env_override = std::env::var_os("SHARDRAIL_BROWSER_ASSETS_DIR").map(PathBuf::from);
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    let current_dir = std::env::current_dir().ok();
+
+    resolve_browser_assets_dir_from(
+        current_platform(),
+        override_dir,
+        env_override,
+        exe_dir.as_deref(),
+        home.as_deref(),
+        xdg_data_home.as_deref(),
+        current_dir.as_deref(),
+    )
+}
+
+fn resolve_browser_assets_dir_from(
+    platform: HostPlatform,
+    override_dir: Option<PathBuf>,
+    env_override: Option<PathBuf>,
+    exe_dir: Option<&Path>,
+    home: Option<&Path>,
+    xdg_data_home: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = override_dir {
+        return Some(dir);
+    }
+    if let Some(dir) = env_override.filter(|dir| dir.join("index.html").is_file()) {
+        return Some(dir);
+    }
+    if let Some(exe_dir) = exe_dir {
+        let candidates = [
+            exe_dir.join("browser-assets"),
+            exe_dir.join("dist"),
+            exe_dir.join("../Resources/browser-assets"),
+            exe_dir.join("../share/shardrail/browser-assets"),
+        ];
+        for candidate in candidates {
+            if candidate.join("index.html").is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    match platform {
+        HostPlatform::Macos => {
+            if let Some(candidate) = home
+                .map(|h| h.join("Library/Application Support/Shardrail/browser-assets"))
+                .filter(|c| c.join("index.html").is_file())
+            {
+                return Some(candidate);
+            }
+        }
+        HostPlatform::Linux => {
+            if let Some(candidate) = xdg_data_home
+                .map(|xdg| xdg.join("shardrail/browser-assets"))
+                .filter(|c| c.join("index.html").is_file())
+            {
+                return Some(candidate);
+            }
+            if let Some(candidate) = home
+                .map(|h| h.join(".local/share/shardrail/browser-assets"))
+                .filter(|c| c.join("index.html").is_file())
+            {
+                return Some(candidate);
+            }
+        }
+        HostPlatform::Other => {}
+    }
+    if let Some(candidate) = current_dir
+        .map(|cwd| cwd.join("apps/s5-prototype/dist"))
+        .filter(|c| c.join("index.html").is_file())
+    {
+        return Some(candidate);
+    }
+    None
 }
 
 async fn resolve_approval(
@@ -1599,7 +1750,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.test_write_ahead_delay_ms,
                 BrowserListenerOptions {
                     address: args.browser_listen,
-                    assets_dir: args.browser_assets_dir,
+                    assets_dir: resolve_browser_assets_dir(args.browser_assets_dir),
+                    open: args.browser_open,
                 },
                 codex,
                 grok,
@@ -1647,6 +1799,7 @@ async fn run(
     let abandoned = Coordinator::recover_journal(&mut journal)?;
     let socket = path.join("shardraild.sock");
     let listener = bind_private_socket(&socket)?;
+    let should_open_browser = browser.open;
     let browser_listener = if let Some(address) = browser.address {
         Some(bind_browser_listener(address).await?)
     } else {
@@ -1690,11 +1843,35 @@ async fn run(
     );
     if let Some(listener) = browser_listener {
         let address = listener.local_addr()?;
+        let browser_url = format!("http://{address}/");
         daemon_log::log(
             "INFO",
             "browser",
             &format!("WebSocket listening at ws://{address}/ws"),
         );
+        if let Some(ref assets_path) = browser.assets_dir {
+            daemon_log::log(
+                "INFO",
+                "browser",
+                &format!("serving browser assets from {}", assets_path.display()),
+            );
+        } else {
+            daemon_log::log(
+                "WARN",
+                "browser",
+                "no browser assets directory configured; static requests will return 404",
+            );
+        }
+        if should_open_browser {
+            match open_default_browser(&browser_url) {
+                Ok(()) => daemon_log::log("INFO", "browser", "opened browser to the daemon UI"),
+                Err(error) => daemon_log::log(
+                    "WARN",
+                    "browser",
+                    &format!("browser auto-open failed for {browser_url}: {error}"),
+                ),
+            }
+        }
         let daemon = Arc::clone(&daemon);
         tokio::spawn(async move {
             loop {
@@ -2111,6 +2288,133 @@ mod browser_listener_tests {
             );
         }
         server.await.unwrap();
+    }
+
+    #[test]
+    fn browser_assets_dir_resolution_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path();
+
+        // 1. Explicit override always wins unconditionally.
+        let explicit = temp_path.join("explicit");
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Macos,
+                Some(explicit.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            Some(explicit)
+        );
+
+        // 2. Env override wins when index.html exists inside.
+        let env_dir = temp_path.join("env_assets");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(env_dir.join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Macos,
+                None,
+                Some(env_dir.clone()),
+                None,
+                None,
+                None,
+                None,
+            ),
+            Some(env_dir)
+        );
+
+        // 3. Exe dir browser-assets candidate when index.html exists.
+        let exe_dir = temp_path.join("bin");
+        let exe_assets = exe_dir.join("browser-assets");
+        fs::create_dir_all(&exe_assets).unwrap();
+        fs::write(exe_assets.join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Macos,
+                None,
+                None,
+                Some(&exe_dir),
+                None,
+                None,
+                None,
+            ),
+            Some(exe_assets)
+        );
+
+        // 4. macOS home Library/Application Support/Shardrail/browser-assets
+        let macos_home = temp_path.join("macos_user");
+        let macos_app_support =
+            macos_home.join("Library/Application Support/Shardrail/browser-assets");
+        fs::create_dir_all(&macos_app_support).unwrap();
+        fs::write(macos_app_support.join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Macos,
+                None,
+                None,
+                None,
+                Some(&macos_home),
+                None,
+                None,
+            ),
+            Some(macos_app_support)
+        );
+
+        // 5. Linux XDG data home shardrail/browser-assets
+        let linux_xdg = temp_path.join("xdg_data");
+        let linux_assets = linux_xdg.join("shardrail/browser-assets");
+        fs::create_dir_all(&linux_assets).unwrap();
+        fs::write(linux_assets.join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Linux,
+                None,
+                None,
+                None,
+                None,
+                Some(&linux_xdg),
+                None,
+            ),
+            Some(linux_assets)
+        );
+
+        // 6. Current dir apps/s5-prototype/dist fallback
+        let cwd = temp_path.join("repo");
+        let dev_dist = cwd.join("apps/s5-prototype/dist");
+        fs::create_dir_all(&dev_dist).unwrap();
+        fs::write(dev_dist.join("index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Macos,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&cwd),
+            ),
+            Some(dev_dist)
+        );
+
+        // 7. Returns None when nothing matches.
+        let empty_cwd = temp_path.join("empty_repo");
+        fs::create_dir_all(&empty_cwd).unwrap();
+        assert_eq!(
+            resolve_browser_assets_dir_from(
+                HostPlatform::Macos,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&empty_cwd),
+            ),
+            None
+        );
     }
 }
 

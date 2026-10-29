@@ -1,6 +1,6 @@
 #!/bin/sh
 # Start shardraild and the browser UI for one local try.
-# Prints a URL and an enrollment code. Does not open a browser.
+# Prints a URL and an enrollment code. Does not open a browser unless --open-browser is passed.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -29,6 +29,7 @@ WORKDIR=${SHARDRAIL_SESSION_WORKDIR:-$SHARDRAIL/spikes/s1-testrepo}
 CODEX=${SHARDRAIL_TRY_CODEX:-}
 SKIP_BUILD=0
 DRY_RUN=0
+OPEN_BROWSER=0
 if [ "${SHARDRAIL_TRY_SKIP_BUILD:-}" = 1 ]; then
   SKIP_BUILD=1
 fi
@@ -36,6 +37,7 @@ fi
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
+    --open-browser) OPEN_BROWSER=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --codex)
       if [ $# -lt 2 ]; then
@@ -157,7 +159,11 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "DATA=\$(mktemp -d)"
-  echo "\"$BIN\" --data-dir \"\$DATA\" --no-file-log --exit-with-stdin --codex-app-server \"$CODEX\" --session-workdir \"$WORKDIR\" --codex-config 'model_reasoning_effort=\"low\"' --browser-listen 127.0.0.1:$PORT --browser-assets-dir \"$ASSETS\""
+  if [ "$OPEN_BROWSER" = 1 ]; then
+    echo "\"$BIN\" --data-dir \"\$DATA\" --no-file-log --exit-with-stdin --codex-app-server \"$CODEX\" --session-workdir \"$WORKDIR\" --codex-config 'model_reasoning_effort=\"low\"' --browser-listen 127.0.0.1:$PORT --browser-assets-dir \"$ASSETS\" --browser-open"
+  else
+    echo "\"$BIN\" --data-dir \"\$DATA\" --no-file-log --exit-with-stdin --codex-app-server \"$CODEX\" --session-workdir \"$WORKDIR\" --codex-config 'model_reasoning_effort=\"low\"' --browser-listen 127.0.0.1:$PORT --browser-assets-dir \"$ASSETS\""
+  fi
   echo "\"$BIN\" --data-dir \"\$DATA\" client enroll --label browser --allow-session-create"
   echo "prints url=http://127.0.0.1:$PORT/ and enrollment_code. Does not open a browser."
   exit 0
@@ -178,17 +184,32 @@ mkfifo "$DATA/parent.stdin"
 # when this script exits, including after SIGKILL or a closed terminal.
 exec 3<>"$DATA/parent.stdin"
 export SHARDRAIL_DEV_TRY_MARK=$DATA
-"$BIN" \
-  --data-dir "$DATA" \
-  --no-file-log \
-  --exit-with-stdin \
-  --codex-app-server "$CODEX" \
-  --session-workdir "$WORKDIR" \
-  --codex-config 'model_reasoning_effort="low"' \
-  --browser-listen "127.0.0.1:$PORT" \
-  --browser-assets-dir "$ASSETS" \
-  <"$DATA/parent.stdin" 3>&- \
-  >"$DATA/daemon.stdout" 2>"$DATA/daemon.stderr" &
+if [ "$OPEN_BROWSER" = 1 ]; then
+  "$BIN" \
+    --data-dir "$DATA" \
+    --no-file-log \
+    --exit-with-stdin \
+    --codex-app-server "$CODEX" \
+    --session-workdir "$WORKDIR" \
+    --codex-config 'model_reasoning_effort="low"' \
+    --browser-listen "127.0.0.1:$PORT" \
+    --browser-assets-dir "$ASSETS" \
+    --browser-open \
+    <"$DATA/parent.stdin" 3>&- \
+    >"$DATA/daemon.stdout" 2>"$DATA/daemon.stderr" &
+else
+  "$BIN" \
+    --data-dir "$DATA" \
+    --no-file-log \
+    --exit-with-stdin \
+    --codex-app-server "$CODEX" \
+    --session-workdir "$WORKDIR" \
+    --codex-config 'model_reasoning_effort="low"' \
+    --browser-listen "127.0.0.1:$PORT" \
+    --browser-assets-dir "$ASSETS" \
+    <"$DATA/parent.stdin" 3>&- \
+    >"$DATA/daemon.stdout" 2>"$DATA/daemon.stderr" &
+fi
 DAEMON_PID=$!
 printf '%s\n' "$DAEMON_PID" >"$DATA/daemon.pid"
 

@@ -109,10 +109,23 @@ test('dev-try dry-run prints the commands and does not enroll', async () => {
   assert.match(result.stdout, /shardraild/);
   assert.match(result.stdout, /--exit-with-stdin/);
   assert.match(result.stdout, /--allow-session-create/);
+  assert.doesNotMatch(result.stdout, /--browser-open/);
   assert.doesNotMatch(readFileSync(script, 'utf8'), /\/Users\/daliys/);
   assert.match(result.stdout, /model_reasoning_effort/);
   assert.match(result.stdout, new RegExp(`127\\.0\\.0\\.1:${port}`));
   assert.doesNotMatch(result.stdout, /enrollment_code=[0-9a-f]{64}/);
+});
+
+test('dev-try dry-run with --open-browser passes --browser-open to shardraild', async () => {
+  await chmod(fake, 0o755);
+  const port = await freePort();
+  const result = spawnSync('sh', [script, '--dry-run', '--skip-build', '--open-browser', '--codex', fake, '--port', String(port), '--workdir', '/tmp'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--browser-open/);
 });
 
 test('dev-try refuses a dry-run when codex is missing or the port is busy', async () => {

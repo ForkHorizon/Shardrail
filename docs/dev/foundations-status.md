@@ -161,3 +161,11 @@ P1a foundations, the coordinator core, M01 directory/lock guards, the authentica
   - Extended ACP harness (`crates/fake-acp`) with version negotiation (v1/v2 dual-stack, D35), forbidden client capability refusal (`fs`, `terminal`, D7), prompt acknowledgements, and structured notifications (T1.2b).
   - Handled ACP `session/request_permission` flow with durable approval journaling and client resolution (`approval_resolved`).
   - Verified via integration test suite `crates/shardraild/tests/grok.rs` covering lifecycle, multi-turn updates, approvals, and error handling.
+
+### Phase 1c: Browser packaging and zero-install launcher UX (2026-10-29)
+
+- Implemented Phase 1c browser packaging and launcher improvements (D68, T1.17, EV-35):
+  - Added `--browser-open` CLI flag to `shardraild` with cross-platform browser launcher (`open_default_browser`) supporting macOS (`open`), Linux (`xdg-open`), and Windows (`cmd /c start`).
+  - Added `--open-browser` flag to `scripts/dev-try.sh` and verified flag propagation and dry-run output in `scripts/dev-try.test.mjs`.
+  - Implemented automatic browser assets discovery (`resolve_browser_assets_dir`) resolving standard OS install paths (`~/Library/Application Support/Shardrail/browser-assets` on macOS, XDG data on Linux, executable bundle directories, and developer workspace `apps/s5-prototype/dist`) when `--browser-assets-dir` is omitted, while preserving explicit `--browser-assets-dir` flag override.
+  - Verified via unit test suite `browser_assets_dir_resolution_checks` covering override precedence, environment overrides, candidate executable paths, OS data directories, and developer fallbacks.
