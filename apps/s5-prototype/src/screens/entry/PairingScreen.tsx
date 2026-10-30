@@ -15,6 +15,7 @@ export function PairingScreen({
   onRetry,
   onPair,
   onCancel,
+  onReset,
   isRelay,
   machineId,
   availableMachines,
@@ -31,6 +32,7 @@ export function PairingScreen({
   onRetry: () => void;
   onPair: () => void;
   onCancel: () => void;
+  onReset?: () => void;
   isRelay?: boolean;
   machineId?: string | null;
   availableMachines?: { machine_id: string; online: boolean }[];
@@ -76,7 +78,8 @@ export function PairingScreen({
       <Button className="button-primary" isDisabled={busy || (browserMode && info?.keyStorage === 'noble-fallback' && !fallbackAcknowledged)} onPress={onPair}>{busy ? 'Pairing…' : 'I verified this fingerprint — pair'}</Button>
       <Button className="button-secondary" isDisabled={busy} onPress={onCancel}>Cancel</Button>
     </> : null}
-    {state.kind === 'unpaired' || (!browserMode && state.kind === 'mismatch') || state.kind === 'expired' ? <Button onPress={onReview}>{state.kind === 'mismatch' ? 'Review fingerprint and re-pair' : state.kind === 'expired' ? 'Review fingerprint again' : 'Review fingerprint'}</Button> : null}
+    {state.kind === 'unpaired' || state.kind === 'mismatch' || state.kind === 'expired' ? <Button onPress={onReview}>{state.kind === 'mismatch' ? 'Review fingerprint and re-pair' : state.kind === 'expired' ? 'Review fingerprint again' : 'Review fingerprint'}</Button> : null}
+    {state.kind === 'mismatch' && onReset ? <Button className="button-secondary" onPress={onReset}>Reset pairing for this machine</Button> : null}
     {state.kind === 'error' ? <Button className="button-secondary" onPress={onRetry}>Retry</Button> : null}
   </section></main>;
 }

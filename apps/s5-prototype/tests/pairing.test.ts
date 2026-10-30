@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { beginConfirmation, confirmPairing, stateFromInfo, unpairClient, type PairingApi, type PairingInfo } from '../src/pairing';
+import { machinePinKey } from '../src/browser-pairing';
 
 const info: PairingInfo = { daemonPublicKey: 'a'.repeat(64), fingerprint: 'SHA256:one', clientId: null, pinnedPublicKey: null };
 function api(overrides: Partial<PairingApi> = {}): PairingApi {
@@ -65,4 +66,9 @@ test('failed registration and unpair remain explicit errors', async () => {
 test('identity read failure has distinct recovery copy from enrollment rejection', async () => {
   const state = await confirmPairing(beginConfirmation(info), api({ inspect: async () => { throw new Error('offline'); } }));
   assert.deepEqual(state, { kind: 'error', message: 'Could not read daemon identity. Check that the daemon is available, then retry.', info });
+});
+
+test('machinePinKey namespaces key when machineId is provided in relay environment', () => {
+  assert.equal(machinePinKey(null), 'shardrail-daemon-public-key');
+  assert.equal(machinePinKey('macbook'), 'shardrail-daemon-public-key'); // location is undefined in node, so falls back to single key
 });

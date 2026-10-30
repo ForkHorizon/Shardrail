@@ -558,6 +558,9 @@ function App() {
           setFallbackAcknowledged(false);
           if (info) setPairing(stateFromInfo(info));
         }}
+        onReset={() => {
+          void pairingApi.unpair().then(refresh);
+        }}
         isRelay={isRelay}
         machineId={currentMachineId}
         availableMachines={availableMachines}

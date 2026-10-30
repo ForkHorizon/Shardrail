@@ -78,23 +78,29 @@ export function browserWebSocketUrl() {
   return url.toString();
 }
 
-const pinnedKeyName = 'shardrail-daemon-public-key';
+export function machinePinKey(machineId?: string | null): string {
+  return isRelayEnvironment() && machineId
+    ? `shardrail-daemon-public-key:${machineId}`
+    : 'shardrail-daemon-public-key';
+}
 
 export const browserPairingApi: PairingApi = {
   async inspect(): Promise<PairingInfo> {
     let daemonPublicKey: string;
+    let machineId: string | undefined;
     if (isRelayEnvironment()) {
       const relayUrl = defaultRelayUrl();
-      const machineId = await resolveMachineId(relayUrl);
+      machineId = await resolveMachineId(relayUrl);
       daemonPublicKey = await inspectBrowserIdentityRelay(relayUrl, machineId);
     } else {
       daemonPublicKey = await inspectBrowserIdentity(browserWebSocketUrl());
     }
+    const pinKey = machinePinKey(machineId);
     const store = await openBrowserKeyStore();
     let record = await store.get(daemonPublicKey);
-    const previous = (await store.list())[0];
+    const previous = !isRelayEnvironment() ? (await store.list())[0] : undefined;
     const persistedPin = record?.clientId !== 'pending' ? record?.hostPublicKey ?? previous?.hostPublicKey ?? null : previous?.hostPublicKey ?? null;
-    const pinnedPublicKey = localStorage.getItem(pinnedKeyName) ?? persistedPin;
+    const pinnedPublicKey = localStorage.getItem(pinKey) ?? persistedPin;
     if (!record && (!pinnedPublicKey || pinnedPublicKey === daemonPublicKey)) {
       record = await createBrowserIdentity(daemonPublicKey, 'pending', store);
     }
@@ -114,9 +120,10 @@ export const browserPairingApi: PairingApi = {
     }
     const code = (enrollmentCode ?? '').trim();
     let enrolled: { clientId: string; hostPublicKey: string };
+    let machineId: string | undefined;
     if (isRelayEnvironment()) {
       const relayUrl = defaultRelayUrl();
-      const machineId = await resolveMachineId(relayUrl);
+      machineId = await resolveMachineId(relayUrl);
       enrolled = await enrollBrowserRelay(relayUrl, machineId, code, identity.publicKey);
     } else {
       enrolled = await enrollBrowser(browserWebSocketUrl(), code, identity.publicKey);
@@ -126,10 +133,28 @@ export const browserPairingApi: PairingApi = {
       throw new Error('daemon key changed during enrollment; pairing is blocked');
     }
     await store.put({ ...identity, clientId: enrolled.clientId });
-    localStorage.setItem(pinnedKeyName, daemonPublicKey);
+    const pinKey = machinePinKey(machineId);
+    localStorage.setItem(pinKey, daemonPublicKey);
     return enrolled.clientId;
   },
   async unpair() {
-    throw new Error('browser keys are stored in this browser; remove this client with the local shardraild client remove command before clearing site data');
+    let machineId: string | undefined;
+    let daemonPublicKey: string | undefined;
+    if (isRelayEnvironment()) {
+      const relayUrl = defaultRelayUrl();
+      machineId = await resolveMachineId(relayUrl).catch(() => undefined);
+      if (machineId) {
+        daemonPublicKey = await inspectBrowserIdentityRelay(relayUrl, machineId).catch(() => undefined);
+      }
+    } else {
+      daemonPublicKey = await inspectBrowserIdentity(browserWebSocketUrl()).catch(() => undefined);
+    }
+    const pinKey = machinePinKey(machineId);
+    localStorage.removeItem(pinKey);
+    localStorage.removeItem('shardrail-daemon-public-key');
+    if (daemonPublicKey) {
+      const store = await openBrowserKeyStore();
+      await store.delete(daemonPublicKey);
+    }
   },
 };
