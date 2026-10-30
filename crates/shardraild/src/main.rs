@@ -3910,7 +3910,11 @@ async fn handle_session_create(
             .await;
         }
         WorkdirChoice::Unset => None,
-        WorkdirChoice::Path(pinned) if daemon.codex.is_none() && daemon.grok.is_none() => {
+        WorkdirChoice::Path(pinned)
+            if daemon.codex.is_none()
+                && daemon.grok.is_none()
+                && daemon.fake_acp_path.is_none() =>
+        {
             let text = pinned.path.display().to_string();
             return reject_session_create(
                 daemon,
