@@ -10,7 +10,7 @@ import { Icon } from './ui/Icon';
 import { StatusPill } from './ui/StatusPill';
 import { EmptyState } from './ui/EmptyState';
 
-export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createPending, createdSessionId, dismissedSessionId, onReconnect, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
+export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError, promptError, promptClear, workdirs, createError, createPending, createdSessionId, dismissedSessionId, onReconnect, onUnpair, onResolveApproval, onSendPrompt, onInterrupt, onCreateSession }: {
   phase: ConnectionPhase;
   keyStorage?: 'webcrypto' | 'noble-fallback';
   approvalInFlight: ReadonlySet<string>;
@@ -23,6 +23,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
   createdSessionId: string | null;
   dismissedSessionId: string | null;
   onReconnect: () => void;
+  onUnpair?: (() => void) | undefined;
   onResolveApproval: (approvalId: string, optionId: string, binding: ApprovalBindingEcho) => void;
   onSendPrompt: (sessionId: string, prompt: string) => void;
   onInterrupt: (sessionId: string) => void;
@@ -58,6 +59,7 @@ export function MainScreen({ phase, keyStorage, approvalInFlight, approvalError,
           <StatusPill tone={phase === 'connected' ? 'success' : phase === 'key-changed' ? 'danger' : 'warning'}><Icon className="icon" name={phase === 'connected' ? 'connection' : phase === 'key-changed' ? 'error' : 'reconnect'}/><span className={`connection-state connection-${phase}`} role={phase === 'key-changed' ? 'alert' : 'status'} aria-label={connectionStatusLabel(phase)}><span className="connection-full">{connectionStatusLabel(phase)}</span><span className="connection-short">{phase === 'connected' ? 'Online' : phase === 'key-changed' ? 'Key changed' : 'Reconnecting'}</span></span></StatusPill>
         </div>
         <div className="header-secondary">
+          {onUnpair ? <Button className="button-secondary" aria-label="Switch node" onPress={onUnpair}><Icon className="icon" name="close"/><span>Switch node</span></Button> : null}
           <Button className="button-secondary reconnect-button" aria-label="Reconnect" onPress={onReconnect}><Icon className="icon" name="reconnect"/><span>Reconnect</span></Button>
           <ThemeToggle/>
         </div>
