@@ -156,7 +156,7 @@ pub fn pin_data_directory(directory: &File) -> io::Result<()> {
 
 fn descriptor_path(directory: &File) -> io::Result<PathBuf> {
     #[cfg(target_os = "linux")]
-    return Ok(PathBuf::from("/proc/self/fd").join(directory.as_raw_fd().to_string()));
+    return fs::read_link(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     #[cfg(target_os = "macos")]
     {
         let mut path = PathBuf::new();

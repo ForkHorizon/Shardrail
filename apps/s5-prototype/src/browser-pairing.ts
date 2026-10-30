@@ -40,16 +40,22 @@ export function activeMachineId(): string | null {
   return localStorage.getItem('shardrail-active-machine') ?? null;
 }
 
-export function setActiveMachineId(machineId: string) {
+export function setActiveMachineId(machineId: string | null) {
   if (typeof localStorage !== 'undefined') {
-    localStorage.setItem('shardrail-active-machine', machineId);
+    if (machineId) {
+      localStorage.setItem('shardrail-active-machine', machineId);
+    } else {
+      localStorage.removeItem('shardrail-active-machine');
+    }
   }
 }
 
 export async function resolveMachineId(relayUrl: string = defaultRelayUrl()): Promise<string> {
-  const current = activeMachineId();
-  if (current) return current;
   const machines = await discoverRelayMachines(relayUrl);
+  const current = activeMachineId();
+  if (current && machines.some((m) => m.machine_id === current && m.online)) {
+    return current;
+  }
   const onlineMachine = machines.find((m) => m.online);
   if (onlineMachine) {
     setActiveMachineId(onlineMachine.machine_id);
@@ -59,6 +65,7 @@ export async function resolveMachineId(relayUrl: string = defaultRelayUrl()): Pr
     setActiveMachineId(machines[0].machine_id);
     return machines[0].machine_id;
   }
+  setActiveMachineId(null);
   throw new Error('Waiting for machine daemon to connect to relay...');
 }
 

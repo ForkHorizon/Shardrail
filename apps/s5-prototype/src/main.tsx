@@ -172,11 +172,12 @@ function App() {
           const chosen = (currentMachineId && online.some((m) => m.machine_id === currentMachineId))
             ? currentMachineId
             : online[0]!.machine_id;
-          if (chosen !== currentMachineId) {
+          const machineChanged = chosen !== currentMachineId;
+          if (machineChanged) {
             setActiveMachineId(chosen);
             setCurrentMachineId(chosen);
           }
-          if (pairing.kind === 'error' || pairing.kind === 'loading') {
+          if (machineChanged || pairing.kind === 'error' || pairing.kind === 'loading') {
             void pairingApi.inspect()
               .then((next) => { if (!cancelled) setPairing(stateFromInfo(next)); })
               .catch((err) => {
@@ -184,6 +185,8 @@ function App() {
               });
           }
         } else {
+          setActiveMachineId(null);
+          setCurrentMachineId(null);
           if (pairing.kind === 'loading' || pairing.kind === 'error') {
             setPairing({ kind: 'error', message: 'Waiting for machine daemon to connect to relay...' });
           }

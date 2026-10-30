@@ -40,9 +40,9 @@ export function PairingScreen({
   return <main className="pairing-page"><section className="pairing-card" aria-labelledby="pairing-title">
     <div className="pairing-heading"><div className="pairing-brand"><span className="pairing-mark"><Icon name="shardrail"/></span><span>Shardrail <span className="pairing-context">{isRelay ? (machineId ? `REMOTE: ${machineId}` : 'RELAY CONNECTED') : 'LOCAL DAEMON'}</span></span></div><ThemeToggle/></div>
     <div className="pairing-intro"><p className="eyebrow">SECURE ENROLLMENT</p><h1 id="pairing-title">{browserMode ? 'Pair this browser' : 'Pair this desktop'}</h1><p>Verify the daemon identity before granting this client access.</p></div>
-    {availableMachines && availableMachines.length > 1 ? (
+    {availableMachines && availableMachines.length > 0 ? (
       <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: '0.85rem' }}>Select Machine:</span>
+        <span style={{ fontSize: '0.85rem' }}>{availableMachines.length > 1 ? 'Select Machine:' : 'Target Machine:'}</span>
         {availableMachines.map((m) => (
           <Button
             key={m.machine_id}
