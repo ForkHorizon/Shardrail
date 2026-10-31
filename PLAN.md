@@ -75,23 +75,23 @@ Stage gate: all tasks of the stage accepted by the owner; CI green in every touc
 
 ### Stage 0. Put the project in order
 
-**T0.1 Inventory and split map** (analysis only, no changes)
-- [R] Build a table "directory / crate / package → Core | Web | archive | delete-after-confirmation". Cover `crates/*`, `packages/*`, `schema/`, `scripts/`, `test-vectors/`, `apps/*`, `deploy/`, `docs/`, `planning/`, `spikes/`, `archive/`, `.github/workflows`, `deny.toml`, `rust-toolchain.toml`.
-- [R] Find dependencies between parts: what `relay` and `shardraild` share; what the UI needs from `protocol` (via `packages/contracts`); where the UI gets `packages/client`; what `s5-prototype` uses from `s5-swift`/`src-tauri`.
-- [R] Find every path hard-coded in scripts and CI (`scripts/*`, `.github/workflows/ci.yml`, `dev-try.sh`, `build.rs`, which compiles in a git-root path) that will break after the split.
-- [R] List branches (`w7…w12`, `p1a/*`, `s1/*`): which are merged into `main`, which are not, and what unmerged work they carry.
-- [D] Write `docs/tasks/T0.1-split-map.md`: the final map, risks, order of actions.
+**T0.1 Inventory and split map** [DONE 2026-10-31, see `docs/tasks/T0.1-split-map.md`] (analysis only, no changes)
+- [x] [R] Build a table "directory / crate / package → Core | Web | archive | delete-after-confirmation". Cover `crates/*`, `packages/*`, `schema/`, `scripts/`, `test-vectors/`, `apps/*`, `deploy/`, `docs/`, `planning/`, `spikes/`, `archive/`, `.github/workflows`, `deny.toml`, `rust-toolchain.toml`.
+- [x] [R] Find dependencies between parts: what `relay` and `shardraild` share; what the UI needs from `protocol` (via `packages/contracts`); where the UI gets `packages/client`; what `s5-prototype` uses from `s5-swift`/`src-tauri`.
+- [x] [R] Find every path hard-coded in scripts and CI (`scripts/*`, `.github/workflows/ci.yml`, `dev-try.sh`, `build.rs`, which compiles in a git-root path) that will break after the split.
+- [x] [R] List branches (`w7…w12`, `p1a/*`, `s1/*`): which are merged into `main`, which are not, and what unmerged work they carry.
+- [x] [D] Write `docs/tasks/T0.1-split-map.md`: the final map, risks, order of actions.
 - Acceptance: the owner approved the map. T0.2 does not start without it.
 
-**T0.2 Create Shardrail_Core**
-- [D] Repository `Shardrail_Core` (already created on GitHub, empty): move code per the T0.1 map as a clean import (one initial commit; the message links the source repository and source commit).
-- [D] Cargo workspace (protocol, journal, session-core, coordinator, shardraild, fake-acp, and the relay-client part if any), `packages/contracts`, `packages/client`, `schema/`, `rust-toolchain.toml`, `deny.toml`, `Cargo.lock`, npm lockfiles.
-- [D] Remove hard-coded absolute paths and the `build.rs` binding to a foreign git root.
-- [D] CI: fmt, clippy, test, deny, contract generation + drift check, client typecheck and tests.
-- [D] Choose how contracts are published to Web: a versioned dependency (git tag or package). Justify the choice in the task note.
-- [T] Fresh clone → build → all checks green. Daemon tests with the fake agent pass.
-- [P] Build a release `shardraild` on the M5.
-- [G] Protect `main`, PR template, tag `v0.0.1-import`.
+**T0.2 Create Shardrail_Core** [DONE 2026-10-31, see `docs/tasks/T0.2-core-setup.md`]
+- [x] [D] Repository `Shardrail_Core` (already created on GitHub, empty): move code per the T0.1 map as a clean import (one initial commit; the message links the source repository and source commit).
+- [x] [D] Cargo workspace (protocol, journal, session-core, coordinator, shardraild, fake-acp, and the relay-client part if any), `packages/contracts`, `packages/client`, `schema/`, `rust-toolchain.toml`, `deny.toml`, `Cargo.lock`, npm lockfiles.
+- [x] [D] Remove hard-coded absolute paths and the `build.rs` binding to a foreign git root.
+- [x] [D] CI: fmt, clippy, test, deny, contract generation + drift check, client typecheck and tests.
+- [x] [D] Choose how contracts are published to Web: a versioned dependency (git tag or package). Justify the choice in the task note.
+- [x] [T] Fresh clone → build → all checks green. Daemon tests with the fake agent pass.
+- [x] [P] Build a release `shardraild` on the M5.
+- [x] [G] Protect `main`, PR template, tag `v0.0.1-import`.
 - Acceptance: Core builds and tests independently of Web.
 
 **T0.3 Create/clean Shardrail_Web**
