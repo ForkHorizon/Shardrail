@@ -1,53 +1,51 @@
-# Agent rules
+# Shardrail_Web — Agent Rules
 
-These rules follow `planning/11-modules.md` §3 and `planning/08-ui-ux.md` §6. The plan is the authority when a rule here is unclear.
+These rules govern all work in `Shardrail_Web`. Shared rules across the Shardrail workspace are defined in §7 of `PLAN.md`.
 
-- Read the relevant planning sections before changing a module. Keep changes within the requested phase and record uncovered decisions in `docs/dev/foundations-status.md`.
-- Do not run providers, call model APIs, or add provider integration without explicit authorization. Never use experimental provider APIs.
-- Direct dependencies are allowlisted here: Rust `serde`, `serde_json`, `schemars`, `thiserror`, `uuid`, `rusqlite`, `tokio`, `clap`, `nix`, `ed25519-dalek`, `sha2`, `futures-util` pinned to `0.3.31`, `tokio-tungstenite` pinned to `0.30.0`; dev-only `tempfile`, `proptest`; TypeScript `json-schema-to-typescript`, `typescript`, `@types/node`; runtime `@noble/ed25519` pinned to `3.1.0` for the client handshake (D62). Additions require owner authorization and an update here; keep all lockfiles committed. `cargo-deny` checks the Rust dependency graph. Check official documentation for pinned dependencies before relying on APIs.
-- S5 prototype-only direct dependencies are also authorized for the tracked spike: Rust `tauri`, `tauri-build`; TypeScript runtime `@tanstack/react-virtual`, `@tauri-apps/api`, `react`, `react-aria-components`, `react-dom`, `react-markdown`, `rehype-sanitize`; TypeScript development `@axe-core/playwright`, `@eslint/js`, `@playwright/test`, `@tauri-apps/cli`, `@types/react`, `@types/react-dom`, `@vitejs/plugin-react`, `babel-plugin-react-compiler`, `eslint`, `eslint-plugin-jsx-a11y`, `eslint-plugin-react-compiler`, `eslint-plugin-react-hooks`, `globals`, `tsx`, `typescript-eslint`, `vite`, `vitest`, `zod-validation-error`. These packages are confined to `apps/s5-prototype`; the UI stack is specified in `planning/08-ui-ux.md` §6.
-- `fake-indexeddb` pinned to `6.2.4` is authorized as an S5-only development dependency for testing IndexedDB key persistence.
-- Rust contract types are the source of truth. Export JSON Schema to `schema/`, generate TypeScript from that schema, and never hand-edit generated files.
-- Approval defaults, failures, disconnects, timeouts and recovery must never produce `allow`. Journal approval intent durably before writing a provider response.
-- Durable journal events are append-only. Journal errors fail closed; do not dispatch or send an approval without a durable write.
-- Never use repository content as executable configuration. Provider output and agent-authored approval text are untrusted.
-- Keep Rust safe (`unsafe_code = forbid`); resolve all Clippy warnings. Put protocol behavior in fixtures/fake agents rather than provider mocks.
-- Do not use “protected” as a UI/session status. v1 uses a per-session verification checklist and the “approvals not protected” host banner.
-- Every change must pass the repository checks below before commit. Do not commit a red tree.
+## Web UI & Relay Invariants
+1. **Contract Consumption**:
+   - Web UI consumes `@shardrail/contracts` and `@shardrail/client` as versioned dependencies from `Shardrail_Core`.
+   - Never vendor, duplicate, or hand-edit protocol contracts in this repository.
+2. **Relay Blind Hub Architecture**:
+   - `crates/relay` is a stateless WebSocket routing proxy for end-to-end encrypted session payloads between daemons and clients.
+   - The relay must never inspect, parse, decrypt, or log E2E payload content.
+   - Rust code in `crates/relay` must enforce `unsafe_code = forbid` and pass all Clippy lints with zero warnings.
+3. **UI Security & Rendering**:
+   - All agent output, markdown transcripts, and external inputs are untrusted.
+   - Markdown must be strictly sanitized using `rehype-sanitize` before rendering. Direct HTML injection or arbitrary script execution is strictly forbidden.
+   - No secrets, authorization tokens, or private keys in URLs or local storage without encryption.
+4. **Fail-Closed Approval UI**:
+   - Approval interactions in the UI must require explicit confirmation.
+   - Reconnections, page reloads, expired nonces, or stale sessions must immediately invalidate pending approval state.
+   - Never use "protected" as a session status.
+5. **Accessibility & Design**:
+   - All interactive UI form controls use React Aria Components.
+   - Zero Axe accessibility violations across light and dark themes.
+6. **Dependency Control**:
+   - Dependencies must be pinned and approved.
+   - Rust dependencies are checked with `cargo deny check`.
+   - npm dependencies in `apps/web` are checked with `node scripts/check-npm-licenses.mjs`.
 
-## Checks
+## Verification Commands
 
-```sh
+Before opening a PR or claiming task completion, all checks below must pass cleanly:
+
+```bash
+# Rust relay verification
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo deny check
-cargo fmt --manifest-path apps/s5-prototype/src-tauri/Cargo.toml -- --check
-cargo clippy --manifest-path apps/s5-prototype/src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path apps/s5-prototype/src-tauri/Cargo.toml
-npm --prefix packages/contracts ci
-npm --prefix packages/client ci
-npm --prefix packages/client run typecheck
-npm --prefix packages/client test
-scripts/check-schema-drift.sh
+
+# Web UI checks and unit tests
+node scripts/check-npm-licenses.mjs
+npm --prefix apps/web run build
+npm --prefix apps/web test
+
+# Browser E2E suite (with Core shardraild binary)
+SHARDRAILD_BIN=/path/to/shardraild npm --prefix apps/web run test:e2e
 ```
 
-## Dependency references
+## Shared Repository Rules
 
-| Dependency | Version source | Documentation |
-| --- | --- | --- |
-| Rust toolchain | `rust-toolchain.toml` | https://doc.rust-lang.org/ |
-| serde / serde_json | `Cargo.lock` | https://serde.rs/ |
-| schemars | `Cargo.lock` | https://docs.rs/schemars/ |
-| rusqlite | `Cargo.lock` | https://docs.rs/rusqlite/ |
-| uuid | `Cargo.lock` | https://docs.rs/uuid/ |
-| thiserror | `Cargo.lock` | https://docs.rs/thiserror/ |
-| tokio | `Cargo.lock` | https://docs.rs/tokio/ |
-| clap | `Cargo.lock` | https://docs.rs/clap/ |
-| nix | `Cargo.lock` | https://docs.rs/nix/ |
-| ed25519-dalek | `Cargo.lock` | https://docs.rs/ed25519-dalek/ |
-| sha2 | `Cargo.lock` | https://docs.rs/sha2/ |
-| futures-util | `Cargo.lock` | https://docs.rs/futures-util/0.3.31/ |
-| tokio-tungstenite | `Cargo.lock` | https://docs.rs/tokio-tungstenite/0.30.0/ |
-| tempfile / proptest | `Cargo.lock` | https://docs.rs/ |
-| json-schema-to-typescript | `packages/contracts/package-lock.json` | https://github.com/bcherny/json-schema-to-typescript |
+Refer to `PLAN.md` §7 for workspace rules regarding branch hygiene, commit conventions, PR checklists, and live agent testing permissions.

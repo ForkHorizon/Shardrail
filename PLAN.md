@@ -105,13 +105,13 @@ Stage gate: all tasks of the stage accepted by the owner; CI green in every touc
 - Acceptance: Web builds independently; the Web + Core combination passes E2E with the fake agent. (Details: `docs/tasks/T0.3-web-setup.md`)
 
 **T0.4 Documentation and rules**
-- [D] Keep `PLAN.md` in Web; sync the workspace-root `Shardrail/CLAUDE.md` (repositories and relations) and a `README` in each repository (what it is, how to build, how to run, where the plan is).
-- [D] Split rules: `AGENTS.md` in Core (code, security, dependencies) and in Web (UI, relay, deploy); common rules by reference to §7 of this plan. Remove outdated statements ("Stage 0, no code", "do not run providers", "endless gates").
-- [D] `planning/*`: add `planning/README.md` saying "ARCHIVE, source of truth is PLAN.md". Keep the decision log and security docs as reference; mark decisions that contradict the new course (§5) as "superseded".
-- [D] Add the template `docs/tasks/_template.md` for task notes.
-- [T] Link check across documents (script or manual): no link to a non-existent path.
-- [G] Rebuild the code graph with `graphify update .` from the workspace root.
-- Acceptance: a new agent entering the workspace root finds where everything is and what to do next within 5 minutes.
+- [x] [D] Keep `PLAN.md` in Web; sync the workspace-root `Shardrail/CLAUDE.md` (repositories and relations) and a `README` in each repository (what it is, how to build, how to run, where the plan is).
+- [x] [D] Split rules: `AGENTS.md` in Core (code, security, dependencies) and in Web (UI, relay, deploy); common rules by reference to §7 of this plan. Remove outdated statements ("Stage 0, no code", "do not run providers", "endless gates").
+- [x] [D] `planning/*`: add `planning/README.md` saying "ARCHIVE, source of truth is PLAN.md". Keep the decision log and security docs as reference; mark decisions that contradict the new course (§5) as "superseded".
+- [x] [D] Add the template `docs/tasks/_template.md` for task notes.
+- [x] [T] Link check across documents (script or manual): no link to a non-existent path.
+- [x] [G] Rebuild the code graph with `graphify update .` from the workspace root.
+- Acceptance: a new agent entering the workspace root finds where everything is and what to do next within 5 minutes. (Details: `docs/tasks/T0.4-docs-and-rules.md`)
 
 **T0.5 Baseline and test infrastructure**
 - [R] Versions and installation of Codex and Claude Code on the M5 (and M1 if reachable): `codex --version`, `claude --version`, how login works, where configs and sessions live. Read-only; do not run models.
