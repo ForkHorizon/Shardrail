@@ -127,12 +127,12 @@ Stage gate: all tasks of the stage accepted by the owner; CI green in every touc
 ### Stage 1. Machines
 
 **T1.1 Machine model and registry**
-- [R] How a machine, pairing and relay discovery work now (`relay`, `shardraild`, UI code); what is already stored (keys, `machine_id`).
-- [D] Machine model: id, name, OS/architecture, daemon version, discovered agents (name, version, forms CLI/GUI, install path).
-- [D] Agent discovery on a machine: presence of `codex`, `claude`, and GUI apps (install paths on macOS/Linux), versions.
-- [D] Daemon heartbeat → relay; online/offline status with reason and last-contact time.
-- [T] Unit and integration tests; scenarios: daemon stopped, relay restarted, network lost.
-- Acceptance: the UI shows the machine list with state and discovered agents.
+- [x] [R] How a machine, pairing and relay discovery work now (`relay`, `shardraild`, UI code); what is already stored (keys, `machine_id`).
+- [x] [D] Machine model: id, name, OS/architecture, daemon version, discovered agents (name, version, forms CLI/GUI, install path).
+- [x] [D] Agent discovery on a machine: presence of `codex`, `claude`, and GUI apps (install paths on macOS/Linux), versions.
+- [x] [D] Daemon heartbeat → relay; online/offline status with reason and last-contact time.
+- [x] [T] Unit and integration tests; scenarios: daemon stopped, relay restarted, network lost.
+- Acceptance: the UI shows the machine list with state and discovered agents. (Details: `docs/tasks/T1.1-machine-model.md`)
 
 **T1.2 Install Core on a new machine**
 - [R] macOS (launchd) and Linux (systemd) requirements; where to keep data and logs; how to update binaries.
