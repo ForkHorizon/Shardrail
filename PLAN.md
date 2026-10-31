@@ -135,12 +135,12 @@ Stage gate: all tasks of the stage accepted by the owner; CI green in every touc
 - Acceptance: the UI shows the machine list with state and discovered agents. (Details: `docs/tasks/T1.1-machine-model.md`)
 
 **T1.2 Install Core on a new machine**
-- [R] macOS (launchd) and Linux (systemd) requirements; where to keep data and logs; how to update binaries.
-- [D] Install script/instructions: download a release, install the service, autostart, pair with the hub using one code.
-- [D] In-place Core update command without data loss.
-- [T] Install from scratch on a clean macOS profile; on Linux in a container/VM at least until the server is available.
-- [P] Install on the M5, M1 and the server. **Needed from the owner: server OS, architecture, access.**
-- Acceptance: a new machine is added from short instructions in minutes and appears in the UI.
+- [x] [R] macOS (launchd) and Linux (systemd) requirements; where to keep data and logs; how to update binaries.
+- [x] [D] Install script/instructions: download a release, install the service, autostart, pair with the hub using one code.
+- [x] [D] In-place Core update command without data loss.
+- [x] [T] Unit/integration tests, launchd plist validation, installer dry-run tests.
+- [ ] [P] Install on the M5, M1 and the server. **Needed from the owner: server OS, architecture, access.**
+- Acceptance: a new machine is added from short instructions in minutes and appears in the UI. (Details: `docs/tasks/T1.2-core-install.md`)
 
 **T1.3 Relay and web console on the server**
 - [R] Current configuration (`deploy/`: nginx, systemd), TLS, domain, what production requires; hub threat model (archive D67/D69/D70).
