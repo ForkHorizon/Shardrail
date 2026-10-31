@@ -95,14 +95,14 @@ Stage gate: all tasks of the stage accepted by the owner; CI green in every touc
 - Acceptance: Core builds and tests independently of Web.
 
 **T0.3 Create/clean Shardrail_Web**
-- [D] Web keeps: the UI (rename `s5-prototype` to a meaningful name, e.g. `apps/web`), `relay`, `deploy/`, `PLAN.md`, `AGENTS.md`, `docs/`, the document archive (`planning/` marked archive).
-- [D] The UI consumes contracts and the client from Core by the method chosen in T0.2, with no copies.
-- [D] Take out of the active tree: `spikes/`, `apps/s5-swift`, `src-tauri`, `archive/`, logs, screenshots. Do not delete irreversibly: move to an archive branch or a separate archive repository first; delete only after owner confirmation.
-- [D] Review Web CI: UI build, UI tests, relay build; E2E tests that need the daemon take the binary from a Core release.
-- [T] Fresh clone of Web → build UI and relay → tests. The Web + Core E2E link works with the fake agent.
-- [P] Deploy UI + relay locally per `deploy/README.md` and confirm the instructions work.
-- [G] Protect `main`, initial commit, tags.
-- Acceptance: Web builds independently; the Web + Core combination passes E2E with the fake agent.
+- [x] [D] Web keeps: the UI (rename `s5-prototype` to a meaningful name, e.g. `apps/web`), `relay`, `deploy/`, `PLAN.md`, `AGENTS.md`, `docs/`, the document archive (`planning/` marked archive).
+- [x] [D] The UI consumes contracts and the client from Core by the method chosen in T0.2, with no copies.
+- [x] [D] Take out of the active tree: `spikes/`, `apps/s5-swift`, `src-tauri`, `archive/`, logs, screenshots. Do not delete irreversibly: move to an archive branch or a separate archive repository first; delete only after owner confirmation.
+- [x] [D] Review Web CI: UI build, UI tests, relay build; E2E tests that need the daemon take the binary from a Core release.
+- [x] [T] Fresh clone of Web → build UI and relay → tests. The Web + Core E2E link works with the fake agent.
+- [x] [P] Deploy UI + relay locally per `deploy/README.md` and confirm the instructions work.
+- [x] [G] Protect `main`, initial commit, tags.
+- Acceptance: Web builds independently; the Web + Core combination passes E2E with the fake agent. (Details: `docs/tasks/T0.3-web-setup.md`)
 
 **T0.4 Documentation and rules**
 - [D] Keep `PLAN.md` in Web; sync the workspace-root `Shardrail/CLAUDE.md` (repositories and relations) and a `README` in each repository (what it is, how to build, how to run, where the plan is).

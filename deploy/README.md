@@ -24,10 +24,10 @@ The compiled binary will be at `target/release/shardrail-relay` (or `target/x86_
 
 ### B. Web Console SPA
 ```bash
-npm --prefix apps/s5-prototype ci
-npm --prefix apps/s5-prototype run build
+npm --prefix apps/web ci
+npm --prefix apps/web run build
 ```
-Static SPA files are generated in `apps/s5-prototype/dist/`.
+Static SPA files are generated in `apps/web/dist/`.
 
 ---
 
@@ -59,7 +59,7 @@ Static SPA files are generated in `apps/s5-prototype/dist/`.
 ### B. Install Web Console Static Files
 ```bash
 sudo mkdir -p /opt/shardrail/dist
-sudo cp -r apps/s5-prototype/dist/* /opt/shardrail/dist/
+sudo cp -r apps/web/dist/* /opt/shardrail/dist/
 sudo chown -R www-data:www-data /opt/shardrail/dist
 ```
 

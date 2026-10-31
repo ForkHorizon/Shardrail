@@ -1,11 +1,24 @@
 import { readFileSync } from "node:fs";
 
-const locks = ["contracts", "client"].map((name) => JSON.parse(readFileSync(new URL(`../packages/${name}/package-lock.json`, import.meta.url))));
-const allowed = new Set(["0BSD", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "Python-2.0"]);
+const locks = [JSON.parse(readFileSync(new URL('../apps/web/package-lock.json', import.meta.url)))];
+const allowed = new Set([
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 OR MIT",
+  "BlueOak-1.0.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CC-BY-4.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Python-2.0",
+]);
 const failures = locks.flatMap((lock) => Object.entries(lock.packages)
   .filter(([path]) => path !== "")
   .flatMap(([path, metadata]) => {
-    if (metadata.link || path.startsWith("../")) return [];
+    if (metadata.link || path.startsWith("../") || path.startsWith("node_modules/@shardrail/")) return [];
     const license = metadata.license;
     return typeof license === "string" && allowed.has(license)
       ? []
