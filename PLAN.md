@@ -114,13 +114,13 @@ Stage gate: all tasks of the stage accepted by the owner; CI green in every touc
 - Acceptance: a new agent entering the workspace root finds where everything is and what to do next within 5 minutes. (Details: `docs/tasks/T0.4-docs-and-rules.md`)
 
 **T0.5 Baseline and test infrastructure**
-- [R] Versions and installation of Codex and Claude Code on the M5 (and M1 if reachable): `codex --version`, `claude --version`, how login works, where configs and sessions live. Read-only; do not run models.
-- [D] Create the test repository `Shardrail_TestRepo` (no secrets) for live runs, plus a reset-to-initial-state script.
-- [D] Live-run protocol (who, when, what is allowed/forbidden; logs must not contain secrets). Agree it with the owner.
-- [T] Full run of Core and Web checks. Record "green / red / flaky".
-- [T] Live smoke of Codex through the existing daemon (after the owner's permission): create a session, send a prompt, receive an approval, interrupt.
-- [V] "Day 0 state" report: what really works and what does not.
-- Acceptance: the owner has an honest list of "what works today"; all later work starts from it.
+- [x] [R] Versions and installation of Codex and Claude Code on the M5 (and M1 if reachable): `codex --version`, `claude --version`, how login works, where configs and sessions live. Read-only; do not run models.
+- [x] [D] Create the test repository `Shardrail_TestRepo` (no secrets) for live runs, plus a reset-to-initial-state script.
+- [x] [D] Live-run protocol (who, when, what is allowed/forbidden; logs must not contain secrets). Agree it with the owner.
+- [x] [T] Full run of Core and Web checks. Record "green / red / flaky".
+- [ ] [T] Live smoke of Codex through the existing daemon (after the owner's permission): create a session, send a prompt, receive an approval, interrupt.
+- [x] [V] "Day 0 state" report: what really works and what does not.
+- Acceptance: the owner has an honest list of "what works today"; all later work starts from it. (Details: `docs/tasks/T0.5-baseline-report.md`)
 
 ---
 
